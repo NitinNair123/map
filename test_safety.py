@@ -51,7 +51,7 @@ class RouteTest(unittest.TestCase):
         self.assertGreater(r["safest"]["length_m"], 350)
         self.assertLess(r["fastest"]["length_m"], 300)
         self.assertGreater(r["safest"]["score"], r["fastest"]["score"])
-        self.assertTrue(any("open places" in s for s in r["safest"]["reasons"]))
+        self.assertTrue(any("places open now" in s for s in r["safest"]["reasons"]))
         self.assertIn("Lighting", r["safest"]["factors"])
 
     def test_identical_routes_are_flagged(self):
@@ -173,14 +173,17 @@ class TileTest(unittest.TestCase):
         self.assertTrue(any(e["reports"] for e in area.edges))
 
 
-class LightingGuessTest(unittest.TestCase):
-    def test_untagged_streets_get_a_lighting_guess(self):
-        els = [way(1, [1, 2], [A, B], highway="primary"), way(2, [3, 4], [(28.001, 77.0), (28.001, 77.003)], highway="track")]
+class NoGuessingTest(unittest.TestCase):
+    def test_unknown_lighting_and_hours_are_left_out(self):
+        els = [way(1, [1, 2], [A, B], highway="primary"), node(5, (28.0001, 77.0015), shop="bakery")]
         area = Area({"elements": els})
-        light = lambda i: area.factors(area.edges[i], NIGHT, 0)[0]["lighting"]
-        self.assertGreater(light(0), 0.5)  # main roads in town are almost always lit
-        self.assertLess(light(1), 0.2)
-
+        feats, _ = area.factors(area.edges[0], NIGHT, 0)
+        self.assertIsNone(feats["lighting"])  # no lit tag and no lamps: unknown, not guessed
+        self.assertIsNone(feats["activity"])  # a shop with no published hours: unknown, not assumed open
+        r = area.routes(A, B, NIGHT)[0]
+        self.assertIsNone(r["factors"]["Lighting"])
+        self.assertTrue(r["low_data"])
+        self.assertIn("No lighting data for 100%", r["reasons"])
 
 if __name__ == "__main__":
     unittest.main()

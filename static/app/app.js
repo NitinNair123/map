@@ -312,10 +312,11 @@ function renderRoutes() {
       <small>${x.same_as ? `Same as ${LABEL[x.same_as].toLowerCase()}` : `${x.minutes} min${extra > 0 ? ` · +${extra}` : ""}`}</small></button>`;
   }).join("");
   const factors = Object.entries(r.factors).map(([k, v]) =>
-    `<div class="bar"><span>${esc(k)}</span><span class="track"><span class="fill" style="display:block;width:${v}%;background:${COLOR[scoreClass(v)]}"></span></span><span>${v}</span></div>`).join("");
+    v === null ? `<div class="bar"><span>${esc(k)}</span><span class="track"></span><span class="muted">No data</span></div>`
+      : `<div class="bar"><span>${esc(k)}</span><span class="track"><span class="fill" style="display:block;width:${v}%;background:${COLOR[scoreClass(v)]}"></span></span><span>${v}</span></div>`).join("");
   const notes = [];
   if (r.same_as) notes.push(`This is the same way as the ${LABEL[r.same_as].toLowerCase()} route.`);
-  if (r.low_data) notes.push("We have little data for these streets, so treat this score as a rough guide.");
+  if (r.low_data) notes.push("Most of this route has no lighting data on the map. The score uses only what is mapped, so treat it as a rough guide.");
   if (state.rain) notes.push("It's raining, so streets may be emptier than usual.");
   if (r.weakest && r.weakest.score < 45) notes.push(`Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because of ${r.weakest.why.toLowerCase()}. It's dashed on the map.`);
   const dusk = r.daylight > 0 && r.daylight < 1;
@@ -338,7 +339,7 @@ function renderRoutes() {
       <li class="info">${r.daylight >= 1 ? "Daylight" : dusk ? "Dusk" : "After dark"}</li>
     </ul>
     ${notes.map((n) => `<div class="note">${icon("alert")}<span>${esc(n)}</span></div>`).join("")}
-    <details class="why"><summary>Directions · ${r.steps.length - 1} steps</summary><ol class="steps-list">${r.steps.map((st) =>
+    <details class="why"><summary>Directions · ${r.steps.length - 1} ${r.steps.length === 2 ? "step" : "steps"}</summary><ol class="steps-list">${r.steps.map((st) =>
       `<li><span class="turn">${turnIcon(st.turn)}</span>${esc(st.text)}<small>${st.dist ? fmtDist(st.dist) : ""}</small></li>`).join("")}</ol></details>
     <details class="why"><summary>Why this score?</summary><div class="bars">${factors}</div>
       <p class="muted" style="margin:0 0 12px">Scores compare routes. They mean <b>safer</b>, never guaranteed safe. Trust your instincts.</p></details>

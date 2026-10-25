@@ -32,8 +32,8 @@ and open the https link on the phone. Then use "Add to Home Screen".
 ### Optional data
 
 - **Mapillary** (free): street lights and CCTV cameras detected in street-level photos. Get a client token at
-  https://www.mapillary.com/dashboard/developers and start the server with it, for example
-  `MAPILLARY_TOKEN='MLY|…' python server.py`, or in PowerShell `$env:MAPILLARY_TOKEN="MLY|…"; py server.py`.
+  https://www.mapillary.com/dashboard/developers and put it in `data/mapillary_token.txt` (gitignored), or set
+  the `MAPILLARY_TOKEN` environment variable.
 
 - `data/incidents.csv` holds incident history from police open data, news or a campus security log.
   The columns are `lat,lon,type,when`, for example `28.61,77.21,harassment,2026-09-14T22:30`.
@@ -42,13 +42,14 @@ and open the https link on the phone. Then use "Add to Home Screen".
 
 ## How the score works
 
-Each road segment is scored from what's near it at the chosen time. Weights blend smoothly from day to
+Each road segment is scored from what's near it at the chosen time. Nothing is guessed: when a street has no
+lighting data, or nearby places publish no opening hours, that factor is left out of its score and the app says so. Weights blend smoothly from day to
 night using the real sun position for your area, so dusk counts as dusk.
 
 | Factor | Day | Dark | What it uses |
 |---|---|---|---|
-| Lighting | 5 | 25 | `lit=*` tags, street lamps within 20 m, broken-light reports; untagged streets get a guess from road type, built-up land and lit shopfronts |
-| Open places | 25 | 25 | shops, cafes, offices, schools, temples, clinics, pharmacies, petrol pumps **open at that time** (OSM `opening_hours`), plus housing and market areas |
+| Lighting | 5 | 25 | `lit=*` tags, street lamps within 20 m (OSM and Mapillary), broken-light reports |
+| Open places | 25 | 25 | shops, cafes, offices, schools, temples, clinics, pharmacies, petrol pumps **open at that time** (OSM `opening_hours`) |
 | Police & CCTV | 10 | 12 | police station within 400/800 m, cameras within 50 m |
 | Footpath & road | 25 | 13 | road type, sidewalks, underpasses (bad), foot overbridges (bad at night) |
 | Surroundings | 15 | 15 | parks, construction sites, rail lines, scrub, cemeteries and industrial land next to the road |

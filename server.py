@@ -46,6 +46,10 @@ def load_incidents():
 
 
 os.makedirs(DATA_DIR, exist_ok=True)
+TOKEN_PATH = os.path.join(DATA_DIR, "mapillary_token.txt")  # data/ is gitignored, so the token never reaches git
+if not os.environ.get("MAPILLARY_TOKEN") and os.path.exists(TOKEN_PATH):
+    os.environ["MAPILLARY_TOKEN"] = open(TOKEN_PATH).read().strip()
+print("Mapillary lights and cameras:", "on" if os.environ.get("MAPILLARY_TOKEN") else "off (no token)", flush=True)
 store = TileStore(os.path.join(DATA_DIR, "tiles"),
                   reports=json.load(open(REPORTS_PATH)) if os.path.exists(REPORTS_PATH) else [],
                   incidents=load_incidents(),

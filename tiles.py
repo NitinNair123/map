@@ -25,7 +25,7 @@ QUERY = """
 way["highway"~"^(trunk|primary|secondary|tertiary|primary_link|secondary_link|tertiary_link|unclassified|residential|living_street|pedestrian|service|footway|path|cycleway|steps|track)$"]["foot"!="no"]["access"!~"^(private|no)$"]({bbox});
 out body geom qt;
 (
-  way["landuse"~"^(residential|commercial|retail|construction|brownfield|greenfield|cemetery|industrial|farmland|quarry|railway)$"]({bbox});
+  way["landuse"~"^(construction|brownfield|greenfield|cemetery|industrial|farmland|quarry|railway)$"]({bbox});
   way["natural"~"^(wood|scrub)$"]({bbox});
   way["leisure"="park"]({bbox});
   way["railway"="rail"]({bbox});

@@ -39,17 +39,9 @@ ROAD_SCORE = {
 }
 VEHICLE_ROADS = {"trunk", "primary", "secondary", "tertiary", "primary_link", "secondary_link", "tertiary_link", "unclassified", "residential"}
 
-# Chance a street is lit when OSM has no lit tag or lamps, by road type (most streets in India aren't tagged)
-LIT_PRIOR = {
-    "trunk": 0.8, "primary": 0.8, "secondary": 0.8, "tertiary": 0.7, "primary_link": 0.75, "secondary_link": 0.75,
-    "tertiary_link": 0.7, "residential": 0.5, "living_street": 0.5, "pedestrian": 0.6, "unclassified": 0.35,
-    "service": 0.3, "footway": 0.35, "cycleway": 0.3, "path": 0.15, "steps": 0.25, "track": 0.05,
-}
+# OSM lit=* values; a street with no tag, no lamps and no reports has unknown lighting and is left out, never guessed
 LIT_TAGS = {"yes": 1.0, "24/7": 1.0, "automatic": 1.0, "sunset-sunrise": 1.0, "interval": 0.7, "limited": 0.6,
             "no": 0.0, "disused": 0.0}
-# Built-up land that puts people and homes along a street
-LIVELY = {"residential", "commercial", "retail"}
-
 # Land next to the road: (score in daylight, score in the dark). Missing means ordinary built-up area (1.0).
 SURROUNDINGS = {
     "construction": (0.4, 0.1), "brownfield": (0.4, 0.1), "greenfield": (0.5, 0.2), "railway": (0.5, 0.2),
@@ -197,8 +189,6 @@ def surroundings_kind(tags):
             return tags[key]
     if tags.get("railway") == "rail":
         return "railway"
-    if tags.get("landuse") in LIVELY:
-        return tags["landuse"]
     return None
 
 
@@ -290,8 +280,7 @@ class Area:
             pts = z["pts"]
             if (z["closed"] and in_polygon(mid, pts)) or any(seg_dist(mid, p, q) <= 30 for p, q in zip(pts, pts[1:])):
                 kinds.add(z["kind"])
-        e["lively"] = sorted(kinds & LIVELY)
-        e["zones"] = sorted(kinds - LIVELY)
+        e["zones"] = sorted(kinds)
 
     def _junction_gaps(self):
         """For each edge, the length of the junction-free stretch it sits on and whether that stretch is a dead end."""
@@ -368,26 +357,27 @@ class Area:
     # ---- scoring ----
 
     def is_place_open(self, p, when):
-        o = is_open(p["hours"], when)
-        if o is not None:
-            return o
-        if p["kind"] == "haven":  # hospitals, pumps, pharmacies without hours are usually 24h
-            return True
-        return 9 <= when.hour < 22  # shortcut: guessed shop hours (Indian shops shut late), replace with Places API hours
+        """True or False from the place's published opening hours, None when it has none."""
+        return is_open(p["hours"], when)
 
     def factors(self, e, when, light):
-        """Each factor from 0 (worst) to 1 (best) for this edge at this time."""
+        """Each factor from 0 (worst) to 1 (best) for this edge at this time, or None when there is no data for it."""
         near = e["near"]
         dark = 1 - light
-        open_places = [i for i in near["place"] + near["haven"] if self.is_place_open(self.pois[i], when)]
+        status = [(i, self.is_place_open(self.pois[i], when)) for i in near["place"] + near["haven"]]
+        open_places = [i for i, o in status if o]
         if any(r["type"] == "broken_light" for r in e["reports"]):
             lighting = 0.0
         elif e["lit"] in LIT_TAGS:
             lighting = LIT_TAGS[e["lit"]]
-        else:  # no tag: lamps we can see, or a guess from the road type, built-up land and lit shopfronts
-            guess = LIT_PRIOR.get(e["highway"], 0.3) + 0.15 * bool(e["lively"]) + 0.1 * min(3, len(open_places))
-            lighting = max(e["lamp_level"], min(0.85, guess))
-        busy = 0.3 if {"commercial", "retail"} & set(e["lively"]) else 0.15 if e["lively"] else 0.0
+        elif near["lamp"]:
+            lighting = e["lamp_level"]
+        else:
+            lighting = None
+        if open_places or not status:
+            activity = min(1, len(open_places) / 3)
+        else:
+            activity = None if any(o is None for _, o in status) else 0.0  # places nearby, but no published hours
         police = 1.0 if e["police_m"] < 400 else 0.5 if e["police_m"] < 800 else 0.0
         path = ROAD_SCORE.get(e["highway"], 0.5)
         if e["highway"] in VEHICLE_ROADS and e["sidewalk"]:
@@ -405,7 +395,7 @@ class Area:
             escape = max(0.0, 1 - e["gap_m"] / 500)  # no side street for 500 m means nowhere to turn off
         return {
             "lighting": lighting,
-            "activity": min(1, len(open_places) / 3 + busy * (1 if 7 <= when.hour < 22 else 0.4)),
+            "activity": activity,
             "security": min(1, police + 0.3 * len(near["cctv"])),
             "path": max(0.0, min(1.0, path)),
             "surroundings": surroundings,
@@ -416,7 +406,8 @@ class Area:
     def edge_score(self, e, when, light, rain=False):
         feats, _ = self.factors(e, when, light)
         dark = 1 - light
-        s = sum((WEIGHTS[k][0] * light + WEIGHTS[k][1] * dark) * v for k, v in feats.items())
+        weights = {k: WEIGHTS[k][0] * light + WEIGHTS[k][1] * dark for k, v in feats.items() if v is not None}
+        s = 100 * sum(w * feats[k] for k, w in weights.items()) / sum(weights.values())  # unknown factors are left out
         s -= 10 * dark * min(2, len(e["near"]["nightlife"]))
         if rain:
             s -= 5  # rain empties streets and cuts visibility
@@ -441,11 +432,6 @@ class Area:
                 self._cache.clear()
             self._cache[key] = [self.edge_score(e, when, light, rain) for e in self.edges]
         return self._cache[key]
-
-    def has_data(self, e):
-        n = e["near"]
-        return e["lit"] in LIT_TAGS or bool(n["lamp"] or n["place"] or n["haven"] or n["cctv"] or n["transit"]
-                                            or e["lively"] or e["reports"] or e["incidents"])
 
     # ---- routing ----
 
@@ -500,9 +486,9 @@ class Area:
 
         isolated = run = 0.0
         haven_gap = gap = 0.0
-        factor_sum = defaultdict(float)
-        places, havens, lamps, cctv = set(), {}, set(), set()
-        lit_len = data_len = 0.0
+        factor_sum, factor_len = defaultdict(float), defaultdict(float)
+        places, havens, lamps, cctv, unknown_hours = set(), {}, set(), set(), set()
+        lit_len = dark_len = 0.0
         police_m = math.inf
         underpasses = 0
         zones = set()
@@ -510,7 +496,9 @@ class Area:
             e = self.edges[ei]
             feats, open_here = self.factors(e, when, light)
             for k, v in feats.items():
-                factor_sum[k] += v * e["length"]
+                if v is not None:
+                    factor_sum[k] += v * e["length"]
+                    factor_len[k] += e["length"]
             run = run + e["length"] if scores[ei] < 40 else 0.0
             isolated = max(isolated, run)
             gap = 0.0 if open_here else gap + e["length"]
@@ -520,8 +508,10 @@ class Area:
                 havens.setdefault(i, len(havens))
             lamps.update(e["near"]["lamp"])
             cctv.update(e["near"]["cctv"])
-            lit_len += e["length"] if feats["lighting"] >= 0.5 else 0
-            data_len += e["length"] if self.has_data(e) else 0
+            unknown_hours.update(i for i in e["near"]["place"] + e["near"]["haven"] if self.is_place_open(self.pois[i], when) is None)
+            if feats["lighting"] is not None:
+                lit_len += e["length"] if feats["lighting"] >= 0.5 else 0
+                dark_len += e["length"] if feats["lighting"] < 0.5 else 0
             police_m = min(police_m, e["police_m"])
             underpasses += e["underpass"]
             zones.update(e["zones"])
@@ -534,7 +524,13 @@ class Area:
         steps = self._steps(path, coords)
         turns = sum(st["turn"] not in ("straight", "arrive", "depart") for st in steps)
 
-        reasons = [f"{len(places)} open places along the way", f"{round(100 * lit_len / length)}% well lit"]
+        no_light = length - lit_len - dark_len
+        reasons = [f"{len(places)} places open now along the way"]
+        if unknown_hours:
+            reasons.append(f"{len(unknown_hours)} more with no published hours")
+        reasons.append(f"{round(100 * lit_len / length)}% lit, {round(100 * dark_len / length)}% unlit")
+        if no_light >= 1:
+            reasons.append(f"No lighting data for {round(100 * no_light / length)}%")
         if cctv:
             reasons.append(f"{len(cctv)} CCTV cameras")
         if police_m < 800:
@@ -543,21 +539,22 @@ class Area:
         if isolated >= 100:
             warnings.append(f"{round(isolated)} m isolated stretch")
         if haven_gap >= 300:
-            warnings.append(f"{round(haven_gap)} m with nowhere open to duck into")
+            warnings.append(f"{round(haven_gap)} m with nowhere known to be open")
         if underpasses:
             warnings.append("Goes through an underpass")
         for z in sorted(zones):
             if SURROUNDINGS[z][1] * (1 - light) + SURROUNDINGS[z][0] * light < 0.5:
                 warnings.append(f"Passes {z.replace('_', ' ')} land")
         weak_feats, _ = self.factors(weak, when, light)
-        weak_why = max(weak_feats, key=lambda k: (WEIGHTS[k][0] * light + WEIGHTS[k][1] * (1 - light)) * (1 - weak_feats[k]))
+        weak_why = max((k for k, v in weak_feats.items() if v is not None),
+                       key=lambda k: (WEIGHTS[k][0] * light + WEIGHTS[k][1] * (1 - light)) * (1 - weak_feats[k]))
         return {
             **base,
             "score": round(max(0, min(100, score))),
-            "low_data": data_len / length < 0.5,
+            "low_data": no_light / length > 0.5,
             "reasons": reasons,
             "warnings": warnings,
-            "factors": {FACTOR_LABELS[k]: round(100 * v / length) for k, v in factor_sum.items()},
+            "factors": {FACTOR_LABELS[k]: round(100 * factor_sum[k] / factor_len[k]) if factor_len[k] else None for k in WEIGHTS},
             "turns": turns,
             "steps": steps,
             "weakest": {"coords": [self.nodes[weak["a"]], self.nodes[weak["b"]]], "score": round(scores[path[weak_i][1]]),
@@ -596,7 +593,7 @@ class Area:
     def havens_near(self, pt, when, limit=5):
         """Closest places that are open right now and where someone can step in for help."""
         found = [(d, i) for i, d in self._near(pt, 1000)
-                 if self.pois[i]["kind"] in ("haven", "place", "police") and (self.pois[i]["kind"] == "police" or self.is_place_open(self.pois[i], when))]
+                 if self.pois[i]["kind"] in ("haven", "place", "police") and (self.pois[i]["kind"] == "police" or self.is_place_open(self.pois[i], when) is True)]
         found.sort()
         return [{"name": self.pois[i]["name"], "kind": self.pois[i]["kind"], "pt": self.pois[i]["pt"], "distance_m": round(d)}
                 for d, i in found[:limit]]
