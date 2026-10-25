@@ -31,6 +31,10 @@ and open the https link on the phone. Then use "Add to Home Screen".
 
 ### Optional data
 
+- **Mapillary** (free): street lights and CCTV cameras detected in street-level photos. Get a client token at
+  https://www.mapillary.com/dashboard/developers and start the server with it, for example
+  `MAPILLARY_TOKEN='MLY|…' python server.py`, or in PowerShell `$env:MAPILLARY_TOKEN="MLY|…"; py server.py`.
+
 - `data/incidents.csv` holds incident history from police open data, news or a campus security log.
   The columns are `lat,lon,type,when`, for example `28.61,77.21,harassment,2026-09-14T22:30`.
   The types are `assault, robbery, harassment, stalking, snatching, theft, other`.

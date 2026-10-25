@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from safety import REPORT_TYPES, dist
-from tiles import TileStore, TooFar
+from tiles import TileStore, TooFar, mapillary
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 REPORTS_PATH = os.path.join(DATA_DIR, "reports.json")
@@ -48,7 +48,8 @@ def load_incidents():
 os.makedirs(DATA_DIR, exist_ok=True)
 store = TileStore(os.path.join(DATA_DIR, "tiles"),
                   reports=json.load(open(REPORTS_PATH)) if os.path.exists(REPORTS_PATH) else [],
-                  incidents=load_incidents())
+                  incidents=load_incidents(),
+                  extras={"mapillary": mapillary} if os.environ.get("MAPILLARY_TOKEN") else {})
 
 
 def latlon(s):

@@ -44,6 +44,29 @@ out center tags;
 """
 
 
+# Objects Mapillary detects in street-level photos, as the OSM tags the scorer already understands
+MAPILLARY_KINDS = {"object--street-light": {"highway": "street_lamp"}, "object--cctv-camera": {"man_made": "surveillance"}}
+
+
+def mapillary(s, w, n, e):
+    """Street lights and CCTV cameras that Mapillary found in street-level photos of one tile."""
+    q = urllib.parse.urlencode({"access_token": os.environ["MAPILLARY_TOKEN"], "fields": "id,object_value,geometry",
+                                "bbox": f"{w},{s},{e},{n}", "object_values": ",".join(MAPILLARY_KINDS), "limit": 2000})
+    url, out = f"https://graph.mapillary.com/map_features?{q}", []
+    for _ in range(5):  # at most 10,000 objects per tile
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "SafeRoute/1.0"}), timeout=20) as r:
+            page = json.load(r)
+        for f in page.get("data", []):
+            if f.get("object_value") in MAPILLARY_KINDS:
+                lon, lat = f["geometry"]["coordinates"]
+                out.append({"type": "node", "id": f"mly{f['id']}", "lat": lat, "lon": lon,
+                            "tags": {**MAPILLARY_KINDS[f["object_value"]], "source": "mapillary"}})
+        url = page.get("paging", {}).get("next")
+        if not url:
+            break
+    return {"elements": out}
+
+
 class TooFar(ValueError):
     pass
 
@@ -69,9 +92,10 @@ def overpass(s, w, n, e):
 
 
 class TileStore:
-    def __init__(self, folder, fetch=overpass, reports=None, incidents=(), cache_size=6):
+    def __init__(self, folder, fetch=overpass, reports=None, incidents=(), cache_size=6, extras=None):
         self.folder = folder
         self.fetch = fetch
+        self.extras = extras or {}  # name -> fetch(s, w, n, e) for extra per-tile sources, cached beside the OSM tile
         self.reports = reports if reports is not None else []
         self.incidents = list(incidents)
         self.areas = OrderedDict()
@@ -80,11 +104,11 @@ class TileStore:
         self.lock = threading.Lock()
         os.makedirs(folder, exist_ok=True)
 
-    def _path(self, t):
-        return os.path.join(self.folder, f"{t[0]}_{t[1]}.json")
+    def _path(self, t, source=""):
+        return os.path.join(self.folder, f"{t[0]}_{t[1]}{'.' + source if source else ''}.json")
 
-    def _fresh(self, t):
-        p = self._path(t)
+    def _fresh(self, t, source=""):
+        p = self._path(t, source)
         return os.path.exists(p) and time.time() - os.path.getmtime(p) < TILE_MAX_AGE
 
     def _fetch_chunk(self, tiles):
@@ -113,7 +137,22 @@ class TileStore:
 
     def tile(self, t):
         with open(self._path(t)) as f:
-            return json.load(f)
+            osm = json.load(f)
+        for name, fetch in self.extras.items():
+            path = self._path(t, name)
+            with self.locks[(t, name)]:
+                if not self._fresh(t, name):
+                    try:
+                        extra = fetch(t[0] * TILE, t[1] * TILE, (t[0] + 1) * TILE, (t[1] + 1) * TILE)
+                    except (OSError, ValueError, KeyError) as err:  # an optional source being down must not block trips
+                        print(f"{name} {t}: failed ({err})", flush=True)
+                        continue
+                    with open(path + ".tmp", "w") as f:
+                        json.dump(extra, f)
+                    os.replace(path + ".tmp", path)
+                with open(path) as f:
+                    osm["elements"] += json.load(f)["elements"]
+        return osm
 
     def area(self, tiles):
         key = frozenset(tiles)
@@ -127,7 +166,8 @@ class TileStore:
                 chunks[(t[0] // CHUNK, t[1] // CHUNK)].append(t)
         with ThreadPoolExecutor(2) as ex:  # Overpass rate-limits per IP, so few parallel requests
             list(ex.map(self._fetch_chunk, chunks.values()))
-        parts = [self.tile(t) for t in sorted(key)]
+        with ThreadPoolExecutor(4) as ex:
+            parts = list(ex.map(self.tile, sorted(key)))
         seen, elements = set(), []
         for osm in parts:
             for el in osm["elements"]:

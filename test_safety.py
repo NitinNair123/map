@@ -159,6 +159,14 @@ class TileTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "No walkable streets"):
             store.for_trip(A, B)
 
+    def test_extra_source_adds_cameras_and_survives_failure(self):
+        cam = lambda *a: {"elements": [node("mly1", (28.0001, 77.0015), man_made="surveillance")]}
+        area = TileStore(self.dir, fetch=lambda *a: fixture(), extras={"mapillary": cam}).for_trip(A, B)
+        self.assertTrue(any(e["near"]["cctv"] for e in area.edges))
+        def down(*a):
+            raise OSError("down")
+        TileStore(tempfile.mkdtemp(), fetch=lambda *a: fixture(), extras={"mapillary": down}).for_trip(A, B)
+
     def test_report_reaches_cached_area(self):
         area = self.store.for_trip(A, B)
         self.store.add_report({"lat": 28.0005, "lon": 77.0015, "type": "harassment", "ts": time.time()})
