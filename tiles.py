@@ -123,9 +123,9 @@ def nightlights(s, w, n, e):
         for j, (red, green, blue) in enumerate(row):
             lum = 0.299 * red + 0.587 * green + 0.114 * blue
             lat, lon = s + (rows_n - i - 0.5) * NIGHT_CELL, w + (j + 0.5) * NIGHT_CELL
-            # shortcut: brightness scaled so the brightest Delhi cores (~180) count as fully lit; relative, not lux
+            # shortcut: the GIBS image is a picture, not radiance, and saturates over built-up areas; lit area vs dark, not street detail
             out.append({"type": "node", "id": f"nl{lat:.4f}_{lon:.4f}", "lat": lat, "lon": lon,
-                        "tags": {"nightlight": f"{min(1.0, lum / 180):.2f}"}})
+                        "tags": {"nightlight": f"{lum / 255:.2f}"}})
     return {"elements": out}
 
 
@@ -351,9 +351,6 @@ class TileStore:
         jobs += [(c, name) for name in self.extras if name not in self.background for c in self._missing(key, name)]
         with ThreadPoolExecutor(3) as ex:  # Overpass rate-limits per IP, so few parallel requests
             list(ex.map(lambda job: self._fetch_chunk(*job), jobs))
-        for name in self._background - {main}:
-            for c in self._missing(key, name):
-                self.pool.submit(self._fetch_chunk, c, name)
         parts = [self.tile(t, roads=main == "roads") for t in sorted(key)]
         seen, elements = set(), []
         for osm in parts:
@@ -373,6 +370,10 @@ class TileStore:
             self.areas[key] = area
             while len(self.areas) > self.cache_size:
                 self.areas.popitem(last=False)
+        # slow sources start only now, so when they finish they can drop this cached area and the next trip rebuilds it
+        for name in self._background - {main}:
+            for c in self._missing(key, name):
+                self.pool.submit(self._fetch_chunk, c, name)
         return area
 
     def add_report(self, r):
