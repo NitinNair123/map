@@ -51,7 +51,7 @@ def why_ahead(r, others, fastest):
     a, b = r["stats"], rival["stats"]
     if not a or not b:
         return []
-    ahead = r["score"] * (100 - r["unrated_pct"]) >= rival["score"] * (100 - rival["unrated_pct"])
+    ahead = r["score"] >= rival["score"]
     out = [f"Scores {r['score']} against {rival['score']} for the {'next best' if ahead else 'top'} of the {len(others) + 1} ways scanned."]
     diffs = [
         (a["lit_pct"] - b["lit_pct"], 10, lambda d: f"{'More' if d > 0 else 'Less'} of it is lit: {a['lit_pct']}% vs {b['lit_pct']}%."),
@@ -582,8 +582,7 @@ class Area:
         fastest_len = sum(self.edges[ei]["length"] for _, ei in paths[0]) or 1  # candidates come shortest first
         passing = {}  # (edge, 5-minute slot) -> (score, confidence), shared by all candidates
         scored = [self._summary("", p, when, fastest_len, dst, rain, mode, passing) for p in paths]
-        # unrated length counts against a route, so a mostly unknown way is never ranked above a measured one
-        ranked = sorted(scored, key=lambda r: (-r["score"] * (100 - r["unrated_pct"]) / 100, r["length_m"]))
+        ranked = sorted(scored, key=lambda r: (-r["score"], r["length_m"]))  # the score shown is the score ranked
         fastest = scored[0]
         safest = ranked[0]
         balanced = next(r for r in ranked if r["length_m"] <= BALANCED_DETOUR * fastest["length_m"] or r is fastest)
@@ -703,6 +702,7 @@ class Area:
             score -= min(15, isolated / 50)
             score -= min(10, max(0, haven_gap - 300) / 50) if places else 0
             score -= max(0, length / fastest_len - 1.3) * 20
+            score *= rated_len / length  # streets too thinly mapped to rate earn nothing, so a mostly unknown way can't top the list
 
         steps = self._steps(path, coords)
         turns = sum(st["turn"] not in ("straight", "arrive", "depart") for st in steps)

@@ -86,6 +86,7 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(len(routes) - sum(r["same_as"] is not None for r in routes[:3]), routes[0]["checked"])
         self.assertEqual([r["rank"] for r in others], sorted(r["rank"] for r in others))
         self.assertTrue(all(r["kind"] == f"#{r['rank']}" for r in others))
+        self.assertEqual(routes[0]["score"], max(r["score"] for r in routes))  # Safest never shows a lower number than another tab
 
     def test_shops_closed_lowers_score(self):
         self.assertLess(self.kinds(LATE)["safest"]["score"], self.kinds(NIGHT)["safest"]["score"])
