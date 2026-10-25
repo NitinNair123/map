@@ -715,7 +715,8 @@ class Area:
         if main_len >= 0.1 * length:
             reasons.append(f"{round(100 * main_len / length)}% on main roads")
         if light < 1:
-            reasons.append(f"{round(100 * lit_len / length)}% lit, {round(100 * dark_len / length)}% unlit")
+            if lit_len + dark_len:
+                reasons.append(f"{round(100 * lit_len / length)}% lit, {round(100 * dark_len / length)}% unlit")
             if no_light >= 1:
                 reasons.append(f"No lighting data for {round(100 * no_light / length)}%")
         if cctv:
