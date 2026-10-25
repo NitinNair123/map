@@ -37,6 +37,39 @@ def number(v):
     return int(m.group(1)) if m else None
 
 
+def why_ahead(r, others, fastest):
+    """Plain reasons a route ranks where it does, measured against the best of the other scanned routes."""
+    if not others:
+        return ["It's the only sensible way there on the map."]
+    rival = others[0]
+    a, b = r["stats"], rival["stats"]
+    if not a or not b:
+        return []
+    ahead = r["score"] * (100 - r["unrated_pct"]) >= rival["score"] * (100 - rival["unrated_pct"])
+    out = [f"Scores {r['score']} against {rival['score']} for the {'next best' if ahead else 'top'} of the {len(others) + 1} ways scanned."]
+    diffs = [
+        (a["lit_pct"] - b["lit_pct"], 10, lambda d: f"{'More' if d > 0 else 'Less'} of it is lit: {a['lit_pct']}% vs {b['lit_pct']}%."),
+        (a["open_now"] - b["open_now"], 1, lambda d: f"{a['open_now']} places confirmed open on the way, vs {b['open_now']}."),
+        (b["isolated_m"] - a["isolated_m"], 50, lambda d: f"Longest poorly rated stretch is {a['isolated_m']} m, vs {b['isolated_m']} m."),
+        (b["nothing_open_m"] - a["nothing_open_m"], 100, lambda d: f"Longest stretch with nothing open is {a['nothing_open_m']} m, vs {b['nothing_open_m']} m."),
+        (rival["unrated_pct"] - r["unrated_pct"], 10, lambda d: f"{r['unrated_pct']}% of it is unrated, vs {rival['unrated_pct']}%."),
+        (a["cctv"] - b["cctv"], 1, lambda d: f"{a['cctv']} CCTV cameras along it, vs {b['cctv']}."),
+    ]
+    good, bad = [], []
+    for d, step, text in diffs:
+        if abs(d) >= step:
+            (good if d > 0 else bad).append(text(d))
+    for k, f in r["factors"].items():
+        g = rival["factors"].get(k)
+        if f and g and abs(f["score"] - g["score"]) >= 10:
+            (good if f["score"] > g["score"] else bad).append(f"{k}: {f['score']} vs {g['score']}.")
+    out += good[:4] + [f"But: {t[0].lower()}{t[1:]}" for t in bad[:2]]
+    extra = r["minutes"] - fastest["minutes"]
+    if extra > 0:
+        out.append(f"It takes {extra} min longer than the fastest way.")
+    return out
+
+
 def dist(a, b):
     """Metres between (lat, lon) points; equirectangular is accurate enough at city scale."""
     x = math.radians(b[1] - a[1]) * math.cos(math.radians((a[0] + b[0]) / 2))
@@ -484,9 +517,13 @@ class Area:
         fastest = scored[0]
         safest = ranked[0]
         balanced = next(r for r in ranked if r["length_m"] <= BALANCED_DETOUR * fastest["length_m"] or r is fastest)
+        compared = [{"rank": i + 1, "score": r["score"], "confidence_level": r["confidence_level"], "unrated_pct": r["unrated_pct"],
+                     "minutes": r["minutes"], "length_m": r["length_m"], "stats": r["stats"], "factors": r["factors"]}
+                    for i, r in enumerate(ranked)]
         out = []
         for kind, r in (("safest", safest), ("fastest", fastest), ("balanced", balanced)):  # a repeat points at safest or fastest
-            out.append({**r, "kind": kind, "checked": len(scored), "rank": ranked.index(r) + 1,
+            out.append({**r, "kind": kind, "checked": len(scored), "rank": ranked.index(r) + 1, "compared": compared,
+                        "why": why_ahead(r, [x for x in ranked if x is not r], fastest),
                         "same_as": next((o["kind"] for o in out if o["coords"] == r["coords"]), None)})
         return [out[0], out[2], out[1]]
 
@@ -498,7 +535,7 @@ class Area:
                 "daylight": round(light, 2)}
         if not path:
             return {**base, "minutes": 0, "score": 100, "confidence": 1.0, "confidence_level": "high", "unrated_pct": 0,
-                    "reasons": [], "warnings": [], "factors": {}, "sources": [], "weakest": None, "havens": [], "places": [], "turns": 0,
+                    "reasons": [], "warnings": [], "factors": {}, "sources": [], "weakest": None, "havens": [], "places": [], "stats": {}, "turns": 0,
                     "steps": [], "segments": []}
         now = time.time()
         rated_len = sum(self.edges[ei]["length"] for _, ei in path if rated[ei][1] >= rating.MIN_CONFIDENCE) or 0.0
@@ -595,6 +632,10 @@ class Area:
             "confidence": round(conf, 2),
             "confidence_level": rating.level(conf),
             "unrated_pct": unrated_pct,
+            # plain measures for comparing routes side by side
+            "stats": {"lit_pct": round(100 * lit_len / length), "dark_pct": round(100 * dark_len / length), "open_now": len(places),
+                      "isolated_m": round(isolated), "nothing_open_m": round(haven_gap), "cctv": len(cctv),
+                      "police_m": None if police_m == math.inf else round(police_m)},
             "reasons": reasons,
             "warnings": warnings,
             # per factor: average value and how well it was measured along the route, None when nothing measured it

@@ -220,3 +220,11 @@ body.navigating .topbar, body.navigating .legend { display: none; }
 .bar small { font-weight: 400; }
 .explain { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; }
 .explain th, .explain td { text-align: left; padding: 3px 4px; border-top: 1px solid var(--line); vertical-align: top; }
+.why-list { margin: 0 0 10px; padding-left: 18px; font-size: 14px; display: grid; gap: 4px; }
+.why-list li.warn { color: var(--caution); }
+.compare { overflow-x: auto; margin-bottom: 12px; }
+.compare table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.compare th { text-align: left; font-weight: 600; color: var(--ink-3); padding: 4px 6px; }
+.compare td { padding: 6px; border-top: 1px solid var(--line); }
+.compare tr.this td { background: var(--brand-soft); }
+.compare .good { color: var(--safe); } .compare .ok { color: var(--caution); } .compare .bad { color: var(--risk); }

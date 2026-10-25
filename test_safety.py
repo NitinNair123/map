@@ -72,6 +72,10 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(r["safest"]["checked"], 2)  # the footway and the market street; wiggles are merged
         self.assertEqual(r["safest"]["rank"], 1)
         self.assertEqual(r["fastest"]["rank"], 2)
+        self.assertEqual([c["rank"] for c in r["safest"]["compared"]], [1, 2])
+        why = " ".join(r["safest"]["why"])
+        self.assertIn("next best of the 2 ways scanned", why)
+        self.assertIn("More of it is lit: 100% vs 0%", why)
         grid = []  # a 4x4 block grid has many ways through it, and the search must find several of them
         for i in range(5):
             grid.append(way(100 + i, [10 * i + j for j in range(5)], [(28.0 + 0.001 * i, 77.0 + 0.001 * j) for j in range(5)], highway="residential"))
