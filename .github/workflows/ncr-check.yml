@@ -13,7 +13,7 @@ jobs:
       - run: pip install osmium
       - run: python -m unittest test_safety
       - name: Map styles the app loads (OpenFreeMap)
-        run: for s in liberty dark; do curl -s -o /dev/null -w "$s %{http_code}\n" https://tiles.openfreemap.org/styles/$s; done
+        run: for s in liberty; do curl -s -o /dev/null -w "$s %{http_code}\n" https://tiles.openfreemap.org/styles/$s; done
   ncr:
     # the full import downloads about 575 MB and takes 10-15 minutes, so it runs only when asked
     if: contains(github.event.head_commit.message, '[ncr-check]')

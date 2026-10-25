@@ -2,8 +2,6 @@ html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
 body { background: var(--bg-2); }
 #map { position: fixed; inset: 0; z-index: 0; background: var(--bg-2); }
 .leaflet-container { font-family: var(--font); background: var(--bg-2); }
-:root[data-dark] .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.85) contrast(.9); }
-:root[data-dark] body.vector-map .leaflet-tile-pane { filter: none; }  /* the vector map has its own dark style */
 .leaflet-control-attribution { font-size: 10px; background: color-mix(in srgb, var(--surface) 80%, transparent) !important; color: var(--ink-3); }
 .sr-only { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 svg { width: 22px; height: 22px; }

@@ -97,8 +97,8 @@ function setBaseMap() {
   const webgl = (() => { try { return !!document.createElement("canvas").getContext("webgl"); } catch { return false; } })();
   if (!L.maplibreGL || !window.maplibregl || !webgl) return rasterBase();
   if (baseLayer) baseLayer.remove();
-  const dark = document.documentElement.hasAttribute("data-dark");
-  baseLayer = L.maplibreGL({ style: `https://tiles.openfreemap.org/styles/${dark ? "dark" : "liberty"}`,
+  // always the light map, like Google Maps: the dark style was too dark to read streets on a phone
+  baseLayer = L.maplibreGL({ style: "https://tiles.openfreemap.org/styles/liberty",
     attribution: '<a href="https://openfreemap.org" target="_blank">OpenFreeMap</a> © <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>' }).addTo(map);
   document.body.classList.add("vector-map");
   const layer = baseLayer;
