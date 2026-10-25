@@ -1,4 +1,4 @@
-"""Website, app and JSON API. Usage: python server.py [data/osm.json] [port]"""
+"""Website, app and JSON API. Usage: python server.py [port]"""
 import csv
 import json
 import os
@@ -6,15 +6,16 @@ import secrets
 import sys
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
-from safety import REPORT_TYPES, Area
+from safety import REPORT_TYPES, dist
+from tiles import TileStore, TooFar
 
-OSM_PATH = sys.argv[1] if len(sys.argv) > 1 else "data/osm.json"
-DATA_DIR = os.path.dirname(OSM_PATH) or "."
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 REPORTS_PATH = os.path.join(DATA_DIR, "reports.json")
 INCIDENTS_PATH = os.path.join(DATA_DIR, "incidents.csv")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -24,14 +25,8 @@ lock = threading.Lock()
 # shortcut: live trips live in memory and vanish on restart, move to Redis when running more than one server
 trips = {}
 report_log = {}  # ip -> recent report times, to stop one person flooding an area
-weather = {"rain": False, "checked": 0.0}
-
-
-def load():
-    with open(OSM_PATH) as f:
-        osm = json.load(f)
-    reports = json.load(open(REPORTS_PATH)) if os.path.exists(REPORTS_PATH) else []
-    return Area(osm, reports, load_incidents())
+weather = {}  # rounded (lat, lon) -> {"rain", "checked"}
+geocode_cache = OrderedDict()
 
 
 def load_incidents():
@@ -50,7 +45,10 @@ def load_incidents():
     return out
 
 
-area = load()
+os.makedirs(DATA_DIR, exist_ok=True)
+store = TileStore(os.path.join(DATA_DIR, "tiles"),
+                  reports=json.load(open(REPORTS_PATH)) if os.path.exists(REPORTS_PATH) else [],
+                  incidents=load_incidents())
 
 
 def latlon(s):
@@ -60,24 +58,43 @@ def latlon(s):
     return lat, lon
 
 
-def in_area(pt, pad=0.01):
-    s, w, n, e = area.bounds
-    return s - pad <= pt[0] <= n + pad and w - pad <= pt[1] <= e + pad
-
-
-def is_raining(when):
+def is_raining(pt, when):
     """Live rain from Open-Meteo (free, no key), refreshed every 15 min; only applies to trips starting about now."""
     if abs((when.astimezone() - datetime.now().astimezone()).total_seconds()) > 3600:
         return False
-    if time.time() - weather["checked"] > 900:
-        weather["checked"] = time.time()
+    w = weather.setdefault((round(pt[0], 1), round(pt[1], 1)), {"rain": False, "checked": 0.0})
+    if time.time() - w["checked"] > 900:
+        w["checked"] = time.time()
         try:
-            q = urlencode({"latitude": area.center[0], "longitude": area.center[1], "current": "precipitation"})
+            q = urlencode({"latitude": pt[0], "longitude": pt[1], "current": "precipitation"})
             with urlopen(f"https://api.open-meteo.com/v1/forecast?{q}", timeout=3) as r:
-                weather["rain"] = json.load(r)["current"]["precipitation"] > 0.2
+                w["rain"] = json.load(r)["current"]["precipitation"] > 0.2
         except Exception:
-            weather["rain"] = False  # no network: score without weather rather than fail
-    return weather["rain"]
+            w["rain"] = False  # no network: score without weather rather than fail
+    return w["rain"]
+
+
+def geocode(q, near):
+    """Place search anywhere via Photon (OpenStreetMap-based, free), biased towards where the map is."""
+    key = (q.lower(), near and (round(near[0], 1), round(near[1], 1)))
+    if key in geocode_cache:
+        return geocode_cache[key]
+    params = {"q": q, "limit": 8}
+    if near:
+        params.update(lat=near[0], lon=near[1])
+    with urlopen(Request("https://photon.komoot.io/api/?" + urlencode(params), headers={"User-Agent": "SafeRoute/1.0"}), timeout=6) as r:
+        features = json.load(r)["features"]
+    out = []
+    for f in features:
+        p, (lon, lat) = f["properties"], f["geometry"]["coordinates"]
+        name = p.get("name") or " ".join(x for x in (p.get("housenumber"), p.get("street")) if x) or p.get("city")
+        where = ", ".join(x for x in (p.get("street") if p.get("name") else None, p.get("district") or p.get("locality"), p.get("city"), p.get("state")) if x)
+        if name:
+            out.append({"name": name, "pt": [lat, lon], "kind": where or p.get("osm_value", "place").replace("_", " ")})
+    geocode_cache[key] = out
+    if len(geocode_cache) > 1000:
+        geocode_cache.popitem(last=False)
+    return out
 
 
 def expire_trips():
@@ -121,29 +138,38 @@ class Handler(SimpleHTTPRequestHandler):
         u = urlparse(self.path)
         q = parse_qs(u.query)
         try:
-            if u.path == "/api/area":
-                return self.send_json({"bounds": area.bounds})
             if u.path == "/api/search":
-                return self.send_json(area.search(q.get("q", [""])[0][:80]))
+                text = q.get("q", [""])[0].strip()[:80]
+                return self.send_json(geocode(text, latlon(q["near"][0]) if q.get("near") else None) if len(text) >= 2 else [])
             if u.path == "/api/heat":
-                when = self.when(q)
-                return self.send_json(area.heat(when, is_raining(when)))
+                s, w, n, e = (float(v) for v in q["bbox"][0].split(","))
+                if dist((s, w), (n, e)) > 6000:
+                    return self.send_json({"error": "Zoom in to see the safety map"}, 400)
+                when, mid = self.when(q), ((s + n) / 2, (w + e) / 2)
+                area = store.for_trip((s, w), (n, e))
+                return self.send_json(area.heat(when, is_raining(mid, when), (s, w, n, e)))
             if u.path == "/api/havens":
-                return self.send_json(area.havens_near(latlon(q["near"][0]), self.when(q)))
+                pt = latlon(q["near"][0])
+                return self.send_json(store.around(pt).havens_near(pt, self.when(q)))
             if u.path == "/api/route":
                 a, b = latlon(q["from"][0]), latlon(q["to"][0])
-                if not (in_area(a) and in_area(b)):
-                    return self.send_json({"error": "SafeRoute doesn't cover that spot yet. Pick a start and destination inside the mapped area."}, 400)
                 when = self.when(q)
-                rain = is_raining(when)
-                return self.send_json({"routes": area.routes(a, b, when, rain), "rain": rain})
+                rain = is_raining(a, when)
+                return self.send_json({"routes": store.for_trip(a, b).routes(a, b, when, rain), "rain": rain})
             if u.path.startswith("/api/trip/"):
                 t = trips.get(u.path.rsplit("/", 1)[1])
                 if not t:
                     return self.send_json({"error": "This trip has ended or the link is wrong."}, 404)
                 return self.send_json({k: t[k] for k in ("name", "dest", "eta", "points", "started", "updated", "ended")})
+        except TooFar as e:
+            return self.send_json({"error": str(e)}, 400)
+        except ConnectionError as e:
+            return self.send_json({"error": str(e)}, 503)
+        except OSError:
+            return self.send_json({"error": "Couldn't reach the map service, check your connection and try again"}, 503)
         except (KeyError, ValueError) as e:
-            return self.send_json({"error": f"bad request: {e}"}, 400)
+            msg = str(e) if "streets" in str(e) else f"bad request: {e}"
+            return self.send_json({"error": msg}, 400)
         super().do_GET()
 
     def do_POST(self):
@@ -162,17 +188,18 @@ class Handler(SimpleHTTPRequestHandler):
 
     def report(self, body):
         r = {"lat": float(body["lat"]), "lon": float(body["lon"]), "type": body["type"], "ts": time.time()}
-        if r["type"] not in REPORT_TYPES or not in_area((r["lat"], r["lon"]), 0):
-            raise ValueError("unknown type or outside area")
+        latlon((r["lat"], r["lon"]))
+        if r["type"] not in REPORT_TYPES:
+            raise ValueError("unknown report type")
         ip = self.client_address[0]
         recent = [t for t in report_log.get(ip, []) if r["ts"] - t < 3600]
         if len(recent) >= 10:
             return self.send_json({"error": "Thanks! You've sent a lot of reports this hour, please try again later."}, 429)
         report_log[ip] = recent + [r["ts"]]
         with lock:
-            area.add_report(r)
+            store.add_report(r)
             with open(REPORTS_PATH + ".tmp", "w") as f:
-                json.dump(area.reports, f)
+                json.dump(store.reports, f)
             os.replace(REPORTS_PATH + ".tmp", REPORTS_PATH)  # never leave a half-written file
         self.send_json({"ok": True})
 
@@ -202,6 +229,6 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    port = int(sys.argv[2]) if len(sys.argv) > 2 else 8000
-    print(f"{len(area.edges)} road segments loaded, open http://localhost:{port}")
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+    print(f"SafeRoute running, open http://localhost:{port}", flush=True)
     ThreadingHTTPServer(("", port), Handler).serve_forever()

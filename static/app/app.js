@@ -76,10 +76,14 @@ const havenLayer = L.layerGroup().addTo(map);
 let heatLayer = null, meMarker = null, fromMarker = null, toMarker = null;
 const divIcon = (cls, size = 22) => L.divIcon({ className: "", html: `<div class="${cls}"></div>`, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 
-api("/api/area").then(({ bounds: [s, w, n, e] }) => {
-  state.bounds = [[s, w], [n, e]];
-  map.fitBounds(state.bounds, { padding: [20, 20] });
-}).catch(() => { map.setView([20.6, 78.9], 5); toast("Can't reach the SafeRoute server"); });
+// works anywhere: open where the user last looked, else the whole country until we know where they are
+const lastView = store.get("view", null);
+if (lastView) map.setView(lastView.c, lastView.z); else map.setView([20.6, 78.9], 5);
+map.on("moveend", () => {
+  const c = map.getCenter();
+  store.set("view", { c: [c.lat, c.lng], z: map.getZoom() });
+  if (state.heatOn) loadHeatSoon();
+});
 
 function setMarker(which, pt) {
   const old = which === "from" ? fromMarker : toMarker;
@@ -107,7 +111,10 @@ function currentPosition(timeout = 8000) {
 function onPosition(pos) {
   const pt = [pos.coords.latitude, pos.coords.longitude];
   state.here = pt; state.hereAt = Date.now();
-  if (!meMarker) meMarker = L.marker(pt, { icon: divIcon("me-dot", 18), keyboard: false, zIndexOffset: 1000 }).addTo(map);
+  if (!meMarker) {
+    meMarker = L.marker(pt, { icon: divIcon("me-dot", 18), keyboard: false, zIndexOffset: 1000 }).addTo(map);
+    if (!state.to && !lastView) map.setView(pt, 16);
+  }
   else meMarker.setLatLng(pt);
   if (state.trip) onTripPosition(pt);
 }
@@ -144,7 +151,12 @@ async function showResults(q) {
   if (activeField === "from") extra.push({ name: "Your location", kind: "Use GPS", here: true });
   extra.push({ name: "Choose on map", kind: "Tap anywhere on the map", pick: true });
   let found = [];
-  if (q.trim().length >= 2) found = await api("/api/search?q=" + encodeURIComponent(q)).catch(() => []);
+  if (q.trim().length >= 2) {
+    await new Promise((r) => setTimeout(r, 250)); // wait for typing to pause before searching
+    if (seq !== searchSeq) return;
+    const c = map.getCenter();
+    found = await api(`/api/search?q=${encodeURIComponent(q)}&near=${c.lat},${c.lng}`).catch(() => []);
+  }
   if (seq !== searchSeq) return;
   const list = $("#results");
   list.innerHTML = "";
@@ -215,7 +227,7 @@ $("#timeChip").onclick = () => {
 function afterTime() {
   closeDrawer();
   $("#timeLabel").textContent = timeLabel();
-  if (heatLayer) loadHeat();
+  if (state.heatOn) loadHeat();
   maybeRoute();
 }
 const whenParam = () => isoLocal(state.when || new Date());
@@ -233,7 +245,7 @@ async function maybeRoute() {
     routeLayer.clearLayers(); havenLayer.clearLayers();
     return renderSheet(`<div class="empty"><div class="badge">${icon("check")}</div><div><h3>You're already there</h3><p class="muted">Pick a destination further away.</p></div></div>`);
   }
-  renderSheet(`<div class="empty"><div class="badge">${icon("shield")}</div><div><h3>Checking every street…</h3><p class="muted">Lighting, open shops, police, CCTV and reports for ${esc(timeLabel().toLowerCase())}.</p></div></div>`);
+  renderSheet(`<div class="empty"><div class="badge">${icon("shield")}</div><div><h3>Checking every street…</h3><p class="muted">Lighting, open shops, police, CCTV and reports for ${esc(timeLabel().toLowerCase())}. A new area can take up to 30 seconds the first time.</p></div></div>`);
   try {
     const q = new URLSearchParams({ from: from.join(","), to: state.to.join(","), at: whenParam() });
     const res = await api("/api/route?" + q);
@@ -634,24 +646,31 @@ async function sendReport(pt) {
   try {
     await api("/api/report", { lat: pt[0], lon: pt[1], type });
     toast("Thanks. Your report is helping others get home safer.");
-    if (heatLayer) loadHeat();
+    if (state.heatOn) loadHeat();
     if (state.routes.length && !state.trip) maybeRoute();
   } catch (e) { toast(e.message); }
 }
 
 // ---------- safety map ----------
+let heatTimer = null, heatSeq = 0;
+const loadHeatSoon = () => { clearTimeout(heatTimer); heatTimer = setTimeout(loadHeat, 400); };
 async function loadHeat() {
-  const segs = await api("/api/heat?" + new URLSearchParams({ at: whenParam() })).catch(() => []);
+  if (map.getZoom() < 15) { heatLayer?.remove(); heatLayer = null; return toast("Zoom in to see the safety map"); }
+  const seq = ++heatSeq, b = map.getBounds();
+  const bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].map((v) => v.toFixed(5)).join(",");
+  let segs;
+  try { segs = await api("/api/heat?" + new URLSearchParams({ bbox, at: whenParam() })); } catch (e) { return toast(e.message); }
+  if (seq !== heatSeq || !state.heatOn) return;
   heatLayer?.remove();
   heatLayer = L.layerGroup(segs.map(([a, b, c, d, s]) =>
     L.polyline([[a, b], [c, d]], { color: COLOR[scoreClass(s)], weight: 4, opacity: 0.75, interactive: false }))).addTo(map);
   routeLayer.eachLayer((l) => l.bringToFront?.());
 }
 $("#heatBtn").onclick = () => {
-  const on = !heatLayer;
-  $("#heatBtn").setAttribute("aria-pressed", on);
-  $("#legend").hidden = !on;
-  if (on) { loadHeat(); toast(`Safety map for ${timeLabel().toLowerCase()}`); } else { heatLayer.remove(); heatLayer = null; }
+  state.heatOn = !state.heatOn;
+  $("#heatBtn").setAttribute("aria-pressed", state.heatOn);
+  $("#legend").hidden = !state.heatOn;
+  if (state.heatOn) { loadHeat(); toast(`Safety map for ${timeLabel().toLowerCase()}`); } else { heatLayer?.remove(); heatLayer = null; }
 };
 
 // ---------- drawer, settings, onboarding ----------

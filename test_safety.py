@@ -1,8 +1,10 @@
+import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
 
 from safety import Area, daylight, is_open
+from tiles import TILE, TileStore, TooFar, tiles_near
 
 IST = timezone(timedelta(hours=5, minutes=30))
 NIGHT, LATE, NOON = (datetime(2026, 10, 25, h, 0, tzinfo=IST) for h in (22, 2, 12))
@@ -87,10 +89,9 @@ class RouteTest(unittest.TestCase):
         day, _ = area.factors(foot, NOON, 1)
         self.assertLess(night["surroundings"], day["surroundings"])
 
-    def test_havens_and_search(self):
+    def test_havens(self):
         h = self.area.havens_near((28.0007, 77.0024), LATE)
         self.assertEqual(h[0]["name"], "City Pharmacy")  # the only place open at 2 am
-        self.assertEqual(self.area.search("market")[0]["name"], "Market Road")
 
 
 class TimeTest(unittest.TestCase):
@@ -109,6 +110,49 @@ class TimeTest(unittest.TestCase):
         self.assertFalse(is_open("Mo-Su 09:00-21:00; Mo off", mon_noon))
         self.assertTrue(is_open("09:00-13:00, 14:00-20:00", mon_noon))
         self.assertIsNone(is_open("sunrise-sunset", mon_noon))
+
+
+class TileTest(unittest.TestCase):
+    def setUp(self):
+        self.calls = []
+
+        def fake_fetch(s, w, n, e):
+            self.calls.append((s, w))
+            return fixture()  # every tile returns the same streets, so merging must drop duplicates
+
+        self.dir = tempfile.mkdtemp()
+        self.store = TileStore(self.dir, fetch=fake_fetch)
+
+    def test_any_spot_is_fetched_once_and_merged(self):
+        area = self.store.for_trip(A, B)
+        self.assertEqual(len(area.edges), len(Area(fixture()).edges))
+        n = len(self.calls)
+        self.store.for_trip(A, B)  # cached area
+        self.assertEqual(len(self.calls), n)
+        TileStore(self.dir, fetch=lambda *a: self.fail("tile should come from disk")).for_trip(A, B)
+
+    def test_route_anywhere(self):
+        r = {x["kind"]: x for x in self.store.for_trip(A, B).routes(A, B, NIGHT)}
+        self.assertGreater(r["safest"]["score"], r["fastest"]["score"])
+
+    def test_too_far(self):
+        with self.assertRaises(TooFar):
+            self.store.for_trip(A, (28.5, 77.5))
+
+    def test_tiles_follow_the_line(self):
+        diag = tiles_near((28.0, 77.0), (28.1, 77.1), 800)
+        box = (0.1 / TILE + 1) ** 2
+        self.assertLess(len(diag), box * 0.7)  # a corridor, not the whole bounding box
+
+    def test_no_streets(self):
+        store = TileStore(tempfile.mkdtemp(), fetch=lambda *a: {"elements": []})
+        with self.assertRaisesRegex(ValueError, "No walkable streets"):
+            store.for_trip(A, B)
+
+    def test_report_reaches_cached_area(self):
+        area = self.store.for_trip(A, B)
+        self.store.add_report({"lat": 28.0005, "lon": 77.0015, "type": "harassment", "ts": time.time()})
+        self.assertTrue(any(e["reports"] for e in area.edges))
 
 
 if __name__ == "__main__":

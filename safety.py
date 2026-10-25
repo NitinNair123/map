@@ -193,7 +193,6 @@ class Area:
         self.reports = []
         self.incidents = []
         self._cache = {}
-        self.names = {}  # searchable name -> {"name", "pt", "kind"}
 
         for el in osm["elements"]:
             tags = el.get("tags", {})
@@ -208,9 +207,6 @@ class Area:
                     self.grid[self._cell(pt)].append(len(self.pois))
                     self.pois.append({"kind": kind, "pt": pt, "hours": tags.get("opening_hours"),
                                       "name": tags.get("name") or (tags.get("shop") or tags.get("amenity") or kind).replace("_", " ")})
-                if tags.get("name"):
-                    self.names[tags["name"].lower()] = {"name": tags["name"], "pt": pt,
-                                                        "kind": tags.get("shop") or tags.get("amenity") or kind or "place"}
 
         self.police = [p["pt"] for p in self.pois if p["kind"] == "police"]
         for e in self.edges:
@@ -243,8 +239,6 @@ class Area:
                                "overbridge": overbridge, "reports": [], "incidents": []})
             self.adj[a].append((b, ei))
             self.adj[b].append((a, ei))  # walking ignores oneway
-        if tags.get("name"):
-            self.names.setdefault(tags["name"].lower(), {"name": tags["name"], "pt": pts[len(pts) // 2], "kind": "street"})
 
     def _add_zone(self, el, kind):
         pts = [(g["lat"], g["lon"]) for g in el["geometry"]]
@@ -554,13 +548,8 @@ class Area:
         return [{"name": self.pois[i]["name"], "kind": self.pois[i]["kind"], "pt": self.pois[i]["pt"], "distance_m": round(d)}
                 for d, i in found[:limit]]
 
-    def search(self, q, limit=8):
-        q = q.strip().lower()
-        if not q:
-            return []
-        hits = sorted((not k.startswith(q), len(k), k) for k in self.names if q in k)
-        return [self.names[k] for *_, k in hits[:limit]]
-
-    def heat(self, when, rain=False):
+    def heat(self, when, rain=False, bbox=None):
         scores = self.scores(when, rain)
-        return [[*self.nodes[e["a"]], *self.nodes[e["b"]], round(s)] for e, s in zip(self.edges, scores)]
+        s, w, n, e = bbox or self.bounds
+        return [[*self.nodes[ed["a"]], *self.nodes[ed["b"]], round(sc)] for ed, sc in zip(self.edges, scores)
+                if s <= ed["mid"][0] <= n and w <= ed["mid"][1] <= e]

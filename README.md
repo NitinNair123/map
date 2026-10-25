@@ -12,15 +12,17 @@ It has three parts, all served by one small Python server:
 
 ## Run it
 
-Needs Python 3.10+ and nothing else.
+Needs Python 3.10+ and an internet connection, and nothing else.
 
 ```sh
-mkdir -p data
-python fetch_osm.py SOUTH WEST NORTH EAST   # bounding box of your area, e.g. your campus
-python server.py                             # then open http://localhost:8000
+python server.py          # then open http://localhost:8000   (on Windows: py server.py)
 ```
 
-Keep the box a few km across at most. You can get the coordinates by drawing a box on https://bboxfinder.com.
+It works anywhere. When someone plans a walk, the server fetches the streets around it from
+OpenStreetMap, scores them and routes. It fetches the area as about 2 km tiles along the trip and caches
+them in `data/tiles/` for 7 days. It tries three Overpass mirrors in turn, so one busy server doesn't
+break a trip. Place search uses Photon (komoot), and walks are capped at 15 km.
+
 Run the tests with `python -m unittest test_safety`.
 
 To install it on a phone, the site must be served over **HTTPS** (browsers require that for location and
@@ -69,7 +71,7 @@ low-data flag when the streets are poorly mapped.
 
 ## App features
 
-- Place search across your area's streets, shops and named buildings, or a pin dropped on the map.
+- Place search anywhere, biased towards where you're looking, or a pin dropped on the map.
 - A departure time picker, because a 1 am walk scores differently from a 7 pm one.
 - A safety map overlay for the chosen hour.
 - **Live trip.** Friends follow you on a map link. The link ends on arrival, and live trips expire after 12 hours.
@@ -82,7 +84,7 @@ low-data flag when the streets are poorly mapped.
 
 ## Files
 
-- `fetch_osm.py` downloads roads, land use, lamps, CCTV, places and buildings from the Overpass API.
+- `tiles.py` fetches OpenStreetMap tiles on demand (with mirror fallback), caches them, and builds scored areas.
 - `safety.py` has the scoring, sun position, opening-hours parser, street graph and routing.
 - `server.py` is the web server and JSON API: `/api/route`, `/api/heat`, `/api/search`, `/api/havens`, `/api/report`, `/api/trip`.
 - `static/index.html` is the website.
