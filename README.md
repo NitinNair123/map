@@ -18,8 +18,10 @@ Needs Python 3.10+ and an internet connection, and nothing else.
 python server.py          # then open http://localhost:8000   (on Windows: py server.py)
 ```
 
-It works anywhere. When someone plans a walk, the server fetches the streets around it from
-OpenStreetMap, scores them and routes. It fetches the area as about 1 km tiles along the trip, in one or two
+It works anywhere. When someone plans a walk, the server fetches the streets around it, scores them and
+routes. With `pip install pyarrow` the streets come from Overture Maps (OSM plus TomTom, about 15 s for a new
+area). OSM detail such as lamps, `lit` tags and opening hours then loads from Overpass in the background
+and is used from the next trip. Without pyarrow, everything comes from Overpass, which can take minutes. It fetches the area as about 1 km tiles along the trip, in one or two
 requests, and caches them in `data/tiles/` for 7 days. It tries three Overpass mirrors in turn, so one busy
 server doesn't break a trip. Place search uses Photon (komoot), and walks are capped at 10 km.
 

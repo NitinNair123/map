@@ -209,5 +209,29 @@ class OpenDataTest(unittest.TestCase):
         self.assertTrue(store.for_trip(A, B).building_cells)
 
 
+    def test_fast_roads_with_osm_detail_later(self):
+        def roads(*a):  # the fixture streets as Overture segments, linked to their OSM ways
+            out = []
+            for el in fixture()["elements"]:
+                if el["type"] == "way":
+                    tags = {"highway": el["tags"]["highway"], "overture_road": "yes", "osm_way": el["id"]}
+                    out.append({**el, "id": f"ovr{el['id']}", "tags": tags})
+            return {"elements": out}
+        osm_calls = []
+        def osm(*a):
+            osm_calls.append(a)
+            return fixture()
+        store = TileStore(tempfile.mkdtemp(), fetch=osm, roads=roads)
+        first = store.for_trip(A, B)
+        self.assertEqual(len(first.edges), len(Area(fixture()).edges))
+        self.assertFalse(first.pois)  # OSM detail is still loading
+        store.pool.shutdown(wait=True)
+        self.assertTrue(osm_calls)
+        later = store.for_trip(A, B)
+        self.assertEqual(len(later.edges), len(Area(fixture()).edges))  # OSM ways lend tags, not duplicate streets
+        self.assertTrue(later.pois)
+        self.assertEqual([e["lit"] for e in later.edges if e["highway"] == "footway"], ["no"])
+
+
 if __name__ == "__main__":
     unittest.main()

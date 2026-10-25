@@ -2,6 +2,7 @@
 import json
 import math
 import os
+import struct
 import threading
 import time
 import urllib.parse
@@ -70,14 +71,53 @@ def mapillary(s, w, n, e):
 OVERTURE = "overturemaps-us-west-2/release/2026-10-21.0"  # shortcut: pinned release, bump monthly from stac.overturemaps.org
 
 
-def _overture(theme, s, w, n, e, columns):
+def _overture(theme, s, w, n, e, columns, kind=None, where=None):
     import pyarrow.compute as pc  # optional dependency: pip install pyarrow
     import pyarrow.dataset as ds
     import pyarrow.fs as fs
-    data = ds.dataset(f"{OVERTURE}/theme={theme}/type={theme[:-1]}/", format="parquet",
+    data = ds.dataset(f"{OVERTURE}/theme={theme}/type={kind or theme[:-1]}/", format="parquet",
                       filesystem=fs.S3FileSystem(anonymous=True, region="us-west-2"))
-    x, y = pc.field("bbox", "xmin"), pc.field("bbox", "ymin")
-    return data.to_table(filter=(x >= w) & (x <= e) & (y >= s) & (y <= n), columns=columns + ["id", "bbox"]).to_pylist()
+    b = lambda k: pc.field("bbox", k)
+    f = (b("xmax") >= w) & (b("xmin") <= e) & (b("ymax") >= s) & (b("ymin") <= n)
+    for k, v in (where or {}).items():
+        f &= pc.field(k) == v
+    return data.to_table(filter=f, columns=columns + ["id", "bbox"]).to_pylist()
+
+
+def overture_roads(s, w, n, e):
+    """The street network from Overture Maps (OSM plus TomTom), as OSM-style ways. Much faster than Overpass."""
+    rows = _overture("transportation", s, w, n, e, ["names", "class", "subclass", "connectors", "road_flags", "sources", "geometry"],
+                     kind="segment", where={"subtype": "road"})
+    out = []
+    for r in rows:
+        g = r["geometry"]
+        if r["class"] == "motorway" or g[0] != 1 or struct.unpack("<I", g[1:5])[0] != 2:  # little-endian LineString only
+            continue
+        pts = [(lat, lon) for lon, lat in struct.iter_unpack("<dd", g[9:9 + 16 * struct.unpack("<I", g[5:9])[0]])]
+        along = [0.0]
+        for a, b in zip(pts, pts[1:]):
+            along.append(along[-1] + dist(a, b))
+        ids = [f"{r['id']}:{k}" for k in range(len(pts))]
+        for c in r["connectors"] or []:  # connectors are the shared junction points between segments
+            k = min(range(len(pts)), key=lambda k: abs(along[k] / (along[-1] or 1) - c["at"]))
+            ids[k] = c["connector_id"]
+        cls, sub = r["class"], r["subclass"]
+        tags = {"highway": "road" if cls == "unknown" else f"{cls}_link" if sub == "link" else cls, "overture_road": "yes"}
+        if sub in ("sidewalk", "crosswalk"):
+            tags.update(highway="footway", footway="sidewalk" if sub == "sidewalk" else "crossing")
+        flags = {v for f in r["road_flags"] or [] for v in f["values"]}
+        if "is_tunnel" in flags:
+            tags["tunnel"] = "yes"
+        if "is_bridge" in flags:
+            tags["bridge"] = "yes"
+        if (r["names"] or {}).get("primary"):
+            tags["name"] = r["names"]["primary"]
+        osm = next((x["record_id"] for x in r["sources"] or [] if x["dataset"] == "OpenStreetMap" and (x["record_id"] or "").startswith("w")), None)
+        if osm:
+            tags["osm_way"] = int(osm[1:].split("@")[0])
+        out.append({"type": "way", "id": f"ovr{r['id']}", "nodes": ids, "tags": tags,
+                    "geometry": [{"lat": a, "lon": o} for a, o in pts]})
+    return {"elements": out}
 
 
 def overture_places(s, w, n, e):
@@ -128,12 +168,13 @@ def overpass(s, w, n, e):
 
 
 class TileStore:
-    def __init__(self, folder, fetch=overpass, reports=None, incidents=(), cache_size=6, extras=None, background=()):
+    def __init__(self, folder, fetch=overpass, reports=None, incidents=(), cache_size=6, extras=None, background=(), roads=None):
         self.folder = folder
         self.fetch = fetch
+        self.roads = roads  # a fast street source; when set, slow Overpass detail loads in the background instead
         self.extras = extras or {}  # name -> fetch(s, w, n, e) for extra sources, cached beside the OSM tile
         self.background = set(background)  # slow extras: fetched after the trip is answered, used from the next one
-        self.pool = ThreadPoolExecutor(1)
+        self.pool = ThreadPoolExecutor(2)
         self.reports = reports if reports is not None else []
         self.incidents = list(incidents)
         self.areas = OrderedDict()
@@ -155,13 +196,13 @@ class TileStore:
             tiles = [t for t in tiles if not self._fresh(t, source)]
             if not tiles:
                 return
-            fetch = self.extras[source] if source else self.fetch
+            fetch = self.fetch if not source else self.roads if source == "roads" else self.extras[source]
             box = (min(t[0] for t in tiles) * TILE, min(t[1] for t in tiles) * TILE,
                    (max(t[0] for t in tiles) + 1) * TILE, (max(t[1] for t in tiles) + 1) * TILE)
             try:
                 osm = fetch(*box)
             except (OSError, ValueError, KeyError) as err:
-                if not source:
+                if source == self._main:
                     raise
                 print(f"{source} {box}: failed ({err})", flush=True)  # an optional source being down must not block trips
                 return
@@ -181,15 +222,22 @@ class TileStore:
                 with open(path + ".tmp", "w") as f:
                     json.dump({"elements": els}, f)
                 os.replace(path + ".tmp", path)
-        if source in self.background:
+        if source in self._background:
             with self.lock:  # rebuild cached areas so the next trip sees the new data
                 for key in [k for k in self.areas if k & set(tiles)]:
                     del self.areas[key]
 
+    @property
+    def _main(self):
+        return "roads" if self.roads else ""
+
+    @property
+    def _background(self):
+        return self.background | ({""} if self.roads else set())
+
     def tile(self, t):
-        with open(self._path(t)) as f:
-            osm = json.load(f)
-        for name in self.extras:
+        osm = {"elements": []}
+        for name in ["", "roads", *self.extras]:
             if os.path.exists(self._path(t, name)):
                 with open(self._path(t, name)) as f:
                     osm["elements"] += json.load(f)["elements"]
@@ -208,11 +256,11 @@ class TileStore:
             if key in self.areas:
                 self.areas.move_to_end(key)
                 return self.areas[key]
-        jobs = [(c, "") for c in self._missing(key)]
+        jobs = [(c, self._main) for c in self._missing(key, self._main)]
         jobs += [(c, name) for name in self.extras if name not in self.background for c in self._missing(key, name)]
         with ThreadPoolExecutor(3) as ex:  # Overpass rate-limits per IP, so few parallel requests
             list(ex.map(lambda job: self._fetch_chunk(*job), jobs))
-        for name in self.background:
+        for name in self._background:
             for c in self._missing(key, name):
                 self.pool.submit(self._fetch_chunk, c, name)
         parts = [self.tile(t) for t in sorted(key)]

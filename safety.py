@@ -40,6 +40,8 @@ ROAD_SCORE = {
 }
 VEHICLE_ROADS = {"trunk", "primary", "secondary", "tertiary", "primary_link", "secondary_link", "tertiary_link", "unclassified", "residential"}
 
+OSM_ROAD_DETAIL = {"lit", "sidewalk", "sidewalk:both", "sidewalk:left", "sidewalk:right", "footway", "tunnel", "bridge", "layer"}
+
 # OSM lit=* values; a street with no tag, no lamps and no reports has unknown lighting and is left out, never guessed
 LIT_TAGS = {"yes": 1.0, "24/7": 1.0, "automatic": 1.0, "sunset-sunrise": 1.0, "interval": 0.7, "limited": 0.6,
             "no": 0.0, "disused": 0.0}
@@ -226,9 +228,20 @@ class Area:
         self.incidents = []
         self._cache = {}
 
+        # With Overture roads, OSM ways only lend their tags (lit, sidewalk, foot access) to the matching segment
+        overture = any("overture_road" in el.get("tags", {}) for el in osm["elements"])
+        osm_ways = {el["id"]: el["tags"] for el in osm["elements"]
+                    if overture and el["type"] == "way" and "highway" in el.get("tags", {}) and "overture_road" not in el["tags"]}
         for el in osm["elements"]:
             tags = el.get("tags", {})
             if el["type"] == "way" and "highway" in tags and "geometry" in el:
+                if "overture_road" in tags:
+                    o = osm_ways.get(tags.get("osm_way"), {})
+                    if o.get("foot") == "no" or o.get("access") in ("private", "no"):
+                        continue
+                    tags = {**{k: v for k, v in o.items() if k in OSM_ROAD_DETAIL}, **tags, "name": o.get("name") or tags.get("name")}
+                elif overture:
+                    continue
                 self._add_road(el, tags)
             elif (kind := surroundings_kind(tags)) and "geometry" in el:
                 self._add_zone(el, kind)
