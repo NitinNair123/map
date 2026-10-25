@@ -4,12 +4,17 @@ import math
 import re
 import time
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import rating
 from rating import LABELS, SURROUNDINGS
 
-WALK_MPS = 1.3
+# Average speeds for travel times: walking, a city bike and a car in city traffic
+MODES = {"walk": 1.3, "bike": 4.2, "car": 6.9}
+WALK_MPS = MODES["walk"]
+CAR_ROADS = rating.VEHICLE_ROADS | {"service", "living_street", "trunk_link", "motorway", "motorway_link"}
+ONEWAY = {"yes": 1, "1": 1, "true": 1, "-1": -1, "reverse": -1}
+RATE_BUCKET_S = 300  # streets are rated for the 5 minutes in which the trip passes them
 CELL = 0.001  # spatial grid cell in degrees, roughly 100 m
 
 # How much "safer" weighs against distance in the search: cost = length * (1 + lambda * (1 - credit/100)).
@@ -28,6 +33,7 @@ REPORT_RADIUS_M = 50
 INCIDENT_RADIUS_M = 100
 STOP_RADIUS_M = 150
 NIGHT_CELL = 0.005  # NASA night-light pixels, about 500 m
+HELP_GROUPS = {"pharmacy", "hospital", "fuel", "police"}  # places to step into for help: open ones, and police at any hour
 NEAR_M = {"lamp": 20, "cctv": 50, "transit": 150, "crossing": 15, "sos_phone": 100, "blackspot": 100, "waterlogging": 50}
 
 
@@ -68,6 +74,30 @@ def why_ahead(r, others, fastest):
     if extra > 0:
         out.append(f"It takes {extra} min longer than the fastest way.")
     return out
+
+
+def headline(r, fastest):
+    """One plain line on what the extra time buys, against the fastest way."""
+    extra = r["minutes"] - fastest["minutes"]
+    if r is fastest or not r["stats"] or not fastest["stats"]:
+        return None
+    a, b = r["stats"], fastest["stats"]
+    per_km = lambda x, s: s["open_now"] / max(0.1, x["length_m"] / 1000)
+    gains = []
+    if b["nothing_open_m"] - a["nothing_open_m"] >= 100:
+        gains.append(f"a shorter stretch with nothing open ({a['nothing_open_m']} m vs {b['nothing_open_m']} m)")
+    if per_km(r, a) - per_km(fastest, b) >= 0.5:
+        gains.append(f"more places open per km ({per_km(r, a):.1f} vs {per_km(fastest, b):.1f})")
+    if a["lit_pct"] - b["lit_pct"] >= 10:
+        gains.append(f"more of it lit ({a['lit_pct']}% vs {b['lit_pct']}%)")
+    if a["main_pct"] - b["main_pct"] >= 10:
+        gains.append(f"more on main roads ({a['main_pct']}% vs {b['main_pct']}%)")
+    if a["isolated_m"] < b["isolated_m"] - 50:
+        gains.append(f"a shorter poorly rated stretch ({a['isolated_m']} m vs {b['isolated_m']} m)")
+    if not gains:
+        return None
+    lead = f"For {extra} extra {'minute' if extra == 1 else 'minutes'}" if extra > 0 else "For no extra time"
+    return f"{lead}, this way has {', '.join(gains[:-1]) + ' and ' + gains[-1] if len(gains) > 1 else gains[0]}."
 
 
 def dist(a, b):
@@ -221,6 +251,24 @@ def classify(tags):
     return None
 
 
+def place_group(tags, kind):
+    """What a place is for the map pins and the closer-look counts: pharmacy, hospital, fuel, food, shop, transit, police or other."""
+    a, cat = tags.get("amenity"), tags.get("overture", "")
+    if kind in ("police", "transit", "cctv"):
+        return kind
+    if a in ("pharmacy", "clinic", "doctors", "dentist") or tags.get("shop") in ("chemist", "medical_supply") or "pharmacy" in cat or "clinic" in cat:
+        return "pharmacy"
+    if a == "hospital" or "hospital" in cat:
+        return "hospital"
+    if a == "fuel" or "gas_station" in cat:
+        return "fuel"
+    if a in ("restaurant", "cafe", "fast_food", "food_court", "ice_cream") or any(w in cat for w in ("restaurant", "cafe", "food", "bakery")):
+        return "food"
+    if tags.get("shop") or tags.get("overture"):
+        return "shop"
+    return "other"
+
+
 def surroundings_kind(tags):
     for key in ("landuse", "natural", "leisure"):
         if tags.get(key) in SURROUNDINGS:
@@ -273,8 +321,9 @@ class Area:
                     cells[self._cell(pt)] += int(tags.get("building_count", 1))
                 elif kind:
                     self.grid[self._cell(pt)].append(len(self.pois))
-                    self.pois.append({"kind": kind, "pt": pt, "hours": tags.get("opening_hours"),
-                                      "source": tags.get("layer") or ("Mapillary" if tags.get("source") == "mapillary" else "Overture" if "overture" in tags else "OpenStreetMap"),
+                    self.pois.append({"kind": kind, "pt": pt, "hours": tags.get("opening_hours"), "group": place_group(tags, kind),
+                                      "source": tags.get("layer") or {"mapillary": "Mapillary", "geoapify": "Geoapify"}.get(tags.get("source"))
+                                      or ("Overture" if "overture" in tags else "OpenStreetMap"),
                                       "name": tags.get("name") or (tags.get("shop") or tags.get("amenity") or tags.get("overture") or kind).replace("_", " ")})
 
         if not self.building_cells:  # Overture already includes OSM buildings, so never add both
@@ -312,12 +361,19 @@ class Area:
                   "lanes": number(tags.get("lanes")), "maxspeed": number(tags.get("maxspeed"))}
         if detail["maxspeed"] and "mph" in tags["maxspeed"]:
             detail["maxspeed"] *= 1.6
+        # per way of travel: None = not allowed, 0 = both directions, 1 = only a to b, -1 = only b to a (walking ignores oneway)
+        oneway = 1 if tags.get("junction") == "roundabout" else ONEWAY.get(tags.get("oneway"), 0)
+        car = hw in CAR_ROADS and not {tags.get("motor_vehicle"), tags.get("motorcar")} & {"no", "private"}
+        bike = hw != "steps" and tags.get("bicycle") not in ("no", "dismount") and (
+            hw not in ("footway", "pedestrian") or tags.get("bicycle") in ("yes", "designated", "permissive"))
+        modes = {"walk": 0, "bike": (0 if tags.get("oneway:bicycle") == "no" or hw == "cycleway" else oneway) if bike else None,
+                 "car": oneway if car else None}
         for (a, pa), (b, pb) in zip(zip(el["nodes"], pts), zip(el["nodes"][1:], pts[1:])):
             self.nodes[a], self.nodes[b] = pa, pb
             ei = len(self.edges)
             self.edges.append({"a": a, "b": b, "length": dist(pa, pb), "highway": hw, "name": tags.get("name"),
                                "lit": tags.get("lit"), "sidewalk": sidewalk, "underpass": underpass,
-                               "overbridge": overbridge, "reports": [], "incidents": [], **detail})
+                               "overbridge": overbridge, "reports": [], "incidents": [], "modes": modes, **detail})
             self.adj[a].append((b, ei))
             self.adj[b].append((a, ei))  # walking ignores oneway
 
@@ -440,24 +496,28 @@ class Area:
     def light(self, when):
         return daylight(*self.center, when)
 
-    def ratings(self, when, rain=False):
+    def ratings(self, when, rain=False, mode="walk"):
         """(score, confidence) for every segment at this time."""
         light = self.light(when)
-        key = (when.weekday(), when.hour, when.minute, round(light, 1), rain)  # to the minute: opening hours end at any minute
+        key = (when.weekday(), when.hour, when.minute, round(light, 1), rain, mode)  # to the minute: opening hours end at any minute
         if key not in self._cache:
             if len(self._cache) > 200:
                 self._cache.clear()
             now = time.time()
-            self._cache[key] = [rating.rate(self, e, when, light, rain, now)[:2] for e in self.edges]
+            self._cache[key] = [rating.rate(self, e, when, light, rain, now, mode)[:2] for e in self.edges]
         return self._cache[key]
 
     # ---- routing ----
 
-    def nearest(self, pt):
+    def nearest(self, pt, mode="walk"):
+        """The closest street node this way of travel can use (a car starts on the nearest road, not a footpath)."""
         # shortcut: linear scan, fine for a campus-sized area; use the grid if the area grows to a city
-        return min(self.routable, key=lambda n: dist(pt, self.nodes[n]))
+        usable = [n for n in self.routable if any(self.edges[ei]["modes"][mode] is not None for _, ei in self.adj[n])]
+        if not usable:
+            raise ValueError(f"No streets usable by {mode} are mapped around there")
+        return min(usable, key=lambda n: dist(pt, self.nodes[n]))
 
-    def _search(self, src, dst, lam, credits, penalty=None):
+    def _search(self, src, dst, lam, credits, penalty=None, mode="walk"):
         best, prev = {src: 0.0}, {}
         heap = [(0.0, src)]
         while heap:
@@ -467,10 +527,15 @@ class Area:
             if d > best[u]:
                 continue
             for v, ei in self.adj[u]:
+                rule = self.edges[ei]["modes"][mode]
+                if rule is None or (rule and (u == self.edges[ei]["a"]) != (rule == 1)):
+                    continue  # not allowed this way, or against a one-way street
                 nd = d + self.edges[ei]["length"] * (1 + lam * (1 - credits[ei] / 100)) * (1 + (penalty or {}).get(ei, 0))
                 if nd < best.get(v, math.inf):
                     best[v], prev[v] = nd, (u, ei)
                     heapq.heappush(heap, (nd, v))
+        if dst not in prev and dst != src:
+            raise ValueError(f"No way through the mapped streets by {mode} between these two points")
         path, n = [], dst
         while n != src:
             n, ei = prev[n]
@@ -478,25 +543,26 @@ class Area:
         path.reverse()
         return path
 
-    def candidates(self, src, dst, credits):
-        """Distinct ways from src to dst: one per safety weighting, plus detours that avoid the streets already found."""
+    def candidates(self, src, dst, credits, mode="walk", max_extra_m=None):
+        """Distinct ways from src to dst: one per safety weighting, plus detours that avoid the streets already found.
+        Ways longer than MAX_DETOUR times the shortest, or more than max_extra_m longer, are dropped."""
         found = []
         for lam in SEARCH_LAMBDAS:
-            found.append(self._search(src, dst, lam, credits))
+            found.append(self._search(src, dst, lam, credits, mode=mode))
         for lam in (0, 3, 10):
             penalty = defaultdict(float)
             path = found[SEARCH_LAMBDAS.index(lam)]
             for _ in range(DETOUR_ROUNDS):
                 for _, ei in path:
                     penalty[ei] += 0.6
-                path = self._search(src, dst, lam, credits, penalty)
+                path = self._search(src, dst, lam, credits, penalty, mode)
                 found.append(path)
         length = lambda p: sum(self.edges[ei]["length"] for _, ei in p)
         fastest = min(length(p) for p in found) or 1
         kept = []  # (path, its edges, its length), shortest first
         for p in sorted(found, key=length):
             edges, lp = {ei for _, ei in p}, length(p)
-            if lp > MAX_DETOUR * fastest:
+            if lp > MAX_DETOUR * fastest or (max_extra_m is not None and lp > fastest + max_extra_m):
                 continue
             # sharing 90% of its length with a kept candidate makes it the same way with a small wiggle
             if any(sum(self.edges[ei]["length"] for ei in edges & k) >= 0.9 * min(lp, lk) for _, k, lk in kept):
@@ -504,14 +570,17 @@ class Area:
             kept.append((p, edges, lp))
         return [p for p, _, _ in kept]
 
-    def routes(self, start, end, when, rain=False):
-        """Every candidate route is scored; returns the safest, a balanced one (at most 25% longer) and the fastest."""
-        rated = self.ratings(when, rain)
+    def routes(self, start, end, when, rain=False, mode="walk", max_extra_min=None):
+        """Every candidate route is scored; returns the safest, a balanced one (at most 25% longer) and the fastest.
+        Each street is rated for the moment the trip reaches it, so a shop that shuts before you get there doesn't count."""
+        rated = self.ratings(when, rain, mode)
         credits = [rating.credit(s, c) for s, c in rated]
-        src, dst = self.nearest(start), self.nearest(end)
-        paths = self.candidates(src, dst, credits)
+        src, dst = self.nearest(start, mode), self.nearest(end, mode)
+        max_extra_m = None if max_extra_min is None else max_extra_min * 60 * MODES[mode]
+        paths = self.candidates(src, dst, credits, mode, max_extra_m)
         fastest_len = sum(self.edges[ei]["length"] for _, ei in paths[0]) or 1  # candidates come shortest first
-        scored = [self._summary("", p, rated, when, fastest_len, dst) for p in paths]
+        passing = {}  # (edge, 5-minute slot) -> (score, confidence), shared by all candidates
+        scored = [self._summary("", p, when, fastest_len, dst, rain, mode, passing) for p in paths]
         # unrated length counts against a route, so a mostly unknown way is never ranked above a measured one
         ranked = sorted(scored, key=lambda r: (-r["score"] * (100 - r["unrated_pct"]) / 100, r["length_m"]))
         fastest = scored[0]
@@ -522,22 +591,36 @@ class Area:
                     for i, r in enumerate(ranked)]
         out = []
         for kind, r in (("safest", safest), ("fastest", fastest), ("balanced", balanced)):  # a repeat points at safest or fastest
-            out.append({**r, "kind": kind, "checked": len(scored), "rank": ranked.index(r) + 1, "compared": compared,
-                        "why": why_ahead(r, [x for x in ranked if x is not r], fastest),
+            out.append({**r, "kind": kind, "mode": mode, "checked": len(scored), "rank": ranked.index(r) + 1, "compared": compared,
+                        "max_extra_min": max_extra_min, "why": why_ahead(r, [x for x in ranked if x is not r], fastest),
+                        "headline": headline(r, fastest),
                         "same_as": next((o["kind"] for o in out if o["coords"] == r["coords"]), None)})
         return [out[0], out[2], out[1]]
 
-    def _summary(self, kind, path, rated, when, fastest_len, dst):
+    def _summary(self, kind, path, when, fastest_len, dst, rain=False, mode="walk", passing=None):
         length = sum(self.edges[ei]["length"] for _, ei in path)
         coords = [self.nodes[n] for n, _ in path] + [self.nodes[dst]]
         light = self.light(when)
-        base = {"kind": kind, "coords": coords, "length_m": round(length), "minutes": max(1, round(length / WALK_MPS / 60)),
+        speed = MODES[mode]
+        base = {"kind": kind, "coords": coords, "length_m": round(length), "minutes": max(1, round(length / speed / 60)),
                 "daylight": round(light, 2)}
         if not path:
             return {**base, "minutes": 0, "score": 100, "confidence": 1.0, "confidence_level": "high", "unrated_pct": 0,
                     "reasons": [], "warnings": [], "factors": {}, "sources": [], "weakest": None, "havens": [], "places": [], "stats": {}, "turns": 0,
-                    "steps": [], "segments": []}
+                    "steps": [], "segments": [], "look": {}, "strip": {}}
         now = time.time()
+        passing = {} if passing is None else passing
+        # when the trip reaches each street, in 5-minute slots, and the street's rating for that moment
+        at, travelled = [], 0.0
+        for _, ei in path:
+            at.append(when + timedelta(seconds=RATE_BUCKET_S * int((travelled + self.edges[ei]["length"] / 2) / speed // RATE_BUCKET_S)))
+            travelled += self.edges[ei]["length"]
+        rated = {}
+        for (_, ei), t in zip(path, at):
+            key = (ei, t)
+            if key not in passing:
+                passing[key] = rating.rate(self, self.edges[ei], t, self.light(t), rain, now, mode)[:2]
+            rated[ei] = passing[key]
         rated_len = sum(self.edges[ei]["length"] for _, ei in path if rated[ei][1] >= rating.MIN_CONFIDENCE) or 0.0
         known = [(i, ei) for i, (_, ei) in enumerate(path) if rated[ei][1] >= rating.MIN_CONFIDENCE]
         avg = sum(rated[ei][0] * self.edges[ei]["length"] for _, ei in known) / (rated_len or 1)
@@ -545,16 +628,20 @@ class Area:
         weak_i = min((i for i, _ in known), key=lambda i: rated[path[i][1]][0], default=None)
 
         isolated = run = 0.0
-        haven_gap = gap = 0.0
+        haven_gap = gap = help_gap = hgap = 0.0
         factor_sum, factor_len, factor_q = defaultdict(float), defaultdict(float), defaultdict(float)
         places, havens, cctv, unknown_hours, mapped, sources = set(), {}, set(), set(), set(), set()
-        lit_len = dark_len = 0.0
+        place_at, place_open = {}, {}  # place -> metres into the trip, open when the trip passes it
+        gaps, darks, dark_from = [], [], None
+        lit_len = dark_len = main_len = 0.0
         police_m = math.inf
         underpasses = 0
         zones = set()
-        for _, ei in path:
+        done = 0.0
+        for (_, ei), t in zip(path, at):
             e = self.edges[ei]
-            feats = rating.factors(self, e, when, light, now)
+            lt = self.light(t)
+            feats = rating.factors(self, e, t, lt, now)
             for k, f in feats.items():
                 if f:
                     factor_sum[k] += f["value"] * e["length"]
@@ -563,21 +650,47 @@ class Area:
                     sources.update(f["sources"])
             run = run + e["length"] if rated[ei][1] >= rating.MIN_CONFIDENCE and rated[ei][0] < 40 else 0.0
             isolated = max(isolated, run)
-            open_here = [i for i in e["near"]["place"] + e["near"]["haven"] if self.is_place_open(self.pois[i], when)]
-            gap = 0.0 if open_here else gap + e["length"]
+            near_places = e["near"]["place"] + e["near"]["haven"] + e["near"]["transit"] + e["near"]["cctv"]
+            for i in near_places:
+                if i not in place_at:
+                    place_at[i] = done + e["length"] / 2
+                    place_open[i] = self.is_place_open(self.pois[i], t)
+            open_here = [i for i in e["near"]["place"] + e["near"]["haven"] if place_open[i]]
+            if open_here:
+                if gap >= 300:
+                    gaps.append([round((done - gap) / length, 3), round(done / length, 3)])
+                gap = 0.0
+            else:
+                gap += e["length"]
             haven_gap = max(haven_gap, gap)
+            helped = any(self.pois[i]["group"] in HELP_GROUPS and place_open[i] for i in open_here) or e["police_m"] <= 150
+            hgap = 0.0 if helped else hgap + e["length"]
+            help_gap = max(help_gap, hgap)
             places.update(open_here)
             for i in open_here:
                 havens.setdefault(i, len(havens))
             cctv.update(e["near"]["cctv"])
             mapped.update(e["near"]["place"] + e["near"]["haven"])
-            unknown_hours.update(i for i in e["near"]["place"] + e["near"]["haven"] if self.is_place_open(self.pois[i], when) is None)
+            unknown_hours.update(i for i in e["near"]["place"] + e["near"]["haven"] if place_open[i] is None)
+            dark_here = bool(feats["lighting"]) and feats["lighting"]["value"] < 0.5 and lt < 1
             if feats["lighting"]:
                 lit_len += e["length"] if feats["lighting"]["value"] >= 0.5 else 0
                 dark_len += e["length"] if feats["lighting"]["value"] < 0.5 else 0
+            if dark_here and dark_from is None:
+                dark_from = done
+            elif not dark_here and dark_from is not None:
+                if done - dark_from >= 100:
+                    darks.append([round(dark_from / length, 3), round(done / length, 3)])
+                dark_from = None
+            main_len += e["length"] if e["highway"] in rating.MAIN_ROADS else 0
             police_m = min(police_m, e["police_m"])
             underpasses += e["underpass"]
             zones.update(e["zones"])
+            done += e["length"]
+        if gap >= 300:
+            gaps.append([round((done - gap) / length, 3), 1.0])
+        if dark_from is not None and done - dark_from >= 100:
+            darks.append([round(dark_from / length, 3), 1.0])
 
         if weak_i is None:
             score = 0  # nothing on this route is measured well enough to rate
@@ -592,12 +705,11 @@ class Area:
 
         unrated_pct = round(100 * (1 - rated_len / length)) if length else 0
         no_light = length - lit_len - dark_len
-        reasons = [f"{len(mapped)} shops and places along the way", f"{len(places)} confirmed open now"]
+        reasons = [f"{len(mapped)} shops and places along the way", f"{len(places)} confirmed open as you pass"]
         if unknown_hours:
             reasons.append(f"{len(unknown_hours)} with no published hours")
-        main = sum(self.edges[ei]["length"] for _, ei in path if self.edges[ei]["highway"] in rating.MAIN_ROADS)
-        if main >= 0.1 * length:
-            reasons.append(f"{round(100 * main / length)}% on main roads")
+        if main_len >= 0.1 * length:
+            reasons.append(f"{round(100 * main_len / length)}% on main roads")
         if light < 1:
             reasons.append(f"{round(100 * lit_len / length)}% lit, {round(100 * dark_len / length)}% unlit")
             if no_light >= 1:
@@ -621,11 +733,21 @@ class Area:
         weakest = None
         if weak_i is not None:
             weak = self.edges[path[weak_i][1]]
-            w = rating.weights(light)
-            wf = rating.factors(self, weak, when, light, now)
+            t = at[weak_i]
+            w = rating.weights(self.light(t), mode)
+            wf = rating.factors(self, weak, t, self.light(t), now)
             why = max((k for k, f in wf.items() if f and w[k] > 0), key=lambda k: w[k] * (1 - wf[k]["value"]))
             weakest = {"coords": [self.nodes[weak["a"]], self.nodes[weak["b"]]], "score": round(rated[path[weak_i][1]][0]),
                        "name": weak["name"] or weak["highway"].replace("_", " "), "why": LABELS[why]}
+        groups = defaultdict(lambda: {"found": 0, "open": 0, "no_hours": 0})
+        for i in place_at:
+            g = groups[self.pois[i]["group"]]
+            g["found"] += 1
+            g["open"] += place_open[i] is True
+            g["no_hours"] += place_open[i] is None and self.pois[i]["group"] not in ("transit", "cctv")  # stops and cameras have no hours
+        at_place = lambda i: {"name": self.pois[i]["name"], "pt": self.pois[i]["pt"], "group": self.pois[i]["group"],
+                              "open": place_open[i], "frac": round(place_at[i] / length, 3),
+                              "minutes": round(place_at[i] / speed / 60), "source": self.pois[i]["source"]}
         return {
             **base,
             "score": round(max(0, min(100, score))),
@@ -634,14 +756,19 @@ class Area:
             "unrated_pct": unrated_pct,
             # plain measures for comparing routes side by side
             "stats": {"lit_pct": round(100 * lit_len / length), "dark_pct": round(100 * dark_len / length), "open_now": len(places),
-                      "isolated_m": round(isolated), "nothing_open_m": round(haven_gap), "cctv": len(cctv),
-                      "police_m": None if police_m == math.inf else round(police_m)},
+                      "isolated_m": round(isolated), "nothing_open_m": round(haven_gap), "help_gap_m": round(help_gap), "cctv": len(cctv),
+                      "main_pct": round(100 * main_len / length), "police_m": None if police_m == math.inf else round(police_m)},
+            # what is along the route, by kind, and whether it is open when the trip passes it
+            "look": {"groups": dict(groups), "nothing_open_m": round(haven_gap), "help_gap_m": round(help_gap), "isolated_m": round(isolated),
+                     "arrive": (when + timedelta(seconds=length / speed)).isoformat(timespec="minutes")},
+            # positions along the route (0 = start, 1 = end) for the route strip
+            "strip": {"gaps": gaps, "dark": darks},
             "reasons": reasons,
             "warnings": warnings,
             # per factor: average value and how well it was measured along the route, None when nothing measured it
             "factors": {LABELS[k]: {"score": round(100 * factor_sum[k] / factor_len[k]),
                                     "measured": round(100 * factor_q[k] / length)} if factor_len[k] else None
-                        for k in rating.WEIGHTS if rating.weights(light)[k] > 0},
+                        for k in rating.WEIGHTS if rating.weights(light, mode)[k] > 0},
             "sources": sorted(sources),
             "turns": turns,
             "steps": steps,
@@ -649,9 +776,8 @@ class Area:
                          for _, ei in path if rated[ei][1] < rating.MIN_CONFIDENCE],
             "weakest": weakest,
             "havens": [{"name": self.pois[i]["name"], "pt": self.pois[i]["pt"]} for i in list(havens)[:30]],
-            # every shop and place along the way; open is None when it publishes no hours
-            "places": [{"name": self.pois[i]["name"], "pt": self.pois[i]["pt"], "open": self.is_place_open(self.pois[i], when)}
-                       for i in sorted(mapped)[:300]],
+            # every place along the way with its kind; open is None when it publishes no hours
+            "places": [at_place(i) for i in sorted(place_at, key=place_at.get)[:400]],
         }
 
     def _steps(self, path, coords):

@@ -18,7 +18,7 @@ TILE = 0.01  # degrees, about 1.1 km
 CHUNK = 3  # missing tiles are fetched in blocks of up to 3x3, one Overpass request each
 TILE_MAX_AGE = 7 * 86400
 # Sources that change slowly are kept longer: the night-light image is from 2016, Overture and Mapillary refresh monthly
-SOURCE_MAX_AGE = {"nightlights": math.inf, "mapillary": 30 * 86400, "places": 30 * 86400, "buildings": 30 * 86400}
+SOURCE_MAX_AGE = {"nightlights": math.inf, "mapillary": 30 * 86400, "places": 30 * 86400, "buildings": 30 * 86400, "geoapify": 30 * 86400}
 LAYERS = {  # data/layers/<name>.csv (lat,lon[,name]) from official lists or RTI replies -> the map tags they stand for
     "streetlights": {"highway": "street_lamp"}, "cctv": {"man_made": "surveillance"}, "police": {"amenity": "police"},
     "hospitals": {"amenity": "hospital"}, "blackspots": {"hazard": "blackspot"}, "waterlogging": {"hazard": "waterlogging"},
@@ -74,6 +74,50 @@ def mapillary(s, w, n, e):
                             "tags": {**MAPILLARY_KINDS[f["object_value"]], "source": "mapillary"}})
         url = page.get("paging", {}).get("next")
         if not url:
+            break
+    return {"elements": out}
+
+
+# Geoapify place categories -> the OSM tags the scorer already understands (for places that didn't come from OSM)
+GEOAPIFY_TAGS = {"healthcare.pharmacy": {"amenity": "pharmacy"}, "healthcare.hospital": {"amenity": "hospital"},
+                 "healthcare.clinic_or_praxis": {"amenity": "clinic"}, "service.vehicle.fuel": {"amenity": "fuel"},
+                 "service.police": {"amenity": "police"}, "catering.restaurant": {"amenity": "restaurant"},
+                 "catering.cafe": {"amenity": "cafe"}, "catering.fast_food": {"amenity": "fast_food"},
+                 "public_transport": {"highway": "bus_stop"}, "accommodation.hotel": {"tourism": "hotel"}}
+GEOAPIFY_CATEGORIES = "commercial,catering,healthcare,service.vehicle.fuel,service.police,public_transport,accommodation.hotel"
+
+
+def geoapify(s, w, n, e):
+    """Shops, food, pharmacies, hospitals, petrol pumps, police and transit from the Geoapify Places API (free key).
+    Places Geoapify took from OpenStreetMap keep their OSM id, so they merge with the OSM copy instead of counting twice."""
+    out = []
+    for offset in range(0, 2000, 500):
+        q = urllib.parse.urlencode({"categories": GEOAPIFY_CATEGORIES, "filter": f"rect:{w},{s},{e},{n}", "limit": 500,
+                                    "offset": offset, "apiKey": os.environ["GEOAPIFY_KEY"]})
+        with urllib.request.urlopen(urllib.request.Request(f"https://api.geoapify.com/v2/places?{q}", headers={"User-Agent": "SafeRoute/1.0"}),
+                                    timeout=20) as r:
+            features = json.load(r).get("features", [])
+        for f in features:
+            p = f["properties"]
+            raw = (p.get("datasource") or {}).get("raw") or {}
+            tags = {k: v for k, v in raw.items() if isinstance(v, str)}
+            if not ({"amenity", "shop", "highway", "railway", "tourism", "office"} & set(tags)):
+                cat = next((c for c in p.get("categories", []) if c in GEOAPIFY_TAGS or c.split(".")[0] in GEOAPIFY_TAGS), None)
+                shop = next((c.split(".")[-1] for c in p.get("categories", []) if c.startswith("commercial.")), None)
+                tags.update(GEOAPIFY_TAGS.get(cat) or GEOAPIFY_TAGS.get((cat or "").split(".")[0]) or ({"shop": shop} if shop else {}))
+            if not tags:
+                continue
+            tags.update(source="geoapify", **({"name": p["name"]} if p.get("name") else {}),
+                        **({"opening_hours": p["opening_hours"]} if p.get("opening_hours") else {}))
+            kind = {"n": "node", "w": "way"}.get(raw.get("osm_type"))
+            lat, lon = p["lat"], p["lon"]
+            if kind and raw.get("osm_id"):
+                el = {"type": kind, "id": int(raw["osm_id"]), "tags": tags}
+                el.update({"lat": lat, "lon": lon} if kind == "node" else {"center": {"lat": lat, "lon": lon}})
+            else:
+                el = {"type": "node", "id": f"gfy{p['place_id']}", "lat": lat, "lon": lon, "tags": tags}
+            out.append(el)
+        if len(features) < 500:
             break
     return {"elements": out}
 
@@ -435,7 +479,7 @@ class TileStore:
         """The area covering a walk from a to b, with room for safer detours."""
         d = dist(a, b)
         if d > MAX_TRIP_M:
-            raise TooFar(f"That's a {d / 1000:.0f} km walk. SafeRoute plans walks up to {MAX_TRIP_M // 1000} km.")
+            raise TooFar(f"That's {d / 1000:.0f} km in a straight line. SafeRoute plans trips up to {MAX_TRIP_M // 1000} km.")
         return self.area(tiles_near(a, b, max(400, 0.25 * d)))
 
     def around(self, pt, radius_m=500):

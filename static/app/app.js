@@ -15,6 +15,12 @@ const COLOR = { good: "#12b76a", ok: "#f79009", bad: "#f04438", none: "#98a2b3" 
 const CONF = { high: "High confidence", medium: "Medium confidence", low: "Low confidence", none: "Not rated" };
 const MIN_CONF = 0.35; // below this a street has too little data to rate
 const LABEL = { safest: "Safest", balanced: "Balanced", fastest: "Fastest" };
+const MODE = { walk: { verb: "walking", noun: "walk", start: "Start walking", icon: "walk" },
+  bike: { verb: "riding", noun: "ride", start: "Start riding", icon: "bike" }, car: { verb: "driving", noun: "drive", start: "Start driving", icon: "car" } };
+// kinds of places along a route: map pin letter, colour and filter chip name
+const GROUP = { shop: ["S", "#d99a00", "Shops"], food: ["R", "#f97316", "Food"], pharmacy: ["+", "#e11d74", "Pharmacies"],
+  hospital: ["H", "#7c3aed", "Hospitals"], fuel: ["P", "#16a34a", "Petrol"], transit: ["B", "#2563eb", "Bus and metro"], cctv: ["C", "#0891b2", "Cameras"] };
+const groupOf = (g) => (GROUP[g] ? g : "shop");
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 const fmtDist = (m) => (m < 1000 ? `${Math.round(m / 10) * 10} m` : `${(m / 1000).toFixed(1)} km`);
 
@@ -64,7 +70,7 @@ function applyTheme() {
   document.documentElement.toggleAttribute("data-dark", dark);
 }
 applyTheme();
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { applyTheme(); setBaseMap(); });
 
 // ---------- state ----------
 const state = {
@@ -72,14 +78,36 @@ const state = {
   to: null, toLabel: "",
   when: null, // null means now
   here: null,
-  routes: [], sel: "safest", rain: false,
+  routes: [], sel: "safest", rain: false, area: [],
+  mode: store.get("mode", "walk"), groups: new Set(store.get("groups", Object.keys(GROUP))),
   trip: null,
   installPrompt: null,
 };
 
 // ---------- map ----------
 const map = L.map("map", { zoomControl: false, attributionControl: true, preferCanvas: true });
-L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+// Vector map from OpenFreeMap (free, no key) drawn by MapLibre; the plain OpenStreetMap tiles if WebGL or the style can't load
+let baseLayer = null;
+function rasterBase() {
+  if (baseLayer) baseLayer.remove();
+  document.body.classList.remove("vector-map");
+  baseLayer = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+}
+function setBaseMap() {
+  const webgl = (() => { try { return !!document.createElement("canvas").getContext("webgl"); } catch { return false; } })();
+  if (!L.maplibreGL || !window.maplibregl || !webgl) return rasterBase();
+  if (baseLayer) baseLayer.remove();
+  const dark = document.documentElement.hasAttribute("data-dark");
+  baseLayer = L.maplibreGL({ style: `https://tiles.openfreemap.org/styles/${dark ? "dark" : "liberty"}`,
+    attribution: '<a href="https://openfreemap.org" target="_blank">OpenFreeMap</a> © <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>' }).addTo(map);
+  document.body.classList.add("vector-map");
+  const layer = baseLayer;
+  map.whenReady(() => {  // the MapLibre map exists once Leaflet has a view
+    const gl = layer.getMaplibreMap?.();
+    gl?.on("error", () => { if (baseLayer === layer && !gl.isStyleLoaded()) rasterBase(); });
+  });
+}
+setBaseMap();
 const routeLayer = L.layerGroup().addTo(map);
 const havenLayer = L.layerGroup().addTo(map);
 let heatLayer = null, meMarker = null, fromMarker = null, toMarker = null;
@@ -260,7 +288,7 @@ async function maybeRoute() {
   renderSheet(`<div class="empty"><div class="badge">${icon("shield")}</div><div><h3>Checking every street…</h3><p class="muted" id="routeWait">Lighting, open shops, police, CCTV and reports for ${esc(timeLabel().toLowerCase())}.</p></div></div>`);
   const slow = setTimeout(() => { const w = $("#routeWait"); if (w) w.textContent = "First trip in this area: downloading and scoring its streets. This can take up to a minute."; }, 6000);
   try {
-    const q = new URLSearchParams({ from: from.join(","), to: state.to.join(","), at: whenParam() });
+    const q = new URLSearchParams({ from: from.join(","), to: state.to.join(","), at: whenParam(), mode: state.mode, extra: store.get("extra", "") });
     const res = await api("/api/route?" + q);
     if (seq !== routeSeq) return; // the user picked something else meanwhile
     state.routes = res.routes; state.rain = res.rain; state.area = res.area || []; state.routeFrom = from;
@@ -289,9 +317,7 @@ function drawRoutes(fit) {
         L.polyline(r.weakest.coords, { color: "#16131f", weight: 7, opacity: 0.8, dashArray: "2 10", lineCap: "round" }).addTo(routeLayer)
           .bindTooltip(`Weakest stretch: ${esc(r.weakest.name)}`);
       r.segments.forEach(([a, b, c, d]) => L.polyline([[a, b], [c, d]], { color: COLOR.none, weight: 7, dashArray: "6 8", interactive: false }).addTo(routeLayer));
-      (r.places || []).filter((pl) => pl.open !== true).forEach((pl) => L.circleMarker(pl.pt, { radius: 4, color: "#fff", weight: 1.5, fillColor: pl.open === false ? "#475467" : "#98a2b3", fillOpacity: 1 })
-        .addTo(havenLayer).bindTooltip(`${esc(pl.name)}: ${pl.open === false ? "closed now" : "hours not published"}`));
-      r.havens.forEach((h) => L.marker(h.pt, { icon: divIcon("haven-dot", 14), keyboard: false }).addTo(havenLayer).bindTooltip(`Open now: ${esc(h.name)}`));
+      drawPlaces(r);
     }
   }
   if (fit) {
@@ -300,6 +326,57 @@ function drawRoutes(fit) {
     const top = $(".topbar").getBoundingClientRect().bottom + 16, sheet = $("#sheet").getBoundingClientRect().height + 16;
     if (all.length) map.fitBounds(all, { paddingTopLeft: desk ? [460, 40] : [24, top], paddingBottomRight: desk ? [40, 40] : [90, sheet] });
   }
+}
+
+function drawPlaces(r) {
+  for (const pl of r.places || []) {
+    const g = groupOf(pl.group);
+    if (!state.groups.has(g)) continue;
+    const [letter, color, name] = GROUP[g];
+    const status = g === "cctv" ? "" : pl.open === true ? "open when you pass" : pl.open === false ? "closed when you pass" : "hours not published";
+    L.marker(pl.pt, { icon: L.divIcon({ className: "", html: `<div class="gpin ${g === "cctv" ? "" : pl.open === true ? "open" : pl.open === false ? "closed" : "unknown"}" style="background:${color}">${letter}</div>`, iconSize: [22, 22], iconAnchor: [11, 11] }), keyboard: false })
+      .addTo(havenLayer).bindTooltip(`${esc(pl.name)}${status ? `: ${status}` : ""} · ${pl.minutes} min into the ${MODE[r.mode || "walk"].noun}${pl.source && pl.source !== "OpenStreetMap" ? ` · ${esc(pl.source)}` : ""}`);
+  }
+}
+
+function groupChips(r) {
+  const n = {};
+  (r.places || []).forEach((pl) => { const g = groupOf(pl.group); n[g] = (n[g] || 0) + 1; });
+  return `<div class="groups" role="group" aria-label="Show on the map">${Object.entries(GROUP).filter(([g]) => n[g]).map(([g, [, color, name]]) =>
+    `<button data-group="${g}" aria-pressed="${state.groups.has(g)}"><i style="background:${color}"></i>${name} ${n[g]}</button>`).join("")}</div>`;
+}
+
+function stripRow(x, r) {
+  const ends = `<span class="end" style="left:0;background:var(--brand)"></span><span class="end" style="left:100%;background:var(--risk)"></span>`;
+  const gaps = (x.strip?.gaps || []).map(([a, b]) => `<span class="gap" style="left:${a * 100}%;width:${(b - a) * 100}%"></span>`).join("");
+  const dark = (x.strip?.dark || []).map(([a, b]) => `<span class="dark" style="left:${a * 100}%;width:${(b - a) * 100}%"></span>`).join("");
+  const dots = (x.places || []).filter((p) => p.group !== "cctv" && p.group !== "transit").map((p) =>
+    `<span class="p" style="left:${p.frac * 100}%;background:${p.open === true ? "var(--safe)" : p.open === false ? "#475467" : "#c0c5d0"}"></span>`).join("");
+  const n = (x.strip?.gaps || []).length;
+  return `<div class="strip-row ${x.kind === r.kind || r.same_as === x.kind ? "this" : ""}" data-kind="${x.kind}">
+    <small><span><b>${LABEL[x.kind]}</b> · ${x.minutes} min</span><span>${n ? `${n} long empty ${n === 1 ? "stretch" : "stretches"}` : "No long empty stretches"}</span></small>
+    <div class="strip" aria-hidden="true">${gaps}${dark}${dots}${ends}</div></div>`;
+}
+
+function lookTable(r) {
+  const g = r.look?.groups || {}, z = { found: 0, open: 0, no_hours: 0 };
+  const row = (label, k) => { const v = g[k] || z; return `<tr><td>${label}</td><td>${v.found ? `${v.found} found · ${v.open} open${v.no_hours ? `, ${v.no_hours} unknown` : ""}` : "None found"}</td></tr>`; };
+  const shops = ["shop", "food", "other"].reduce((a, k) => ({ found: a.found + (g[k]?.found || 0), open: a.open + (g[k]?.open || 0) }), z);
+  const help = ["pharmacy", "hospital", "fuel"].reduce((a, k) => a + (g[k]?.open || 0), 0);
+  const noHours = Object.values(g).reduce((a, v) => a + (v.no_hours || 0), 0);
+  const arrive = r.look?.arrive ? r.look.arrive.slice(11, 16) : "";
+  return `<details class="why"><summary>A closer look at this route</summary>
+    <table class="look"><tbody>
+    ${row("Medical stores and clinics", "pharmacy")}${row("Hospitals", "hospital")}${row("Petrol pumps", "fuel")}
+    <tr><td>Shops and food</td><td>${shops.found} found · ${shops.open} open</td></tr>
+    <tr><td>Bus and metro stops</td><td>${g.transit?.found || 0}</td></tr>
+    <tr><td>CCTV cameras mapped</td><td>${g.cctv?.found || 0}</td></tr>
+    <tr><td>Help points open as you pass</td><td>${help}</td></tr>
+    <tr><td>Longest stretch without an open help point or police</td><td>${fmtDist(r.look?.help_gap_m || 0)}</td></tr>
+    <tr><td>Longest stretch with nothing open</td><td>${fmtDist(r.look?.nothing_open_m || 0)}</td></tr>
+    ${arrive ? `<tr><td>You arrive about</td><td>${arrive}</td></tr>` : ""}
+    </tbody></table>
+    <p class="muted" style="margin:0 0 12px">Opening hours are checked for the minute you pass each place, not when you leave. ${noHours ? `${noHours} places publish no hours, so they count as unknown, never as open. ` : ""}Help points are medical stores, hospitals and petrol pumps that are open, and police stations within 150 m.</p></details>`;
 }
 
 function gauge(score) {
@@ -327,8 +404,9 @@ function renderRoutes() {
   if (state.rain) notes.push(["", "It's raining, so streets may be emptier than usual."]);
   if (r.weakest && r.weakest.score < 45) notes.push(["", `Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because of ${r.weakest.why.toLowerCase()}. It's dashed on the map.`]);
   const unknown = (r.places || []).filter((pl) => pl.open === null).length;
-  if (unknown) notes.push(["info", `Grey dots on the map are ${unknown} shops and places with no published hours, so we can't say if they're open. Green dots are confirmed open. Tap "Report" and "Shops open now" to fix that for everyone.`]);
-  if (r.checked > 1) notes.push(["info", `We scored ${r.checked} different ways there. This one ranks #${r.rank} for safety.`]);
+  if (unknown) notes.push(["info", `Faded pins on the map are ${unknown} places with no published hours, so we can't say if they're open. Bright pins are open when you pass. Tap "Report" and "Shops open now" to fix that for everyone.`]);
+  if (r.headline) notes.unshift(["info", r.headline]);
+  if (r.checked > 1) notes.push(["info", `We scored ${r.checked} different ways there${r.max_extra_min ? `, up to ${r.max_extra_min} min longer than the fastest` : ""}. This one ranks #${r.rank} for safety.`]);
   else if (r.checked === 1) notes.push(["info", "This is the only sensible way there on the map, so all three options are the same."]);
   if (r.same_as) notes.push(["info", `This is the same way as the ${LABEL[r.same_as].toLowerCase()} route.`]);
   const dusk = r.daylight > 0 && r.daylight < 1;
@@ -340,7 +418,7 @@ function renderRoutes() {
         <h3>${r.confidence_level === "none" ? "Not rated" : scoreWord(r.score)}</h3>
         <p class="conf conf-${r.confidence_level}">${CONF[r.confidence_level]} · ${Math.round(r.confidence * 100)}% measured</p>
         <div class="stats">
-          <div><b>${r.minutes} min</b>walk</div>
+          <div><b>${r.minutes} min</b>${MODE[r.mode || "walk"].noun}</div>
           <div><b>${fmtDist(r.length_m)}</b>distance</div>
           <div><b>${r.turns}</b>${r.turns === 1 ? "turn" : "turns"}</div>
         </div>
@@ -352,10 +430,14 @@ function renderRoutes() {
       <li class="info">${r.daylight >= 1 ? "Daylight" : dusk ? "Dusk" : "After dark"}</li>
     </ul>
     <div class="actions">
-      <button class="btn btn-primary" id="startBtn">${icon("walk")}Start walking</button>
+      <button class="btn btn-primary" id="startBtn">${icon(MODE[r.mode || "walk"].icon)}${MODE[r.mode || "walk"].start}</button>
       <button class="btn" id="shareRouteBtn" aria-label="Share this trip">${icon("share")}</button>
     </div>
+    ${groupChips(r)}
+    <div class="strips">${state.routes.filter((x) => !x.same_as).map((x) => stripRow(x, r)).join("")}
+      <div class="strip-key"><span><i style="background:var(--risk)"></i>300 m or more with nothing open</span><span><i style="background:#6941c6"></i>unlit</span><span><i style="background:var(--safe);width:8px;height:8px;border-radius:50%"></i>open</span><span><i style="background:#c0c5d0;width:8px;height:8px;border-radius:50%"></i>hours unknown</span></div></div>
     ${notes.map(([kind, n]) => `<div class="note ${kind}">${icon(kind === "info" ? "shield" : "alert")}<span>${esc(n)}</span></div>`).join("")}
+    ${lookTable(r)}
     ${r.compared && r.compared.length > 1 ? `<details class="why"><summary>${r.rank === 1 ? "Why this is the safest" : `Why this ranks #${r.rank}`} · ${r.checked} ways scanned</summary>
       <ul class="why-list">${(r.why || []).map((t) => `<li class="${t.startsWith("But:") ? "warn" : ""}">${esc(t)}</li>`).join("")}</ul>
       <div class="compare"><table><thead><tr><th>#</th><th>Score</th><th>Time</th><th>Lit</th><th>Open</th><th>Unrated</th></tr></thead><tbody>
@@ -369,7 +451,14 @@ function renderRoutes() {
     <details class="why"><summary>Why this score?</summary><div class="bars">${factors}</div>
       <p class="muted" style="margin:0 0 8px">Data used: ${r.sources.map(esc).join(", ") || "none"}.</p>
       <p class="muted" style="margin:0 0 12px">Scores compare routes. They mean <b>safer</b>, never guaranteed safe. Trust your instincts.</p></details>`, true);
-  document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => { state.sel = t.dataset.kind; drawRoutes(); renderRoutes(); }));
+  document.querySelectorAll(".tab, .strip-row").forEach((t) => (t.onclick = () => { if (state.trip) return; state.sel = t.dataset.kind; drawRoutes(); renderRoutes(); }));
+  document.querySelectorAll("[data-group]").forEach((b) => (b.onclick = () => {
+    const g = b.dataset.group;
+    if (state.groups.has(g)) state.groups.delete(g); else state.groups.add(g);
+    store.set("groups", [...state.groups]);
+    b.setAttribute("aria-pressed", state.groups.has(g));
+    drawRoutes();
+  }));
   $("#startBtn").onclick = startTrip;
   $("#shareRouteBtn").onclick = () => startTrip({ shareOnly: true });
 }
@@ -441,7 +530,7 @@ async function startTrip(opts = {}) {
   const r = state.routes.find((x) => x.kind === state.sel);
   let t;
   try { t = await createTrip(state.to, r.minutes); } catch (e) { return toast(e.message); }
-  const shared = shareText(`I'm walking to ${state.toLabel || "my destination"} with SafeRoute, about ${r.minutes} min. Follow me live:`, tripLink(t.id));
+  const shared = shareText(`I'm ${MODE[r.mode || "walk"].verb} to ${state.toLabel || "my destination"} with SafeRoute, about ${r.minutes} min. Follow me live:`, tripLink(t.id));
   if (opts.shareOnly) { await shared; return; }
   startWatching();
   state.trip = { ...t, route: r, started: Date.now(), offCount: 0, lastMovePt: state.here, lastMoveAt: Date.now(), lastPost: 0, nextCheck: 0,
@@ -463,7 +552,7 @@ function drawTripRoute() {
   routeLayer.clearLayers(); havenLayer.clearLayers();
   L.polyline(r.coords, { color: "#fff", weight: 12, opacity: 0.9 }).addTo(routeLayer);
   state.tripLine = L.polyline(r.coords, { color: COLOR[scoreClass(r.score)], weight: 8 }).addTo(routeLayer);
-  r.havens.forEach((h) => L.marker(h.pt, { icon: divIcon("haven-dot", 14), keyboard: false }).addTo(havenLayer).bindTooltip(`Open now: ${esc(h.name)}`));
+  drawPlaces(r);
 }
 
 // ---------- turn-by-turn ----------
@@ -514,7 +603,7 @@ async function reroute(pt) {
   speak("Off route. Finding the safest way from here.");
   toast("Off route. Finding the safest way from here…");
   try {
-    const q = new URLSearchParams({ from: pt.join(","), to: state.to.join(","), at: whenParam() });
+    const q = new URLSearchParams({ from: pt.join(","), to: state.to.join(","), at: whenParam(), mode: state.mode, extra: store.get("extra", "") });
     const res = await api("/api/route?" + q, null, 60000);
     if (state.trip !== t) return;
     t.route = res.routes.find((x) => x.kind === state.sel) || res.routes[0];
@@ -897,6 +986,7 @@ function openSettings() {
     <div class="row"><label for="buffer">Check in if I'm late by</label>${sel("buffer", store.get("buffer", 10), [[5, "5 min"], [10, "10 min"], [15, "15 min"], [30, "30 min"]])}</div>
     <div class="row"><label for="caller">Fake caller name</label><input id="caller" class="input" style="width:50%" maxlength="30" value="${esc(store.get("caller", "Mom"))}"></div>
     <div class="row"><span>Fake call</span><button class="btn" id="fakeIn10">Ring me in 10 s</button></div>
+    <div class="row"><label for="extra">Consider routes up to</label>${sel("extra", store.get("extra", ""), [["", "Any reasonable detour"], [5, "5 min longer"], [10, "10 min longer"], [15, "15 min longer"], [20, "20 min longer"]])}</div>
     <div class="row"><label for="theme">Appearance</label>${sel("theme", store.get("theme", "system"), [["system", "Automatic"], ["light", "Light"], ["dark", "Dark"]])}</div>
     <div class="row"><span>Your data</span><button class="btn" id="wipe">Delete everything</button></div>
     <p class="muted">Your contacts and settings stay on this phone. Trip locations are deleted when a trip ends. We never sell location data.</p>`);
@@ -905,17 +995,27 @@ function openSettings() {
   $("#myName").onchange = (e) => store.set("myName", e.target.value.trim());
   $("#caller").onchange = (e) => store.set("caller", e.target.value.trim() || "Mom");
   $("#buffer").onchange = (e) => store.set("buffer", +e.target.value);
-  $("#theme").onchange = (e) => { store.set("theme", e.target.value); applyTheme(); };
+  $("#theme").onchange = (e) => { store.set("theme", e.target.value); applyTheme(); setBaseMap(); };
+  $("#extra").onchange = (e) => { store.set("extra", e.target.value); if (state.to) maybeRoute(); };
   $("#fakeIn10").onclick = () => { closeDrawer(); toast("Fake call in 10 seconds. You can lock your screen."); setTimeout(fakeCall, 10000); };
   $("#wipe").onclick = () => { if (confirm("Delete your contacts and settings from this phone?")) { try { Object.keys(localStorage).filter((k) => k.startsWith("sr.")).forEach((k) => localStorage.removeItem(k)); } catch {} location.reload(); } };
 }
 $("#settingsBtn").onclick = openSettings;
 
+function showMode() { document.querySelectorAll(".modes [data-mode]").forEach((b) => b.setAttribute("aria-checked", b.dataset.mode === state.mode)); }
+document.querySelectorAll(".modes [data-mode]").forEach((b) => (b.onclick = () => {
+  if (state.trip || state.mode === b.dataset.mode) return;
+  state.mode = b.dataset.mode; store.set("mode", state.mode); showMode();
+  if (state.to) maybeRoute();
+}));
+showMode();
+
 function onboarding(step = 0) {
   const dots = `<div class="steps">${[0, 1, 2].map((i) => `<i class="${i === step ? "on" : ""}"></i>`).join("")}</div>`;
   const pages = [
     `<div class="hero-ico">${icon("shield")}</div><h2 id="drawerTitle">Get there the safer way</h2>
-     <p>SafeRoute checks every street on your walk for lighting, open shops, police, CCTV, isolated stretches and reports from people like you, for the exact time you're leaving.</p>
+     <p class="stat-line"><b>52%</b> of urban Indian women say they always or often feel unsafe walking alone at night. <span class="muted">(YouGov survey)</span></p>
+     <p>SafeRoute checks every street on your walk, ride or drive for lighting, open shops, police, CCTV, isolated stretches and reports from people like you, for the moment you'll be there.</p>
      <button class="btn btn-primary btn-block" data-next>Continue</button>`,
     `<div class="hero-ico">${icon("check")}</div><h2 id="drawerTitle">Private by design</h2>
      <ul class="promise"><li>${icon("check")}No account needed</li><li>${icon("check")}Contacts never leave your phone</li>

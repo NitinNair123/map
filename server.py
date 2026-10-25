@@ -19,8 +19,8 @@ import gtfs
 from import_osm import search as offline_search
 from rating import REPORT_TYPES
 from reports import Reports
-from safety import dist
-from tiles import TileStore, TooFar, mapillary, nightlights, overture_buildings, overture_places, overture_roads, warm_overture
+from safety import MODES, dist
+from tiles import TileStore, TooFar, geoapify, mapillary, nightlights, overture_buildings, overture_places, overture_roads, warm_overture
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 LAYERS_DIR = os.path.join(DATA_DIR, "layers")
@@ -80,17 +80,23 @@ if not os.environ.get("MAPILLARY_TOKEN") and os.path.exists(TOKEN_PATH):
 EXTRAS = {"nightlights": nightlights}
 if os.environ.get("MAPILLARY_TOKEN"):
     EXTRAS["mapillary"] = mapillary
+GEOAPIFY_PATH = os.path.join(DATA_DIR, "geoapify_key.txt")  # free key from myprojects.geoapify.com; gitignored like the Mapillary token
+if not os.environ.get("GEOAPIFY_KEY") and os.path.exists(GEOAPIFY_PATH):
+    os.environ["GEOAPIFY_KEY"] = open(GEOAPIFY_PATH).read().strip()
+if os.environ.get("GEOAPIFY_KEY"):
+    EXTRAS["geoapify"] = geoapify
 if importlib.util.find_spec("pyarrow"):
     EXTRAS.update(places=overture_places, buildings=overture_buildings)
     threading.Thread(target=warm_overture, daemon=True).start()
 print("Overture streets, places and buildings:", "on" if "places" in EXTRAS else "off (pip install pyarrow), using slower Overpass for streets", flush=True)
 print("Mapillary lights and cameras:", "on" if os.environ.get("MAPILLARY_TOKEN") else "off (no token)", flush=True)
+print("Geoapify places:", "on" if os.environ.get("GEOAPIFY_KEY") else "off (no key in data/geoapify_key.txt)", flush=True)
 SURVEY = load_csv(SURVEY_PATH, REPORT_TYPES, source="Street survey")
 STOPS = gtfs.load(GTFS_DIR)
 print(f"Street survey: {len(SURVEY)} observations. Timetables: {len(STOPS)} stops (put GTFS zips in data/gtfs).", flush=True)
 REPORTS = Reports(os.path.join(DATA_DIR, "reports.db"))
 store = TileStore(os.path.join(DATA_DIR, "tiles"), reports=REPORTS.all() + SURVEY, incidents=load_csv(INCIDENTS_PATH),
-                  extras=EXTRAS, background={"buildings", "mapillary"}, roads=overture_roads if "places" in EXTRAS else None,
+                  extras=EXTRAS, background={"buildings", "mapillary", "geoapify"}, roads=overture_roads if "places" in EXTRAS else None,
                   stops=STOPS, layers=LAYERS_DIR)
 print("OpenStreetMap import:", f"{len(store.extracted)} tiles from {store.imported}" if store.extracted else "none yet (python import_osm.py makes OSM detail instant)", flush=True)
 
@@ -248,7 +254,11 @@ class Handler(SimpleHTTPRequestHandler):
                 a, b = latlon(q["from"][0]), latlon(q["to"][0])
                 when = self.when(q)
                 rain = is_raining(a, when)
-                return self.send_json({"routes": store.for_trip(a, b).routes(a, b, when, rain), "rain": rain,
+                mode = q.get("mode", ["walk"])[0]
+                if mode not in MODES:
+                    raise ValueError("mode must be walk, bike or car")
+                extra = int(q["extra"][0]) if q.get("extra", [""])[0] else None  # longest detour to consider, in minutes
+                return self.send_json({"routes": store.for_trip(a, b).routes(a, b, when, rain, mode, extra), "rain": rain,
                                        "area": crime.around(CRIME, [a, b])})
             if u.path.startswith("/api/trip/"):
                 t = trips.get(u.path.rsplit("/", 1)[1])

@@ -65,6 +65,12 @@ and open the https link on the phone. Then use "Add to Home Screen".
 - `data/incidents.csv` (`lat,lon,type,when`) holds incident history, for example a campus security log. Types:
   `assault, robbery, harassment, stalking, snatching, theft, other`.
 - Live rain from Open-Meteo (no key).
+- **Geoapify places** (free key from https://myprojects.geoapify.com, 3,000 requests a day): shops, food, pharmacies,
+  hospitals, petrol pumps, police and transit with opening hours. Put the key in `data/geoapify_key.txt` (gitignored)
+  or the `GEOAPIFY_KEY` environment variable. Places Geoapify took from OpenStreetMap keep their OSM id, so they
+  merge with the OSM copy instead of counting twice; it mostly helps outside the imported area.
+- **The map itself** is OpenFreeMap's vector style (free, no key) drawn by MapLibre, with plain OpenStreetMap
+  tiles as the fallback when a phone has no WebGL or the style can't load.
 - **Past crime, as background** (`python crime.py`, once a year): NCRB's district tables of crimes against women
   (India Data Portal mirror) and the district outlines from OpenStreetMap, saved to `data/crime/districts.json`.
   The route card then shows the district's police-recorded cases of assault on women (IPC 354) and insulting a
@@ -107,6 +113,18 @@ Weights blend from day to night with the real sun position, so dusk counts as du
   with nowhere open and detours over 1.3× the fastest route. Safest is the top score, Balanced the top score
   at most 25% longer than the fastest, and Fastest the shortest. Each route also reports how
   much of it is unrated, which sources were used, and how well each factor was measured.
+- **Timed to when you get there.** Each street is rated for the 5 minutes in which the trip reaches it, so a
+  shop that shuts before you pass it counts as closed, and a long walk crosses into night as it really does.
+- **Walk, bike or car.** Bikes skip steps and footpaths (unless signed for bikes) and keep to one-way rules
+  (unless `oneway:bicycle=no`); cars keep to roads and one-way streets. Times assume 1.3 m/s on foot, 15 km/h
+  by bike and 25 km/h by car in city traffic. The same evidence is weighed differently: day / dark weights are
+  bike lighting 0/30, people 30/25, buildings 20/15, police 10/10, footpath 40/20; car lighting 0/15, people
+  45/40, buildings 20/15, police 25/20, footpath 10/10 (in a car, help points that are open matter most).
+- **Detour limit.** Settings can cap candidates at 5, 10, 15 or 20 minutes longer than the fastest way.
+- **A closer look.** Every route lists the medical stores, hospitals, petrol pumps, shops, stops and cameras
+  along it, how many are open as you pass, the longest stretch without an open help point (medical store,
+  hospital or petrol pump open then, or police within 150 m) and the longest stretch with nothing open. A strip
+  under the routes draws each one start to end with its open places and its long empty or unlit stretches.
 - With the safety map on, tap any street to see its score, confidence and the data behind each factor.
 
 No rating is 100% accurate. Scores compare routes and mean *safer*, never *safe*.

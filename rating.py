@@ -15,6 +15,13 @@ WEIGHTS = {
     "security": (10, 10),
     "walkability": (40, 15),
 }
+# Other ways to travel weigh the same evidence differently: in a car the footpath matters little and help points
+# (open places, police) matter most; on a bike the road surface and lighting matter about as much as for walking.
+MODE_WEIGHTS = {
+    "walk": WEIGHTS,
+    "bike": {"lighting": (0, 30), "activity": (30, 25), "frontage": (20, 15), "security": (10, 10), "walkability": (40, 20)},
+    "car": {"lighting": (0, 15), "activity": (45, 40), "frontage": (20, 15), "security": (25, 20), "walkability": (10, 10)},
+}
 LABELS = {"lighting": "Lighting", "activity": "People and open places", "frontage": "Buildings and surroundings",
           "security": "Police and CCTV", "walkability": "Footpath and ways out"}
 
@@ -177,15 +184,15 @@ def factors(area, e, when, light, now=None):
     return out
 
 
-def weights(light):
-    return {k: d * light + n * (1 - light) for k, (d, n) in WEIGHTS.items()}
+def weights(light, mode="walk"):
+    return {k: d * light + n * (1 - light) for k, (d, n) in MODE_WEIGHTS[mode].items()}
 
 
-def rate(area, e, when, light, rain=False, now=None):
+def rate(area, e, when, light, rain=False, now=None, mode="walk"):
     """(score 0-100, confidence 0-1, factors) for one segment. Score uses only measured factors."""
     now = now or time.time()
     feats = factors(area, e, when, light, now)
-    w = weights(light)
+    w = weights(light, mode)
     have = {k: f for k, f in feats.items() if f and w[k] > 0}
     confidence = sum(w[k] * f["quality"] for k, f in have.items()) / sum(w.values())
     if not have:

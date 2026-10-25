@@ -58,7 +58,7 @@ class RouteTest(unittest.TestCase):
         self.assertGreater(r["safest"]["length_m"], 350)
         self.assertLess(r["fastest"]["length_m"], 300)
         self.assertGreater(r["safest"]["score"], r["fastest"]["score"])
-        self.assertTrue(any("confirmed open now" in s for s in r["safest"]["reasons"]))
+        self.assertTrue(any("confirmed open as you pass" in s for s in r["safest"]["reasons"]))
         self.assertIn("Lighting", r["safest"]["factors"])
         self.assertIn("Street lamps (OpenStreetMap)", r["safest"]["sources"])
 
@@ -544,6 +544,76 @@ class CrimeContextTest(unittest.TestCase):
         self.assertEqual((area[0]["district"], area[0]["year"], area[0]["assault"], area[0]["previous"]), ("Gautam Buddha Nagar", 2022, 79, None))
         self.assertEqual(crime.around(data, [(28.63, 77.22)]), [])
         self.assertEqual(crime.around(None, [(28.47, 77.5)]), [])
+
+
+class ModeTest(unittest.TestCase):
+    def test_shop_that_shuts_before_you_get_there_counts_as_closed(self):
+        far = (28.0, 77.012)  # about 1.2 km, so a walk reaches the shop about 14 minutes after leaving
+        els = [way(1, [1, 2], [A, far], highway="residential"),
+               node(5, (28.0002, 77.011), shop="convenience", opening_hours="Mo-Su 08:00-22:05", name="Late Shop")]
+        leave = NIGHT  # 22:00: open as you leave, shut by the time you pass it
+        r = Area({"elements": els}).routes(A, far, leave)[0]
+        shop = next(p for p in r["places"] if p["name"] == "Late Shop")
+        self.assertIs(shop["open"], False)
+        self.assertGreater(shop["minutes"], 5)
+        self.assertEqual(r["look"]["groups"]["shop"], {"found": 1, "open": 0, "no_hours": 0})
+        drive = Area({"elements": els}).routes(A, far, leave, mode="car")[0]
+        self.assertIs(next(p for p in drive["places"] if p["name"] == "Late Shop")["open"], True)  # by car it's 3 min away
+
+    def test_car_keeps_to_roads_and_one_way_streets(self):
+        els = fixture()["elements"]
+        area = Area({"elements": els})
+        walk = {r["kind"]: r for r in area.routes(A, B, NIGHT)}
+        car = {r["kind"]: r for r in area.routes(A, B, NIGHT, mode="car")}
+        self.assertLess(walk["fastest"]["length_m"], 300)  # the footway
+        self.assertGreater(car["fastest"]["length_m"], 350)  # cars can't use it
+        self.assertEqual(car["fastest"]["mode"], "car")
+        self.assertLess(car["fastest"]["minutes"], walk["safest"]["minutes"])
+        one_way = [way(1, [1, 2], [A, B], highway="residential", oneway="yes"),
+                   way(2, [1, 10, 11, 12, 13, 2], NORTH, highway="residential")]
+        there = Area({"elements": one_way}).routes(A, B, NIGHT, mode="car")[1]
+        back = Area({"elements": one_way}).routes(B, A, NIGHT, mode="car")[1]
+        self.assertLess(there["length_m"], 300)  # with the one-way street
+        self.assertGreater(back["length_m"], 350)  # against it: round the block
+        self.assertLess(Area({"elements": one_way}).routes(B, A, NIGHT)[1]["length_m"], 300)  # walking ignores it
+
+    def test_bike_avoids_steps_and_no_route_is_a_clear_error(self):
+        els = [way(1, [1, 2], [A, B], highway="steps")]
+        with self.assertRaises(ValueError):
+            Area({"elements": els}).routes(A, B, NIGHT, mode="bike")
+        self.assertEqual(Area({"elements": els}).routes(A, B, NIGHT)[0]["mode"], "walk")
+
+    def test_extra_minutes_limit_and_headline(self):
+        area = Area(fixture())
+        r = {x["kind"]: x for x in area.routes(A, B, NIGHT)}
+        self.assertIn("this way has", r["safest"]["headline"])
+        self.assertIsNone(r["fastest"]["headline"])
+        tight = area.routes(A, B, NIGHT, max_extra_min=1)
+        self.assertEqual(tight[0]["checked"], 1)  # the lit detour is about 3 minutes longer, so it's left out
+        self.assertEqual(r["safest"]["look"]["groups"]["pharmacy"]["found"], 1)
+        self.assertTrue(all(0 <= p["frac"] <= 1 for p in r["safest"]["places"]))
+
+
+class GeoapifyTest(unittest.TestCase):
+    def test_places_merge_with_osm_and_keep_hours(self):
+        import io, json
+        from unittest import mock
+        import tiles
+        page = {"features": [
+            {"properties": {"name": "Apollo Pharmacy", "lat": 28.0005, "lon": 77.002, "place_id": "a1", "opening_hours": "24/7",
+                            "categories": ["healthcare.pharmacy"], "datasource": {"sourcename": "openstreetmap",
+                            "raw": {"osm_type": "n", "osm_id": 300, "amenity": "pharmacy"}}}},
+            {"properties": {"name": "Indian Oil", "lat": 28.0006, "lon": 77.001, "place_id": "b2",
+                            "categories": ["service.vehicle.fuel", "service"], "datasource": {"sourcename": "other"}}},
+        ]}
+        with mock.patch.dict(os.environ, {"GEOAPIFY_KEY": "test"}), \
+                mock.patch.object(tiles.urllib.request, "urlopen", return_value=io.BytesIO(json.dumps(page).encode())):
+            got = tiles.geoapify(28.0, 77.0, 28.01, 77.01)["elements"]
+        self.assertEqual((got[0]["type"], got[0]["id"], got[0]["tags"]["opening_hours"]), ("node", 300, "24/7"))
+        self.assertEqual(got[1]["tags"]["amenity"], "fuel")
+        area = Area({"elements": fixture()["elements"] + got[1:]})
+        fuel = next(p for p in area.pois if p["name"] == "Indian Oil")
+        self.assertEqual((fuel["group"], fuel["source"]), ("fuel", "Geoapify"))
 
 
 if __name__ == "__main__":
