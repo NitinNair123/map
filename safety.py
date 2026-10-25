@@ -18,11 +18,19 @@ ROUTE_LAMBDA = {"safest": 10, "balanced": 3, "fastest": 0}
 COMPASS = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"]
 ROAD_WORDS = {"footway": "the footpath", "path": "the path", "steps": "the steps", "cycleway": "the cycle path",
               "pedestrian": "the pedestrian street", "service": "the lane", "track": "the track", "living_street": "the lane"}
-OSM_ROAD_DETAIL = {"lit", "sidewalk", "sidewalk:both", "sidewalk:left", "sidewalk:right", "footway", "tunnel", "bridge", "layer"}
+OSM_ROAD_DETAIL = {"lit", "sidewalk", "sidewalk:both", "sidewalk:left", "sidewalk:right", "footway", "tunnel", "bridge", "layer",
+                   "surface", "smoothness", "lanes", "maxspeed"}
 REPORT_RADIUS_M = 50
 INCIDENT_RADIUS_M = 100
 STOP_RADIUS_M = 150
 NIGHT_CELL = 0.005  # NASA night-light pixels, about 500 m
+NEAR_M = {"lamp": 20, "cctv": 50, "transit": 150, "crossing": 15, "sos_phone": 100, "blackspot": 100, "waterlogging": 50}
+
+
+def number(v):
+    """Leading number of an OSM value such as "4" or "50 km/h", None when there is none."""
+    m = re.match(r"\s*(\d+)", v or "")
+    return int(m.group(1)) if m else None
 
 
 def dist(a, b):
@@ -149,19 +157,27 @@ def classify(tags):
     a, shop = tags.get("amenity"), tags.get("shop")
     if "overture" in tags:
         return classify_overture(tags["overture"])
+    if tags.get("building") == "guardhouse" or a == "security_booth":
+        return "guard"
     if tags.get("building"):
         return "building"  # counted per grid cell, not kept as a place
     if tags.get("highway") == "street_lamp":
         return "lamp"
+    if tags.get("highway") in ("crossing", "traffic_signals"):
+        return "crossing"
     if tags.get("man_made") == "surveillance":
         return "cctv"
+    if tags.get("emergency") == "phone":
+        return "sos_phone"
     if a == "police":
         return "police"
+    if tags.get("hazard") in ("blackspot", "waterlogging"):
+        return tags["hazard"]  # from data/layers
     if shop == "alcohol" or a in ("bar", "pub", "nightclub"):
         return "nightlife"
     if a in ("bus_station", "taxi") or tags.get("highway") == "bus_stop" or tags.get("railway") in ("station", "subway_entrance"):
         return "transit"
-    if a in ("hospital", "clinic", "pharmacy", "fuel") or tags.get("tourism") == "hotel":
+    if a in ("hospital", "clinic", "pharmacy", "fuel", "fire_station") or tags.get("tourism") == "hotel":
         return "haven"
     if shop or tags.get("office") or a in PLACE_AMENITIES:
         return "place"
@@ -184,7 +200,8 @@ class Area:
         self.edges = []
         self.pois = []
         self.grid = defaultdict(list)
-        self.building_cells = defaultdict(int)
+        self.building_cells = defaultdict(int)  # Overture footprints (OSM plus Google and Microsoft)
+        self.osm_building_cells = defaultdict(int)
         self.night_cells = {}  # NASA night-light pixel -> brightness 0..1
         self.zones = []  # isolating land: {"kind", "poly" or "line"}
         self.zone_grid = defaultdict(list)
@@ -214,14 +231,17 @@ class Area:
                 kind = classify(tags)
                 if "nightlight" in tags:
                     self.night_cells[(int(pt[0] // NIGHT_CELL), int(pt[1] // NIGHT_CELL))] = float(tags["nightlight"])
-                elif kind == "building":
-                    self.building_cells[self._cell(pt)] += 1
+                elif kind == "building":  # imported OSM outlines come pre-counted per cell
+                    cells = self.osm_building_cells if "building_count" in tags else self.building_cells
+                    cells[self._cell(pt)] += int(tags.get("building_count", 1))
                 elif kind:
                     self.grid[self._cell(pt)].append(len(self.pois))
                     self.pois.append({"kind": kind, "pt": pt, "hours": tags.get("opening_hours"),
-                                      "source": "Mapillary" if tags.get("source") == "mapillary" else "Overture" if "overture" in tags else "OpenStreetMap",
+                                      "source": tags.get("layer") or ("Mapillary" if tags.get("source") == "mapillary" else "Overture" if "overture" in tags else "OpenStreetMap"),
                                       "name": tags.get("name") or (tags.get("shop") or tags.get("amenity") or tags.get("overture") or kind).replace("_", " ")})
 
+        if not self.building_cells:  # Overture already includes OSM buildings, so never add both
+            self.building_cells = self.osm_building_cells
         self.police = [p["pt"] for p in self.pois if p["kind"] == "police"]
         self.stops = [s for s in stops if any(s["deps"][d][h] for d in range(7) for h in range(24))]
         self.stop_grid = defaultdict(list)
@@ -251,12 +271,16 @@ class Area:
         sidewalk = next((tags[k] for k in ("sidewalk", "sidewalk:both", "sidewalk:left", "sidewalk:right") if tags.get(k)), None)
         if tags.get("footway") in ("sidewalk", "crossing"):
             sidewalk = "yes"
+        detail = {"surface": tags.get("surface"), "smoothness": tags.get("smoothness"),
+                  "lanes": number(tags.get("lanes")), "maxspeed": number(tags.get("maxspeed"))}
+        if detail["maxspeed"] and "mph" in tags["maxspeed"]:
+            detail["maxspeed"] *= 1.6
         for (a, pa), (b, pb) in zip(zip(el["nodes"], pts), zip(el["nodes"][1:], pts[1:])):
             self.nodes[a], self.nodes[b] = pa, pb
             ei = len(self.edges)
             self.edges.append({"a": a, "b": b, "length": dist(pa, pb), "highway": hw, "name": tags.get("name"),
                                "lit": tags.get("lit"), "sidewalk": sidewalk, "underpass": underpass,
-                               "overbridge": overbridge, "reports": [], "incidents": []})
+                               "overbridge": overbridge, "reports": [], "incidents": [], **detail})
             self.adj[a].append((b, ei))
             self.adj[b].append((a, ei))  # walking ignores oneway
 
@@ -276,7 +300,7 @@ class Area:
         near = defaultdict(list)
         for i, _ in self._near(mid, e["length"] / 2 + 150):
             p = self.pois[i]
-            if p["kind"] != "police" and seg_dist(p["pt"], pa, pb) <= {"lamp": 20, "cctv": 50, "transit": 150}.get(p["kind"], 60):
+            if p["kind"] != "police" and seg_dist(p["pt"], pa, pb) <= NEAR_M.get(p["kind"], 60):
                 near[p["kind"]].append(i)
         e["near"] = near
         c = self._cell(mid)

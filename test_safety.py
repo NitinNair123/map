@@ -314,7 +314,6 @@ class ImportTest(unittest.TestCase):
         area = TileStore(d, fetch=fail, roads=fail).for_trip(A, B)
         self.assertEqual(len(area.edges), len(Area(fixture()).edges))
 
-    @unittest.skipUnless(__import__("importlib").util.find_spec("osmium"), "pip install osmium")
     def test_import_matches_overpass_selection(self):
         import import_osm
         self.assertEqual(import_osm.wanted({"highway": "residential"}), "road")
@@ -323,6 +322,122 @@ class ImportTest(unittest.TestCase):
         self.assertEqual(import_osm.wanted({"amenity": "police"}), "poi")
         self.assertEqual(import_osm.wanted({"landuse": "construction"}), "zone")
         self.assertIsNone(import_osm.wanted({"landuse": "residential"}))
+        self.assertEqual(import_osm.wanted({"highway": "crossing"}), "poi")
+        self.assertEqual(import_osm.wanted({"building": "guardhouse"}), "poi")
+        self.assertEqual(import_osm.wanted({"emergency": "phone"}), "poi")
+        self.assertEqual(import_osm.wanted({"amenity": "fire_station"}), "poi")
+        self.assertEqual(import_osm.wanted({"building": "yes"}), "building")
+
+    def test_offline_search(self):
+        import import_osm
+        path = os.path.join(tempfile.mkdtemp(), "search.db")
+        names = [("IILM University", "university", 28.47, 77.50), ("Knowledge Park Road", "street", 28.47, 77.49),
+                 ("Knowledge Park Road", "street", 28.4701, 77.4901), ("Park Plaza", "hotel", 28.6, 77.2)]
+        self.assertEqual(import_osm.write_search(path, names), 3)  # one row per street name per area
+        hits = import_osm.search(path, "park", near=(28.47, 77.5))
+        self.assertEqual([h["name"] for h in hits], ["Park Plaza", "Knowledge Park Road"])  # names starting with it first
+        self.assertEqual(import_osm.search(path, "iilm")[0]["kind"], "university")
+
+    def test_imported_building_counts(self):
+        counted = node("b1", (28.0004, 77.0005), building="yes", building_count="25")
+        area = Area({"elements": fixture()["elements"] + [counted]})
+        self.assertEqual(sum(area.building_cells.values()), 25)
+        overture = node("ovb1", (28.0004, 77.0005), building="yes")
+        area = Area({"elements": fixture()["elements"] + [counted, overture]})
+        self.assertEqual(sum(area.building_cells.values()), 1)  # Overture includes OSM, so never both
+
+
+    @unittest.skipUnless(__import__("importlib").util.find_spec("osmium"), "pip install osmium")
+    def test_import_end_to_end(self):
+        import json
+        import import_osm
+        d = tempfile.mkdtemp()
+        nodes = {1: A, 2: B, 3: (28.0004, 77.0010), 4: (28.0004, 77.0012), 5: (28.0006, 77.0012), 6: (28.0006, 77.0010),
+                 7: (28.0, 77.0015)}
+        xml = ['<osm version="0.6">'] + [f'<node id="{i}" version="1" lat="{a}" lon="{b}"/>' for i, (a, b) in nodes.items() if i != 7]
+        xml += ['<node id="7" version="1" lat="28.0000" lon="77.0015"><tag k="highway" v="crossing"/></node>',
+                '<way id="1" version="1"><nd ref="1"/><nd ref="2"/><tag k="highway" v="primary"/><tag k="name" v="Knowledge Park Road"/>'
+                '<tag k="lanes" v="4"/></way>',
+                '<way id="2" version="1"><nd ref="3"/><nd ref="4"/><nd ref="5"/><nd ref="6"/><nd ref="3"/><tag k="building" v="yes"/></way>',
+                '</osm>']
+        src = os.path.join(d, "tiny.osm")
+        with open(src, "w") as f:
+            f.write("".join(xml))
+        import_osm.DATA = d
+        import_osm.main([src, "--bbox", "27.995,76.995,28.005,77.005"])
+        folder = os.path.join(d, "tiles")
+        with open(os.path.join(folder, "extract.json")) as f:
+            self.assertEqual(json.load(f)["sources"], [src])
+        area = TileStore(folder, fetch=lambda *a: self.fail("imported tiles must not be fetched")).for_trip(A, B)
+        self.assertEqual(area.edges[0]["lanes"], 4)
+        self.assertEqual(sum(area.building_cells.values()), 1)
+        self.assertTrue(area.edges[0]["near"]["crossing"])
+        self.assertEqual(import_osm.search(os.path.join(folder, "search.db"), "knowledge")[0]["kind"], "street")
+
+
+class CollectionTest(unittest.TestCase):
+    """Data Raasta collects that SafeRoute now uses: road detail, official lists, and one vote per person."""
+    def walk(self, **tags):
+        area = Area({"elements": [way(1, [1, 2, 3], [A, (28.0, 77.0015), B], highway="primary", **tags)]})
+        return rating.factors(area, area.edges[0], NOON, 1)["walkability"]["value"]
+
+    def test_road_detail(self):
+        plain = self.walk()
+        self.assertLess(self.walk(lanes="4"), plain)
+        self.assertLess(self.walk(maxspeed="60 km/h"), plain)
+        self.assertGreater(self.walk(lanes="4", sidewalk="both"), self.walk(lanes="4"))
+        self.assertLess(self.walk(surface="dirt"), plain)
+
+    def test_guards_and_emergency_phones(self):
+        els = [way(1, [1, 2], [A, B], highway="residential")]
+        none = Area({"elements": els})
+        guarded = Area({"elements": els + [node(5, (28.0002, 77.0015), building="guardhouse"),
+                                           node(6, (28.0003, 77.0015), emergency="phone")]})
+        self.assertIsNone(rating.factors(none, none.edges[0], NIGHT, 0)["security"])
+        self.assertEqual(rating.factors(guarded, guarded.edges[0], NIGHT, 0)["security"]["value"], 0.5)
+        self.assertEqual(classify({"amenity": "fire_station"}), "haven")
+
+    def test_one_vote_per_person(self):
+        r = lambda by, t=0: {"lat": 28.0, "lon": 77.0015, "type": "felt_unsafe", "ts": NIGHT.timestamp() - t, "hour": 22,
+                             "weekday": 6, "by": by}
+        area = lambda reps: Area({"elements": fixture()["elements"]}, reports=reps)
+        score = lambda reps: rating.rate(a := area(reps), a.edges[0], NIGHT, 0, now=NIGHT.timestamp())[0]
+        self.assertEqual(score([r("x"), r("x", 60), r("x", 120)]), score([r("x")]))
+        self.assertLess(score([r("x"), r("y")]), score([r("x")]))
+
+    def test_layers_are_loaded_and_reloaded(self):
+        d, layers = tempfile.mkdtemp(), tempfile.mkdtemp()
+        store = TileStore(d, fetch=lambda *a: fixture(), layers=layers)
+        footway = lambda: next(e for e in store.for_trip(A, B).edges if e["highway"] == "footway")
+        before = len(footway()["near"]["lamp"])
+        with open(os.path.join(layers, "streetlights.csv"), "w") as f:
+            f.write("lat,lon,name\n28.0001,77.0015,Pole 17\n")
+        with open(os.path.join(layers, "blackspots.csv"), "w") as f:
+            f.write("lat,lon\n28.0,77.0015\nbad,row\n")
+        e = footway()
+        self.assertEqual(len(e["near"]["lamp"]), before + 1)
+        area = store.for_trip(A, B)
+        self.assertIn("streetlights.csv (official list)", rating.factors(area, e, NIGHT, 0)["lighting"]["sources"][-1])
+        self.assertTrue(e["near"]["blackspot"])
+
+    def test_waterlogging_only_when_raining(self):
+        els = [way(1, [1, 2], [A, B], highway="residential"), node(5, (28.0, 77.0015), hazard="waterlogging")]
+        area = Area({"elements": els})
+        dry, wet = (rating.rate(area, area.edges[0], NOON, 1, rain)[0] for rain in (False, True))
+        self.assertEqual(dry - wet, 20)
+
+    def test_reports_database(self):
+        from reports import Reports
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "reports.json"), "w") as f:
+            f.write('[{"lat": 28.0, "lon": 77.0, "type": "deserted", "ts": 1000, "hour": 22, "weekday": 6}]')
+        db = Reports(os.path.join(d, "reports.db"))
+        self.assertEqual([r["type"] for r in db.all()], ["deserted"])  # old reports carried over
+        sent = [db.add(28.0, 77.0, "dogs", "1.2.3.4") for _ in range(11)]
+        self.assertIsNone(sent[-1])  # ten an hour
+        with open(os.path.join(d, "reports.db"), "rb") as f:
+            self.assertNotIn(b"1.2.3.4", f.read())
+        self.assertEqual(len({r["by"] for r in db.all() if r["by"]}), 1)
 
 
 if __name__ == "__main__":

@@ -56,9 +56,12 @@ OBSERVATIONS = {
     "lights_on": ("lighting", 1.0), "lights_off": ("lighting", 0.0), "broken_light": ("lighting", 0.0),
     "people_around": ("activity", 1.0), "shops_open": ("activity", 1.0),
     "deserted": ("activity", 0.0), "shops_closed": ("activity", 0.0),
+    "no_footpath": ("walkability", 0.0),
 }
 # Score points a recent report adds near it; halves every 30 days
-REPORT_POINTS = {"felt_unsafe": -25, "harassment": -40, "felt_safe": 15}
+REPORT_POINTS = {"felt_unsafe": -25, "harassment": -40, "felt_safe": 15, "dogs": -15, "flooded": -15}
+UNPAVED = {"unpaved", "dirt", "earth", "ground", "gravel", "mud", "sand", "grass", "compacted", "fine_gravel"}
+ROUGH = {"bad", "very_bad", "horrible", "very_horrible", "impassable"}
 REPORT_TYPES = set(OBSERVATIONS) | set(REPORT_POINTS)
 INCIDENT_SEVERITY = {"assault": 1.0, "robbery": 0.9, "harassment": 0.8, "stalking": 0.7, "snatching": 0.7,
                      "theft": 0.4, "other": 0.5}
@@ -85,6 +88,16 @@ def combine(evidence):
             "sources": sorted({s for _, _, s in evidence})}
 
 
+def votes(reports):
+    """One vote per person per report type on a street: their latest. Survey rows have no voter and all count."""
+    latest = {}
+    for r in reports:
+        k = (r.get("by") or id(r), r["type"])
+        if k not in latest or r["ts"] > latest[k]["ts"]:
+            latest[k] = r
+    return list(latest.values())
+
+
 def factors(area, e, when, light, now=None):
     """Every factor for one street segment at one time, each None when nothing measures it."""
     now = now or time.time()
@@ -93,7 +106,7 @@ def factors(area, e, when, light, now=None):
     out = {}
 
     obs = defaultdict(list)
-    for r in e["reports"]:
+    for r in votes(e["reports"]):
         if r["type"] in OBSERVATIONS:
             factor, value = OBSERVATIONS[r["type"]]
             if factor == "activity" and not same_time(r, when):
@@ -132,18 +145,31 @@ def factors(area, e, when, light, now=None):
     out["frontage"] = combine(frontage)
 
     police = 1.0 if e["police_m"] < 400 else 0.5 if e["police_m"] < 800 else 0.0
-    security = [(min(1, police + 0.3 * len(near["cctv"])), QUALITY["police"], "Police stations and CCTV")]
-    out["security"] = combine(security) if area.police or near["cctv"] else None  # no police mapped at all is a data gap
+    guarded = 0.3 * len(near["cctv"]) + 0.3 * min(1, len(near["guard"])) + 0.2 * min(1, len(near["sos_phone"]))
+    security = [(min(1, police + guarded), QUALITY["police"], "Police, guard posts, emergency phones and CCTV")]
+    out["security"] = combine(security) if area.police or guarded else None  # no police mapped at all is a data gap
 
     path = ROAD_SCORE.get(e["highway"], 0.5)
     if e["highway"] in VEHICLE_ROADS and e["sidewalk"]:
         path += -0.3 if e["sidewalk"] == "no" and e["highway"] not in ("residential", "unclassified") else 0.15
+    if e.get("surface") in UNPAVED or e.get("smoothness") in ROUGH:
+        path -= 0.2
+    fast = (e.get("lanes") or 0) >= 4 or (e.get("maxspeed") or 0) >= 50 or e["highway"] == "trunk"
+    if fast and e["highway"] in VEHICLE_ROADS and e["sidewalk"] not in ("yes", "both", "left", "right", "separate"):
+        path -= 0.2  # four lanes or 50 km/h, and no footpath mapped beside it
+    if fast and near["crossing"]:
+        path += 0.1
+    if near["blackspot"]:
+        path -= 0.3  # on the official list of accident blackspots
     if e["underpass"]:
         path = 0.1
     elif e["overbridge"]:
         path = path * light + 0.25 * dark
     escape = 0.0 if e["dead_ends"] == 2 else 0.2 if e["dead_ends"] == 1 else max(0.0, 1 - e["gap_m"] / 500)
-    out["walkability"] = combine([(max(0.0, min(1.0, 0.6 * path + 0.4 * escape)), QUALITY["road"], "Street map (OpenStreetMap)")])
+    walk = [(max(0.0, min(1.0, 0.6 * path + 0.4 * escape)), QUALITY["road"], "Street map (OpenStreetMap)")]
+    if near["blackspot"]:
+        walk[0] = walk[0][:2] + ("Street map (OpenStreetMap) and accident blackspots",)
+    out["walkability"] = combine(walk + obs["walkability"])
     return out
 
 
@@ -167,7 +193,9 @@ def rate(area, e, when, light, rain=False, now=None):
     s -= 10 * dark * min(2, len(e["near"]["nightlife"]))
     if rain:
         s -= 5  # rain empties streets and cuts visibility
-    s += sum(REPORT_POINTS[r["type"]] * 0.5 ** ((now - r["ts"]) / 86400 / 30) for r in e["reports"] if r["type"] in REPORT_POINTS)
+        if e["near"]["waterlogging"]:
+            s -= 15  # on the list of streets that flood
+    s += sum(REPORT_POINTS[r["type"]] * 0.5 ** ((now - r["ts"]) / 86400 / 30) for r in votes(e["reports"]) if r["type"] in REPORT_POINTS)
     hits = 0.0
     for i in e["incidents"]:
         gap = abs(i["hour"] - when.hour)

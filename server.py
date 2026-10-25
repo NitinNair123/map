@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -14,12 +15,16 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 import gtfs
+from import_osm import search as offline_search
 from rating import REPORT_TYPES
+from reports import Reports
 from safety import dist
 from tiles import TileStore, TooFar, mapillary, nightlights, overture_buildings, overture_places, overture_roads, warm_overture
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-REPORTS_PATH = os.path.join(DATA_DIR, "reports.json")
+LAYERS_DIR = os.path.join(DATA_DIR, "layers")
+SEARCH_DB = os.path.join(DATA_DIR, "tiles", "search.db")
+REIMPORT_DAYS = 30
 INCIDENTS_PATH = os.path.join(DATA_DIR, "incidents.csv")
 SURVEY_PATH = os.path.join(DATA_DIR, "survey.csv")
 GTFS_DIR = os.path.join(DATA_DIR, "gtfs")
@@ -29,7 +34,6 @@ MAX_TRIPS = 2000
 lock = threading.Lock()
 # shortcut: live trips live in memory and vanish on restart, move to Redis when running more than one server
 trips = {}
-report_log = {}  # ip -> recent report times, to stop one person flooding an area
 weather = {}  # rounded (lat, lon) -> {"rain", "checked"}
 geocode_cache = OrderedDict()
 
@@ -68,11 +72,34 @@ print("Mapillary lights and cameras:", "on" if os.environ.get("MAPILLARY_TOKEN")
 SURVEY = load_csv(SURVEY_PATH, REPORT_TYPES, source="Street survey")
 STOPS = gtfs.load(GTFS_DIR)
 print(f"Street survey: {len(SURVEY)} observations. Timetables: {len(STOPS)} stops (put GTFS zips in data/gtfs).", flush=True)
-store = TileStore(os.path.join(DATA_DIR, "tiles"),
-                  reports=(json.load(open(REPORTS_PATH)) if os.path.exists(REPORTS_PATH) else []) + SURVEY,
-                  incidents=load_csv(INCIDENTS_PATH),
-                  extras=EXTRAS, background={"buildings"}, roads=overture_roads if "places" in EXTRAS else None, stops=STOPS)
-print("OpenStreetMap import:", f"{len(store.extracted)} tiles" if store.extracted else "none yet (python import_osm.py makes OSM detail instant)", flush=True)
+REPORTS = Reports(os.path.join(DATA_DIR, "reports.db"))
+store = TileStore(os.path.join(DATA_DIR, "tiles"), reports=REPORTS.all() + SURVEY, incidents=load_csv(INCIDENTS_PATH),
+                  extras=EXTRAS, background={"buildings", "mapillary"}, roads=overture_roads if "places" in EXTRAS else None,
+                  stops=STOPS, layers=LAYERS_DIR)
+print("OpenStreetMap import:", f"{len(store.extracted)} tiles from {store.imported}" if store.extracted else "none yet (python import_osm.py makes OSM detail instant)", flush=True)
+
+
+def reimport():
+    """Re-run the OpenStreetMap import in the background when it is a month old, so new edits reach the app."""
+    if not store.imported or not importlib.util.find_spec("osmium"):
+        return
+    if (datetime.now() - datetime.fromisoformat(store.imported)).days < REIMPORT_DAYS:
+        return
+    print("OpenStreetMap import is a month old, refreshing it in the background", flush=True)
+    done = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "import_osm.py"), "--refresh"])
+    if done.returncode == 0:
+        store.load_extract()
+    else:
+        print("OpenStreetMap refresh failed; the old import stays in use", flush=True)
+
+
+def reimport_daily():
+    while True:
+        reimport()
+        time.sleep(86400)
+
+
+threading.Thread(target=reimport_daily, daemon=True).start()
 
 
 def latlon(s):
@@ -99,10 +126,28 @@ def is_raining(pt, when):
 
 
 def geocode(q, near):
-    """Place search anywhere via Photon (OpenStreetMap-based, free), biased towards where the map is."""
+    """Place search: the offline OpenStreetMap index first, then Photon (komoot, free) for anything it lacks."""
     key = (q.lower(), near and (round(near[0], 1), round(near[1], 1)))
     if key in geocode_cache:
         return geocode_cache[key]
+    local = offline_search(SEARCH_DB, q, near) if os.path.exists(SEARCH_DB) else []
+    if len(local) >= 5:
+        return local
+    try:
+        online = photon(q, near)
+    except OSError:
+        if local:
+            return local  # offline: what the index has is better than an error
+        raise
+    seen = {(p["name"].lower(), round(p["pt"][0], 3), round(p["pt"][1], 3)) for p in local}
+    out = (local + [p for p in online if (p["name"].lower(), round(p["pt"][0], 3), round(p["pt"][1], 3)) not in seen])[:8]
+    geocode_cache[key] = out
+    if len(geocode_cache) > 1000:
+        geocode_cache.popitem(last=False)
+    return out
+
+
+def photon(q, near):
     params = {"q": q, "limit": 8}
     if near:
         params.update(lat=near[0], lon=near[1])
@@ -115,9 +160,6 @@ def geocode(q, near):
         where = ", ".join(x for x in (p.get("street") if p.get("name") else None, p.get("district") or p.get("locality"), p.get("city"), p.get("state")) if x)
         if name:
             out.append({"name": name, "pt": [lat, lon], "kind": where or p.get("osm_value", "place").replace("_", " ")})
-    geocode_cache[key] = out
-    if len(geocode_cache) > 1000:
-        geocode_cache.popitem(last=False)
     return out
 
 
@@ -215,22 +257,13 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_json({"error": "not found"}, 404)
 
     def report(self, body):
-        now = datetime.now()
-        r = {"lat": float(body["lat"]), "lon": float(body["lon"]), "type": body["type"], "ts": now.timestamp(),
-             "hour": now.hour, "weekday": now.weekday()}
-        latlon((r["lat"], r["lon"]))
-        if r["type"] not in REPORT_TYPES:
+        lat, lon = latlon((body["lat"], body["lon"]))
+        if body["type"] not in REPORT_TYPES:
             raise ValueError("unknown report type")
-        ip = self.client_address[0]
-        recent = [t for t in report_log.get(ip, []) if r["ts"] - t < 3600]
-        if len(recent) >= 10:
+        r = REPORTS.add(lat, lon, body["type"], self.client_address[0])
+        if not r:
             return self.send_json({"error": "Thanks! You've sent a lot of reports this hour, please try again later."}, 429)
-        report_log[ip] = recent + [r["ts"]]
-        with lock:
-            store.add_report(r)
-            with open(REPORTS_PATH + ".tmp", "w") as f:
-                json.dump([x for x in store.reports if "source" not in x], f)  # survey rows stay in survey.csv
-            os.replace(REPORTS_PATH + ".tmp", REPORTS_PATH)  # never leave a half-written file
+        store.add_report(r)
         self.send_json({"ok": True})
 
     def start_trip(self, body):

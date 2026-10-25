@@ -746,11 +746,12 @@ const REPORTS = [
   ["shops_open", "🏪", "Shops open now"], ["shops_closed", "🔒", "Shops closed now"],
   ["people_around", "👥", "People around"], ["deserted", "🚶", "Deserted"],
   ["felt_unsafe", "👀", "Felt unsafe"], ["harassment", "🚫", "Harassment"], ["felt_safe", "✅", "Felt safe"],
+  ["no_footpath", "🚧", "No footpath"], ["dogs", "🐕", "Stray dogs"], ["flooded", "🌊", "Flooded"],
 ];
 $("#reportBtn").onclick = () => {
   openDrawer(`
     <h2 id="drawerTitle">Report something</h2>
-    <p>Reports are anonymous and change scores for everyone straight away. "Lit", "shops open" and "people around" are real checks of the street, so they count as measured data for this time of day.</p>
+    <p>Reports are anonymous and change scores for everyone straight away. Each person counts once per street for each kind of report. "Lit", "shops open" and "people around" are real checks of the street, so they count as measured data for this time of day.</p>
     <div class="report-grid">${REPORTS.map(([k, e, l]) => `<button data-type="${k}" aria-pressed="false"><span>${e}</span>${l}</button>`).join("")}</div>
     <button class="btn btn-primary btn-block" id="reportHere" disabled>${icon("locate")}At my location</button>
     <button class="btn btn-block" id="reportMap" disabled>${icon("flag")}Pick the spot on the map</button>`);

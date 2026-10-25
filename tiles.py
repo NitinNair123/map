@@ -1,4 +1,5 @@
 """Fetch OpenStreetMap data on demand in fixed tiles, cache them on disk, and build scored areas for any trip."""
+import csv
 import json
 import math
 import os
@@ -16,6 +17,12 @@ from safety import Area, dist, seg_dist
 TILE = 0.01  # degrees, about 1.1 km
 CHUNK = 3  # missing tiles are fetched in blocks of up to 3x3, one Overpass request each
 TILE_MAX_AGE = 7 * 86400
+# Sources that change slowly are kept longer: the night-light image is from 2016, Overture and Mapillary refresh monthly
+SOURCE_MAX_AGE = {"nightlights": math.inf, "mapillary": 30 * 86400, "places": 30 * 86400, "buildings": 30 * 86400}
+LAYERS = {  # data/layers/<name>.csv (lat,lon[,name]) from official lists or RTI replies -> the map tags they stand for
+    "streetlights": {"highway": "street_lamp"}, "cctv": {"man_made": "surveillance"}, "police": {"amenity": "police"},
+    "hospitals": {"amenity": "hospital"}, "blackspots": {"hazard": "blackspot"}, "waterlogging": {"hazard": "waterlogging"},
+}
 MAX_TRIP_M = 10000
 MIRRORS = [
     "https://overpass-api.de/api/interpreter",
@@ -34,9 +41,11 @@ out body geom qt;
 );
 out tags geom;
 (
-  node["highway"~"^(street_lamp|bus_stop)$"]({bbox});
+  node["highway"~"^(street_lamp|bus_stop|crossing|traffic_signals)$"]({bbox});
   nwr["man_made"="surveillance"]({bbox});
-  nwr["amenity"~"^(police|bar|pub|nightclub|bus_station|taxi|hospital|clinic|pharmacy|fuel|restaurant|cafe|fast_food|atm|bank|marketplace|food_court|ice_cream|cinema|theatre|school|college|university|place_of_worship|community_centre|doctors|dentist|post_office|library|events_venue|coworking_space|bureau_de_change)$"]({bbox});
+  nwr["building"~"^guardhouse$"]({bbox});
+  nwr["emergency"~"^phone$"]({bbox});
+  nwr["amenity"~"^(police|fire_station|security_booth|bar|pub|nightclub|bus_station|taxi|hospital|clinic|pharmacy|fuel|restaurant|cafe|fast_food|atm|bank|marketplace|food_court|ice_cream|cinema|theatre|school|college|university|place_of_worship|community_centre|doctors|dentist|post_office|library|events_venue|coworking_space|bureau_de_change)$"]({bbox});
   nwr["office"]({bbox});
   nwr["shop"]({bbox});
   nwr["tourism"="hotel"]({bbox});
@@ -265,8 +274,11 @@ def overpass(s, w, n, e):
 
 
 class TileStore:
-    def __init__(self, folder, fetch=overpass, reports=None, incidents=(), cache_size=6, extras=None, background=(), roads=None, stops=()):
+    def __init__(self, folder, fetch=overpass, reports=None, incidents=(), cache_size=6, extras=None, background=(), roads=None, stops=(),
+                 layers=None):
         self.folder = folder
+        self.layers = layers  # folder of official lists (see LAYERS), re-read whenever a file changes
+        self._layer_stamp, self._layer_elements = None, []
         self.fetch = fetch
         self.roads = roads  # a fast street source; when set, slow Overpass detail loads in the background instead
         self.extras = extras or {}  # name -> fetch(s, w, n, e) for extra sources, cached beside the OSM tile
@@ -280,11 +292,43 @@ class TileStore:
         self.locks = defaultdict(threading.Lock)
         self.lock = threading.Lock()
         os.makedirs(folder, exist_ok=True)
-        marker = os.path.join(folder, "extract.json")  # tiles written by import_osm.py: full OSM detail, kept until re-imported
-        self.extracted = set()
+        self.load_extract()
+
+    def load_extract(self):
+        """Tiles written by import_osm.py: full OSM detail, kept until re-imported. Call again after a re-import."""
+        marker = os.path.join(self.folder, "extract.json")
+        self.extracted, self.imported = set(), None
         if os.path.exists(marker):
             with open(marker) as f:
-                self.extracted = {tuple(t) for t in json.load(f)["tiles"]}
+                info = json.load(f)
+            self.extracted, self.imported = {tuple(t) for t in info["tiles"]}, info.get("imported")
+        with self.lock:
+            self.areas.clear()
+
+    def layer_elements(self):
+        """Points from data/layers/*.csv as map objects; reloads when a file is added, changed or removed."""
+        files = sorted(f for f in os.listdir(self.layers) if f.endswith(".csv") and f[:-4] in LAYERS) \
+            if self.layers and os.path.isdir(self.layers) else []
+        stamp = [(f, os.path.getmtime(os.path.join(self.layers, f))) for f in files]
+        if stamp == self._layer_stamp:
+            return self._layer_elements
+        out = []
+        for f in files:
+            with open(os.path.join(self.layers, f), newline="", encoding="utf-8-sig") as fh:
+                for n, row in enumerate(csv.DictReader(fh), 2):
+                    try:
+                        lat, lon = float(row["lat"]), float(row["lon"])
+                    except (KeyError, TypeError, ValueError):
+                        print(f"layers/{f} line {n} skipped: needs lat and lon", flush=True)
+                        continue
+                    tags = {**LAYERS[f[:-4]], "layer": f"{f} (official list)", **({"name": row["name"]} if row.get("name") else {})}
+                    out.append({"type": "node", "id": f"{f}:{n}", "lat": lat, "lon": lon, "tags": tags})
+        if files or self._layer_stamp:
+            print(f"layers: {len(out)} points from {', '.join(files) or 'no files'}", flush=True)
+        with self.lock:
+            self._layer_stamp, self._layer_elements = stamp, out
+            self.areas.clear()  # rebuild areas so the new list is used
+        return out
 
     def _path(self, t, source=""):
         return os.path.join(self.folder, f"{t[0]}_{t[1]}{'.' + source if source else ''}.json")
@@ -293,7 +337,7 @@ class TileStore:
         if t in self.extracted and source in ("", "roads"):
             return True
         p = self._path(t, source)
-        return os.path.exists(p) and time.time() - os.path.getmtime(p) < TILE_MAX_AGE
+        return os.path.exists(p) and time.time() - os.path.getmtime(p) < SOURCE_MAX_AGE.get(source, TILE_MAX_AGE)
 
     def _fetch_chunk(self, tiles, source=""):
         """One request for a block of missing tiles from one source, split back into per-tile cache files."""
@@ -342,6 +386,7 @@ class TileStore:
 
     def area(self, tiles):
         key = frozenset(tiles)
+        layers = self.layer_elements()
         with self.lock:
             if key in self.areas:
                 self.areas.move_to_end(key)
@@ -364,6 +409,7 @@ class TileStore:
         s, w = min(t[0] for t in key) * TILE, min(t[1] for t in key) * TILE
         n, e = (max(t[0] for t in key) + 1) * TILE, (max(t[1] for t in key) + 1) * TILE
         inside = lambda r: s <= r["lat"] <= n and w <= r["lon"] <= e
+        elements += [el for el in layers if inside(el)]
         area = Area({"elements": elements}, [r for r in self.reports if inside(r)], [i for i in self.incidents if inside(i)],
                     [st for st in self.stops if inside(st)])
         with self.lock:
