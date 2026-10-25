@@ -38,6 +38,9 @@
     <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2 20h20L12 3Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v4M12 17v.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-store" viewBox="0 0 24 24"><path d="M3 9 5 4h14l2 5M4 9v11h16V9M3 9h18M9 20v-6h6v6" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M12 20V5m0 0-6 6m6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-volume" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="m16 9 6 6m0-6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-swap" viewBox="0 0 24 24"><path d="M7 4v16m0 0-3-3m3 3 3-3M17 20V4m0 0-3 3m3-3 3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   </defs>
 </svg>
@@ -68,6 +71,13 @@
     <button class="chip round-chip" id="settingsBtn" aria-label="Settings and trusted contacts"><svg><use href="#i-settings"/></svg></button>
   </div>
 </section>
+<!-- Live navigation -->
+<section id="navBanner" class="nav-banner" aria-live="polite" hidden>
+  <div class="nav-arrow" id="navArrow"><svg><use href="#i-arrow"/></svg></div>
+  <div class="nav-text"><b id="navDist"></b><span id="navText"></span><small id="navThen"></small></div>
+  <button class="nav-mute" id="muteBtn" aria-label="Mute spoken directions" aria-pressed="false"><svg><use href="#i-volume"/></svg></button>
+</section>
+<button id="recenterBtn" class="chip recenter" hidden><svg><use href="#i-locate"/></svg>Re-centre</button>
 <div id="legend" class="legend" hidden>
   <span><i style="background:var(--safe)"></i>Safer</span><span><i style="background:var(--caution)"></i>Take care</span><span><i style="background:var(--risk)"></i>Avoid</span>
 </div>

@@ -31,8 +31,15 @@ function segDist(p, a, b) {
   const t = Math.max(0, Math.min(1, (px * bx + py * by) / (bx * bx + by * by || 1)));
   return Math.hypot(px - t * bx, py - t * by);
 }
-async function api(path, body) {
-  const res = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
+async function api(path, body, timeoutMs = 90000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch(path, { signal: ctrl.signal, ...(body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}) });
+  } catch (e) {
+    throw new Error(e.name === "AbortError" ? "The map service is slow right now. Please try again in a moment." : "Can't reach SafeRoute. Check your connection.");
+  } finally { clearTimeout(timer); }
   const data = await res.json().catch(() => ({ error: "Unexpected response from the server" }));
   if (!res.ok || data.error) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
@@ -108,7 +115,8 @@ function currentPosition(timeout = 8000) {
     navigator.geolocation.getCurrentPosition((p) => { onPosition(p); resolve(state.here); }, () => resolve(state.here), { enableHighAccuracy: true, timeout });
   });
 }
-function onPosition(pos) {
+function onPosition(pos, simulated) {
+  if (state.sim && !simulated) return;
   const pt = [pos.coords.latitude, pos.coords.longitude];
   state.here = pt; state.hereAt = Date.now();
   if (!meMarker) {
@@ -245,18 +253,24 @@ async function maybeRoute() {
     routeLayer.clearLayers(); havenLayer.clearLayers();
     return renderSheet(`<div class="empty"><div class="badge">${icon("check")}</div><div><h3>You're already there</h3><p class="muted">Pick a destination further away.</p></div></div>`);
   }
-  renderSheet(`<div class="empty"><div class="badge">${icon("shield")}</div><div><h3>Checking every street…</h3><p class="muted">Lighting, open shops, police, CCTV and reports for ${esc(timeLabel().toLowerCase())}. A new area can take up to 30 seconds the first time.</p></div></div>`);
+  const seq = ++routeSeq;
+  renderSheet(`<div class="empty"><div class="badge">${icon("shield")}</div><div><h3>Checking every street…</h3><p class="muted" id="routeWait">Lighting, open shops, police, CCTV and reports for ${esc(timeLabel().toLowerCase())}.</p></div></div>`);
+  const slow = setTimeout(() => { const w = $("#routeWait"); if (w) w.textContent = "First trip in this area: downloading and scoring its streets. This can take up to a minute."; }, 6000);
   try {
     const q = new URLSearchParams({ from: from.join(","), to: state.to.join(","), at: whenParam() });
     const res = await api("/api/route?" + q);
+    if (seq !== routeSeq) return; // the user picked something else meanwhile
     state.routes = res.routes; state.rain = res.rain; state.routeFrom = from;
     state.sel = "safest";
     drawRoutes(true);
     renderRoutes();
   } catch (err) {
-    renderSheet(`<div class="note">${icon("alert")}<span>${esc(err.message)}</span></div>`);
-  }
+    if (seq !== routeSeq) return;
+    renderSheet(`<div class="note">${icon("alert")}<span>${esc(err.message)}</span></div><button class="btn btn-block" id="retryRoute">Try again</button>`);
+    $("#retryRoute").onclick = maybeRoute;
+  } finally { clearTimeout(slow); }
 }
+let routeSeq = 0;
 
 function drawRoutes(fit) {
   routeLayer.clearLayers(); havenLayer.clearLayers();
@@ -324,6 +338,8 @@ function renderRoutes() {
       <li class="info">${r.daylight >= 1 ? "Daylight" : dusk ? "Dusk" : "After dark"}</li>
     </ul>
     ${notes.map((n) => `<div class="note">${icon("alert")}<span>${esc(n)}</span></div>`).join("")}
+    <details class="why"><summary>Directions · ${r.steps.length - 1} steps</summary><ol class="steps-list">${r.steps.map((st) =>
+      `<li><span class="turn">${turnIcon(st.turn)}</span>${esc(st.text)}<small>${st.dist ? fmtDist(st.dist) : ""}</small></li>`).join("")}</ol></details>
     <details class="why"><summary>Why this score?</summary><div class="bars">${factors}</div>
       <p class="muted" style="margin:0 0 12px">Scores compare routes. They mean <b>safer</b>, never guaranteed safe. Trust your instincts.</p></details>
     <div class="actions">
@@ -387,11 +403,106 @@ async function startTrip(opts = {}) {
   const shared = shareText(`I'm walking to ${state.toLabel || "my destination"} with SafeRoute, about ${r.minutes} min. Follow me live:`, tripLink(t.id));
   if (opts.shareOnly) { await shared; return; }
   startWatching();
-  state.trip = { ...t, route: r, started: Date.now(), offCount: 0, lastMovePt: state.here, lastMoveAt: Date.now(), lastPost: 0, nextCheck: 0 };
-  routeLayer.eachLayer((l) => l.options.color === "#8f8aa0" && routeLayer.removeLayer(l));
+  state.trip = { ...t, route: r, started: Date.now(), offCount: 0, lastMovePt: state.here, lastMoveAt: Date.now(), lastPost: 0, nextCheck: 0,
+    spoken: {}, lastReroute: 0 };
+  state.follow = true;
+  document.body.classList.add("navigating");
+  $("#navBanner").hidden = false;
+  drawTripRoute();
   try { state.wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+  const start = state.here && metres(state.here, r.coords[0]) < 60 ? state.here : r.coords[0];
+  map.setView(start, 18);
   renderTrip();
-  if (state.here) map.setView(state.here, 17);
+  updateGuidance(start);
+  if (!state.here || metres(state.here, r.coords[0]) > 200) toast("No GPS fix near the start. Use Simulate walk to preview the trip.", 5000);
+}
+
+function drawTripRoute() {
+  const r = state.trip.route;
+  routeLayer.clearLayers(); havenLayer.clearLayers();
+  L.polyline(r.coords, { color: "#fff", weight: 12, opacity: 0.9 }).addTo(routeLayer);
+  state.tripLine = L.polyline(r.coords, { color: COLOR[scoreClass(r.score)], weight: 8 }).addTo(routeLayer);
+  r.havens.forEach((h) => L.marker(h.pt, { icon: divIcon("haven-dot", 14), keyboard: false }).addTo(havenLayer).bindTooltip(`Open now: ${esc(h.name)}`));
+}
+
+// ---------- turn-by-turn ----------
+const TURN_ANGLE = { depart: 0, straight: 0, "slight right": 45, right: 90, "slight left": -45, left: -90, "u-turn": 180 };
+const turnIcon = (turn) => turn === "arrive" ? icon("flag") : `<svg aria-hidden="true" style="transform:rotate(${TURN_ANGLE[turn] || 0}deg)"><use href="#i-arrow"/></svg>`;
+const speakDist = (m) => (m >= 1000 ? `${(m / 1000).toFixed(1)} kilometres` : `${Math.max(10, Math.round(m / 10) * 10)} metres`);
+function speak(text) {
+  if (store.get("muted", false) || !window.speechSynthesis) return;
+  speechSynthesis.cancel();
+  speechSynthesis.speak(Object.assign(new SpeechSynthesisUtterance(text), { rate: 1.02 }));
+}
+$("#muteBtn").onclick = () => {
+  const m = !store.get("muted", false);
+  store.set("muted", m);
+  if (m) speechSynthesis?.cancel();
+  $("#muteBtn").setAttribute("aria-pressed", m);
+  $("#muteBtn").innerHTML = icon(m ? "mute" : "volume");
+};
+$("#muteBtn").innerHTML = icon(store.get("muted", false) ? "mute" : "volume");
+
+function updateGuidance(pt) {
+  const t = state.trip, r = t.route;
+  const p = routeProgress(pt, r.coords);
+  const done = r.length_m - p.left;
+  const i = r.steps.findIndex((st) => st.dist > done + 5);
+  const step = r.steps[i] || r.steps[r.steps.length - 1];
+  const togo = Math.max(0, step.dist - done);
+  const then = r.steps[i + 1];
+  $("#navArrow").innerHTML = turnIcon(step.turn);
+  $("#navArrow").classList.toggle("arrive", step.turn === "arrive");
+  $("#navDist").textContent = fmtDist(togo);
+  $("#navText").textContent = step.text;
+  $("#navThen").textContent = then && then.dist - step.dist < 80 ? `Then ${then.text.charAt(0).toLowerCase()}${then.text.slice(1)}` : "";
+  // say the first instruction once, warn at ~150 m, and again just before the turn
+  if (!t.spoken.start) { t.spoken.start = 1; speak(`${r.steps[0].text}. Then in ${speakDist(togo)}, ${step.text.toLowerCase()}.`); }
+  else if (togo < 30 && !t.spoken[i + "now"]) { t.spoken[i + "now"] = 1; speak(step.text); }
+  else if (togo < 160 && togo > 60 && !t.spoken[i + "soon"]) { t.spoken[i + "soon"] = 1; speak(`In ${speakDist(togo)}, ${step.text.toLowerCase()}`); }
+  return p;
+}
+
+map.on("dragstart", () => { if (state.trip) { state.follow = false; $("#recenterBtn").hidden = false; } });
+$("#recenterBtn").onclick = () => { state.follow = true; $("#recenterBtn").hidden = true; if (state.here) map.setView(state.here, 18); };
+
+async function reroute(pt) {
+  const t = state.trip;
+  if (Date.now() - t.lastReroute < 20000) return;
+  t.lastReroute = Date.now();
+  speak("Off route. Finding the safest way from here.");
+  toast("Off route. Finding the safest way from here…");
+  try {
+    const q = new URLSearchParams({ from: pt.join(","), to: state.to.join(","), at: whenParam() });
+    const res = await api("/api/route?" + q, null, 60000);
+    if (state.trip !== t) return;
+    t.route = res.routes.find((x) => x.kind === state.sel) || res.routes[0];
+    t.spoken = { start: 1 };
+    drawTripRoute();
+    renderTrip();
+    updateGuidance(pt);
+  } catch (e) { toast(e.message); }
+}
+
+// Demo: walk the route at 4x walking speed so the trip can be shown without GPS
+function simulateWalk() {
+  const t = state.trip;
+  if (!t) return;
+  if (state.sim) { clearInterval(state.sim); state.sim = null; return renderTrip(); }
+  let along = Math.max(0, t.route.length_m - routeProgress(state.here || t.route.coords[0], t.route.coords).left);
+  state.sim = setInterval(() => {
+    if (!state.trip) { clearInterval(state.sim); state.sim = null; return; }
+    along += 1.4 * 4;
+    const c = state.trip.route.coords;
+    let left = along, pt = c[c.length - 1];
+    for (let k = 0; k < c.length - 1; k++) {
+      const d = metres(c[k], c[k + 1]);
+      if (left <= d) { const f = left / d; pt = [c[k][0] + (c[k + 1][0] - c[k][0]) * f, c[k][1] + (c[k + 1][1] - c[k][1]) * f]; break; }
+      left -= d;
+    }
+    onPosition({ coords: { latitude: pt[0], longitude: pt[1] } }, true);
+  }, 1000);
+  renderTrip();
 }
 
 function routeProgress(pt, coords) {
@@ -417,7 +528,9 @@ function renderTrip() {
     ${ahead ? `<div class="haven"><span class="ico">${icon("store")}</span><div><b>${esc(ahead.name)}</b><div class="muted">Open now${ahead.d ? ` · ${fmtDist(ahead.d)}` : ""}. Step in if anything feels off.</div></div></div>` : ""}
     <div class="actions"><button class="btn btn-primary" id="safeBtn">${icon("check")}I've arrived safely</button>
       <button class="btn" id="tripShare" aria-label="Share live link again">${icon("share")}</button></div>
-    <button class="btn btn-ghost btn-block" id="endTrip">End trip</button>`);
+    <div class="actions" style="grid-template-columns:1fr 1fr"><button class="btn btn-ghost" id="simBtn">${icon("walk")}${state.sim ? "Stop simulation" : "Simulate walk"}</button>
+      <button class="btn btn-ghost" id="endTrip">End trip</button></div>`);
+  $("#simBtn").onclick = simulateWalk;
   $("#safeBtn").onclick = () => endTrip(true);
   $("#endTrip").onclick = () => endTrip(false);
   $("#tripShare").onclick = () => shareText("Follow my walk live on SafeRoute:", tripLink(t.id));
@@ -425,15 +538,16 @@ function renderTrip() {
 
 function onTripPosition(pt) {
   const t = state.trip, r = t.route;
-  const p = routeProgress(pt, r.coords);
+  const p = updateGuidance(pt);
+  if (state.follow) map.setView(pt, Math.max(map.getZoom(), 17), { animate: true });
   if (metres(pt, t.lastMovePt || pt) > 15) { t.lastMovePt = pt; t.lastMoveAt = Date.now(); }
   if (Date.now() - t.lastPost > 10000) {
     t.lastPost = Date.now();
     api(`/api/trip/${t.id}`, { key: t.key, lat: pt[0], lon: pt[1] }).catch(() => {});
   }
   if (metres(pt, r.coords[r.coords.length - 1]) < 40) return endTrip(true, true);
-  t.offCount = p.off > 50 ? t.offCount + 1 : 0;
-  if (t.offCount >= 3) { t.offCount = 0; checkIn("You seem to have left your route."); }
+  t.offCount = p.off > 40 ? t.offCount + 1 : 0;
+  if (t.offCount >= 3) { t.offCount = 0; reroute(pt); checkIn("You seem to have left your route."); }
   renderTrip();
 }
 
@@ -450,6 +564,10 @@ async function endTrip(safe, auto) {
   if (!t) return;
   state.trip = null;
   state.routes = [];
+  clearInterval(state.sim); state.sim = null;
+  document.body.classList.remove("navigating");
+  $("#navBanner").hidden = true; $("#recenterBtn").hidden = true;
+  if (safe) speak("You have arrived.");
   api(`/api/trip/${t.id}`, { key: t.key, ended: true }).catch(() => {});
   state.wakeLock?.release?.().catch(() => {});
   vibrate(200);

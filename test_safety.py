@@ -1,3 +1,4 @@
+import os
 import tempfile
 import time
 import unittest
@@ -25,7 +26,7 @@ def node(nid, pt, **tags):
 
 def fixture():
     els = [
-        way(1, [1, 2], [A, B], highway="footway"),
+        way(1, [1, 2], [A, B], highway="footway", lit="no"),
         way(2, [1, 10, 11, 12, 13, 2], NORTH, highway="residential", name="Market Road"),
         way(3, [11, 20], [(28.0005, 77.001), (28.0012, 77.001)], highway="service"),  # dead-end lane off the street
     ]
@@ -89,6 +90,14 @@ class RouteTest(unittest.TestCase):
         day, _ = area.factors(foot, NOON, 1)
         self.assertLess(night["surroundings"], day["surroundings"])
 
+    def test_turn_by_turn(self):
+        r = self.area.routes(A, (28.0012, 77.001), NIGHT)[0]
+        texts = [st["text"] for st in r["steps"]]
+        self.assertEqual(texts[0], "Head north on Market Road")
+        self.assertIn("Turn left onto the lane", texts)
+        self.assertEqual(r["steps"][-1]["turn"], "arrive")
+        self.assertEqual(r["turns"], 1)
+
     def test_havens(self):
         h = self.area.havens_near((28.0007, 77.0024), LATE)
         self.assertEqual(h[0]["name"], "City Pharmacy")  # the only place open at 2 am
@@ -127,6 +136,7 @@ class TileTest(unittest.TestCase):
         area = self.store.for_trip(A, B)
         self.assertEqual(len(area.edges), len(Area(fixture()).edges))
         n = len(self.calls)
+        self.assertLess(n, len(os.listdir(self.dir)))  # missing tiles are fetched in blocks, not one by one
         self.store.for_trip(A, B)  # cached area
         self.assertEqual(len(self.calls), n)
         TileStore(self.dir, fetch=lambda *a: self.fail("tile should come from disk")).for_trip(A, B)
@@ -153,6 +163,15 @@ class TileTest(unittest.TestCase):
         area = self.store.for_trip(A, B)
         self.store.add_report({"lat": 28.0005, "lon": 77.0015, "type": "harassment", "ts": time.time()})
         self.assertTrue(any(e["reports"] for e in area.edges))
+
+
+class LightingGuessTest(unittest.TestCase):
+    def test_untagged_streets_get_a_lighting_guess(self):
+        els = [way(1, [1, 2], [A, B], highway="primary"), way(2, [3, 4], [(28.001, 77.0), (28.001, 77.003)], highway="track")]
+        area = Area({"elements": els})
+        light = lambda i: area.factors(area.edges[i], NIGHT, 0)[0]["lighting"]
+        self.assertGreater(light(0), 0.5)  # main roads in town are almost always lit
+        self.assertLess(light(1), 0.2)
 
 
 if __name__ == "__main__":

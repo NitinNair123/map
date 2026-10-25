@@ -22,6 +22,9 @@ WEIGHTS = {
     "escape": (10, 5),
     "transit": (10, 5),
 }
+COMPASS = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"]
+ROAD_WORDS = {"footway": "the footpath", "path": "the path", "steps": "the steps", "cycleway": "the cycle path",
+              "pedestrian": "the pedestrian street", "service": "the lane", "track": "the track", "living_street": "the lane"}
 FACTOR_LABELS = {
     "lighting": "Lighting", "activity": "Open places", "security": "Police & CCTV", "path": "Footpath & road",
     "surroundings": "Surroundings", "escape": "Ways out", "transit": "Transport",
@@ -35,6 +38,17 @@ ROAD_SCORE = {
     "service": 0.4, "footway": 0.45, "cycleway": 0.4, "path": 0.3, "track": 0.1, "steps": 0.25,
 }
 VEHICLE_ROADS = {"trunk", "primary", "secondary", "tertiary", "primary_link", "secondary_link", "tertiary_link", "unclassified", "residential"}
+
+# Chance a street is lit when OSM has no lit tag or lamps, by road type (most streets in India aren't tagged)
+LIT_PRIOR = {
+    "trunk": 0.8, "primary": 0.8, "secondary": 0.8, "tertiary": 0.7, "primary_link": 0.75, "secondary_link": 0.75,
+    "tertiary_link": 0.7, "residential": 0.5, "living_street": 0.5, "pedestrian": 0.6, "unclassified": 0.35,
+    "service": 0.3, "footway": 0.35, "cycleway": 0.3, "path": 0.15, "steps": 0.25, "track": 0.05,
+}
+LIT_TAGS = {"yes": 1.0, "24/7": 1.0, "automatic": 1.0, "sunset-sunrise": 1.0, "interval": 0.7, "limited": 0.6,
+            "no": 0.0, "disused": 0.0}
+# Built-up land that puts people and homes along a street
+LIVELY = {"residential", "commercial", "retail"}
 
 # Land next to the road: (score in daylight, score in the dark). Missing means ordinary built-up area (1.0).
 SURROUNDINGS = {
@@ -153,6 +167,11 @@ def is_open(spec, when):
     return bool(result)
 
 
+PLACE_AMENITIES = {"restaurant", "cafe", "fast_food", "atm", "bank", "marketplace", "food_court", "ice_cream", "cinema",
+                   "theatre", "school", "college", "university", "place_of_worship", "community_centre", "doctors",
+                   "dentist", "post_office", "library", "events_venue", "coworking_space", "bureau_de_change"}
+
+
 def classify(tags):
     a, shop = tags.get("amenity"), tags.get("shop")
     if tags.get("highway") == "street_lamp":
@@ -167,7 +186,7 @@ def classify(tags):
         return "transit"
     if a in ("hospital", "clinic", "pharmacy", "fuel") or tags.get("tourism") == "hotel":
         return "haven"
-    if shop or a in ("restaurant", "cafe", "fast_food", "atm", "bank", "marketplace", "food_court", "ice_cream", "cinema"):
+    if shop or tags.get("office") or a in PLACE_AMENITIES:
         return "place"
     return None
 
@@ -178,6 +197,8 @@ def surroundings_kind(tags):
             return tags[key]
     if tags.get("railway") == "rail":
         return "railway"
+    if tags.get("landuse") in LIVELY:
+        return tags["landuse"]
     return None
 
 
@@ -230,7 +251,9 @@ class Area:
         hw = tags["highway"]
         underpass = tags.get("tunnel") in ("yes", "building_passage") or tags.get("footway") == "subway" or tags.get("layer", "0").startswith("-")
         overbridge = tags.get("bridge") == "yes" and hw in ("footway", "path", "steps")
-        sidewalk = tags.get("sidewalk") or tags.get("sidewalk:both")
+        sidewalk = next((tags[k] for k in ("sidewalk", "sidewalk:both", "sidewalk:left", "sidewalk:right") if tags.get(k)), None)
+        if tags.get("footway") in ("sidewalk", "crossing"):
+            sidewalk = "yes"
         for (a, pa), (b, pb) in zip(zip(el["nodes"], pts), zip(el["nodes"][1:], pts[1:])):
             self.nodes[a], self.nodes[b] = pa, pb
             ei = len(self.edges)
@@ -267,7 +290,8 @@ class Area:
             pts = z["pts"]
             if (z["closed"] and in_polygon(mid, pts)) or any(seg_dist(mid, p, q) <= 30 for p, q in zip(pts, pts[1:])):
                 kinds.add(z["kind"])
-        e["zones"] = sorted(kinds)
+        e["lively"] = sorted(kinds & LIVELY)
+        e["zones"] = sorted(kinds - LIVELY)
 
     def _junction_gaps(self):
         """For each edge, the length of the junction-free stretch it sits on and whether that stretch is a dead end."""
@@ -349,19 +373,21 @@ class Area:
             return o
         if p["kind"] == "haven":  # hospitals, pumps, pharmacies without hours are usually 24h
             return True
-        return 9 <= when.hour < 21  # shortcut: guessed shop hours, replace with Places API hours
+        return 9 <= when.hour < 22  # shortcut: guessed shop hours (Indian shops shut late), replace with Places API hours
 
     def factors(self, e, when, light):
         """Each factor from 0 (worst) to 1 (best) for this edge at this time."""
         near = e["near"]
         dark = 1 - light
-        if any(r["type"] == "broken_light" for r in e["reports"]) or e["lit"] == "no":
-            lighting = 0.0
-        elif e["lit"] == "yes":
-            lighting = 1.0
-        else:
-            lighting = e["lamp_level"]
         open_places = [i for i in near["place"] + near["haven"] if self.is_place_open(self.pois[i], when)]
+        if any(r["type"] == "broken_light" for r in e["reports"]):
+            lighting = 0.0
+        elif e["lit"] in LIT_TAGS:
+            lighting = LIT_TAGS[e["lit"]]
+        else:  # no tag: lamps we can see, or a guess from the road type, built-up land and lit shopfronts
+            guess = LIT_PRIOR.get(e["highway"], 0.3) + 0.15 * bool(e["lively"]) + 0.1 * min(3, len(open_places))
+            lighting = max(e["lamp_level"], min(0.85, guess))
+        busy = 0.3 if {"commercial", "retail"} & set(e["lively"]) else 0.15 if e["lively"] else 0.0
         police = 1.0 if e["police_m"] < 400 else 0.5 if e["police_m"] < 800 else 0.0
         path = ROAD_SCORE.get(e["highway"], 0.5)
         if e["highway"] in VEHICLE_ROADS and e["sidewalk"]:
@@ -379,7 +405,7 @@ class Area:
             escape = max(0.0, 1 - e["gap_m"] / 500)  # no side street for 500 m means nowhere to turn off
         return {
             "lighting": lighting,
-            "activity": min(1, len(open_places) / 3),
+            "activity": min(1, len(open_places) / 3 + busy * (1 if 7 <= when.hour < 22 else 0.4)),
             "security": min(1, police + 0.3 * len(near["cctv"])),
             "path": max(0.0, min(1.0, path)),
             "surroundings": surroundings,
@@ -418,7 +444,8 @@ class Area:
 
     def has_data(self, e):
         n = e["near"]
-        return e["lit"] in ("yes", "no") or bool(n["lamp"] or n["place"] or n["haven"] or e["reports"] or e["incidents"])
+        return e["lit"] in LIT_TAGS or bool(n["lamp"] or n["place"] or n["haven"] or n["cctv"] or n["transit"]
+                                            or e["lively"] or e["reports"] or e["incidents"])
 
     # ---- routing ----
 
@@ -466,7 +493,7 @@ class Area:
                 "daylight": round(light, 2)}
         if not path:
             return {**base, "minutes": 0, "score": 100, "low_data": False, "reasons": [], "warnings": [],
-                    "factors": {}, "weakest": None, "havens": [], "turns": 0}
+                    "factors": {}, "weakest": None, "havens": [], "turns": 0, "steps": []}
         avg = sum(scores[ei] * self.edges[ei]["length"] for _, ei in path) / (length or 1)
         weak_i = min(range(len(path)), key=lambda i: scores[path[i][1]])
         weak = self.edges[path[weak_i][1]]
@@ -504,11 +531,8 @@ class Area:
         score -= min(10, max(0, haven_gap - 300) / 50)
         score -= max(0, length / fastest_len - 1.3) * 20
 
-        turns = 0
-        for p, q, r in zip(coords, coords[1:], coords[2:]):
-            b1 = math.atan2(q[1] - p[1], q[0] - p[0])
-            b2 = math.atan2(r[1] - q[1], r[0] - q[0])
-            turns += abs((b2 - b1 + math.pi) % (2 * math.pi) - math.pi) > math.radians(45)
+        steps = self._steps(path, coords)
+        turns = sum(st["turn"] not in ("straight", "arrive", "depart") for st in steps)
 
         reasons = [f"{len(places)} open places along the way", f"{round(100 * lit_len / length)}% well lit"]
         if cctv:
@@ -535,10 +559,39 @@ class Area:
             "warnings": warnings,
             "factors": {FACTOR_LABELS[k]: round(100 * v / length) for k, v in factor_sum.items()},
             "turns": turns,
+            "steps": steps,
             "weakest": {"coords": [self.nodes[weak["a"]], self.nodes[weak["b"]]], "score": round(scores[path[weak_i][1]]),
                         "name": weak["name"] or weak["highway"].replace("_", " "), "why": FACTOR_LABELS[weak_why]},
             "havens": [{"name": self.pois[i]["name"], "pt": self.pois[i]["pt"]} for i in list(havens)[:30]],
         }
+
+    def _steps(self, path, coords):
+        """Turn-by-turn instructions: a step wherever the street name changes or the walk turns at a junction."""
+        steps, travelled, prev_name, prev_bearing = [], 0.0, None, None
+        for k, (n, ei) in enumerate(path):
+            e = self.edges[ei]
+            a, b = coords[k], coords[k + 1]
+            bearing = math.degrees(math.atan2((b[1] - a[1]) * math.cos(math.radians(a[0])), b[0] - a[0])) % 360
+            name = e["name"] or ROAD_WORDS.get(e["highway"], "the road")
+            if k == 0:
+                steps.append({"pt": a, "dist": 0, "turn": "depart", "text": f"Head {COMPASS[round(bearing / 45) % 8]} on {name}"})
+            else:
+                turn = (bearing - prev_bearing + 540) % 360 - 180  # positive is clockwise, i.e. right
+                junction = len(self.adj[n]) >= 3
+                if (junction and abs(turn) >= 30) or name != prev_name:
+                    side = "right" if turn > 0 else "left"
+                    kind = ("straight" if abs(turn) < 30 else f"slight {side}" if abs(turn) < 60
+                            else side if abs(turn) < 140 else "u-turn")
+                    verb = {"straight": "Continue", "u-turn": "Turn around"}.get(kind, f"Turn {kind}")
+                    text = f"{verb} onto {name}" if name != prev_name else verb
+                    if steps and travelled - steps[-1]["dist"] < 10 and steps[-1]["turn"] == kind == "straight":
+                        steps[-1]["text"] = text  # tiny unnamed link between two streets: one instruction, not two
+                    else:
+                        steps.append({"pt": a, "dist": round(travelled), "turn": kind, "text": text})
+            travelled += e["length"]
+            prev_name, prev_bearing = name, bearing
+        steps.append({"pt": coords[-1], "dist": round(travelled), "turn": "arrive", "text": "You have arrived"})
+        return steps
 
     def havens_near(self, pt, when, limit=5):
         """Closest places that are open right now and where someone can step in for help."""

@@ -19,9 +19,9 @@ python server.py          # then open http://localhost:8000   (on Windows: py se
 ```
 
 It works anywhere. When someone plans a walk, the server fetches the streets around it from
-OpenStreetMap, scores them and routes. It fetches the area as about 2 km tiles along the trip and caches
-them in `data/tiles/` for 7 days. It tries three Overpass mirrors in turn, so one busy server doesn't
-break a trip. Place search uses Photon (komoot), and walks are capped at 15 km.
+OpenStreetMap, scores them and routes. It fetches the area as about 1 km tiles along the trip, in one or two
+requests, and caches them in `data/tiles/` for 7 days. It tries three Overpass mirrors in turn, so one busy
+server doesn't break a trip. Place search uses Photon (komoot), and walks are capped at 10 km.
 
 Run the tests with `python -m unittest test_safety`.
 
@@ -43,8 +43,8 @@ night using the real sun position for your area, so dusk counts as dusk.
 
 | Factor | Day | Dark | What it uses |
 |---|---|---|---|
-| Lighting | 5 | 25 | `lit=*` tags, street lamps within 20 m, broken-light reports |
-| Open places | 25 | 25 | shops, cafes, pharmacies, petrol pumps **open at that time** (OSM `opening_hours`) |
+| Lighting | 5 | 25 | `lit=*` tags, street lamps within 20 m, broken-light reports; untagged streets get a guess from road type, built-up land and lit shopfronts |
+| Open places | 25 | 25 | shops, cafes, offices, schools, temples, clinics, pharmacies, petrol pumps **open at that time** (OSM `opening_hours`), plus housing and market areas |
 | Police & CCTV | 10 | 12 | police station within 400/800 m, cameras within 50 m |
 | Footpath & road | 25 | 13 | road type, sidewalks, underpasses (bad), foot overbridges (bad at night) |
 | Surroundings | 15 | 15 | parks, construction sites, rail lines, scrub, cemeteries and industrial land next to the road |
@@ -71,6 +71,7 @@ low-data flag when the streets are poorly mapped.
 
 ## App features
 
+- Live navigation: next-turn banner, spoken directions, map follows you, automatic re-route when you go off route, and a Simulate walk demo.
 - Place search anywhere, biased towards where you're looking, or a pin dropped on the map.
 - A departure time picker, because a 1 am walk scores differently from a 7 pm one.
 - A safety map overlay for the chosen hour.
