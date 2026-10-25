@@ -22,9 +22,12 @@ TABLES = [  # "Districtwise Crime Against Women 2017 onwards" and "... 2024 Onwa
 ]
 BOX = (28.2, 76.8, 28.95, 77.75)  # Delhi NCR
 STATES = {"Delhi", "NCT of Delhi", "Uttar Pradesh", "Haryana"}
-# The two street-harassment heads: IPC 354 (assault to outrage modesty) and IPC 509 (words or gestures to insult modesty)
-COUNTS = {"assault": ("assault_on_womenabove_18", "assault_on_women_below_18"),
-          "insult": ("insult_to_the_modesty_of_women_above_18", "insult_to_the_modesty_of_women_below_18")}
+# The two street-harassment heads: assault to outrage modesty (IPC 354, BNS 74-76) and insulting modesty (IPC 509,
+# BNS 79). The 2024 table names its columns differently, so both spellings are listed.
+COUNTS = {"assault": ("assault_on_womenabove_18", "assault_on_women_below_18", "assault_outrage_modesty_women",
+                      "assault_women_outrage_modesty_girls", "assault_criminal_force_disrobe_women", "assault_criminal_force_disrobe_girls"),
+          "insult": ("insult_to_the_modesty_of_women_above_18", "insult_to_the_modesty_of_women_below_18", "insult_modesty_women",
+                     "insult_modesty_women_girls")}
 UA = {"User-Agent": "SafeRoute/1.0 (student safety app; github.com/NitinNair123/map)"}
 
 
@@ -43,6 +46,8 @@ def counts(rows):
         if r.get("state_name") not in STATES or row in seen:  # the two tables may share a year
             continue
         seen.add(row)
+        if not any(c in r for cols in COUNTS.values() for c in cols):
+            continue  # a table with none of these columns says nothing, rather than zero
         year = out.setdefault(key(r["registration_circles"]), {}).setdefault(r["year"], {"assault": 0, "insult": 0})
         for name, cols in COUNTS.items():
             year[name] += sum(int(float(r.get(c) or 0)) for c in cols)

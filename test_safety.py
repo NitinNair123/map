@@ -544,6 +544,9 @@ class CrimeContextTest(unittest.TestCase):
         self.assertEqual((area[0]["district"], area[0]["year"], area[0]["assault"], area[0]["previous"]), ("Gautam Buddha Nagar", 2022, 79, None))
         self.assertEqual(crime.around(data, [(28.63, 77.22)]), [])
         self.assertEqual(crime.around(None, [(28.47, 77.5)]), [])
+        new = csv.DictReader(io.StringIO("year,state_name,registration_circles,assault_outrage_modesty_women,assault_criminal_force_disrobe_women,insult_modesty_women\n"
+                                         "2024,Delhi,Central,22,13,19"))  # the 2024 table's column names
+        self.assertEqual(crime.counts(new)["central"]["2024"], {"assault": 35, "insult": 19})
 
 
 class ModeTest(unittest.TestCase):
