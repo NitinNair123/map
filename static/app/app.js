@@ -11,7 +11,9 @@ const store = {
 const icon = (id) => `<svg aria-hidden="true"><use href="#i-${id}"/></svg>`;
 const scoreClass = (s) => (s >= 65 ? "good" : s >= 40 ? "ok" : "bad");
 const scoreWord = (s) => (s >= 65 ? "Safer" : s >= 40 ? "Take care" : "Avoid if you can");
-const COLOR = { good: "#12b76a", ok: "#f79009", bad: "#f04438" };
+const COLOR = { good: "#12b76a", ok: "#f79009", bad: "#f04438", none: "#98a2b3" };
+const CONF = { high: "High confidence", medium: "Medium confidence", low: "Low confidence", none: "Not rated" };
+const MIN_CONF = 0.35; // below this a street has too little data to rate
 const LABEL = { safest: "Safest", balanced: "Balanced", fastest: "Fastest" };
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 const fmtDist = (m) => (m < 1000 ? `${Math.round(m / 10) * 10} m` : `${(m / 1000).toFixed(1)} km`);
@@ -208,6 +210,7 @@ map.on("click", (e) => {
   const pt = [e.latlng.lat, e.latlng.lng];
   if (reportType) return sendReport(pt);
   if (state.trip) return;
+  if (state.heatOn && !pickMode) return explainStreet(pt);
   const which = pickMode || "to";
   pickMode = null;
   setPlace(which, pt, "Dropped pin");
@@ -277,7 +280,7 @@ function drawRoutes(fit) {
   const order = [...state.routes].filter((r) => !r.same_as).sort((a, b) => (a.kind === state.sel) - (b.kind === state.sel));
   for (const r of order) {
     const sel = r.kind === state.sel || (state.routes.find((x) => x.kind === state.sel)?.same_as === r.kind);
-    const c = COLOR[scoreClass(r.score)];
+    const c = r.confidence_level === "none" ? COLOR.none : COLOR[scoreClass(r.score)];
     if (sel) L.polyline(r.coords, { color: "#fff", weight: 11, opacity: 0.9 }).addTo(routeLayer);
     const line = L.polyline(r.coords, { color: sel ? c : "#8f8aa0", weight: sel ? 7 : 5, opacity: sel ? 1 : 0.6 }).addTo(routeLayer);
     line.on("click", (e) => { L.DomEvent.stop(e); if (!state.trip) { state.sel = r.kind; drawRoutes(); renderRoutes(); } });
@@ -285,6 +288,7 @@ function drawRoutes(fit) {
       if (r.weakest && r.weakest.score < 45)
         L.polyline(r.weakest.coords, { color: "#16131f", weight: 7, opacity: 0.8, dashArray: "2 10", lineCap: "round" }).addTo(routeLayer)
           .bindTooltip(`Weakest stretch: ${esc(r.weakest.name)}`);
+      r.segments.forEach(([a, b, c, d]) => L.polyline([[a, b], [c, d]], { color: COLOR.none, weight: 7, dashArray: "6 8", interactive: false }).addTo(routeLayer));
       r.havens.forEach((h) => L.marker(h.pt, { icon: divIcon("haven-dot", 14), keyboard: false }).addTo(havenLayer).bindTooltip(`Open now: ${esc(h.name)}`));
     }
   }
@@ -308,24 +312,26 @@ function renderRoutes() {
   const tabs = state.routes.map((x) => {
     const extra = x.minutes - fastest.minutes;
     return `<button class="tab" role="tab" aria-selected="${x.kind === state.sel}" data-kind="${x.kind}">
-      <b>${LABEL[x.kind]}</b><span class="num ${scoreClass(x.score)}">${x.score}</span>
+      <b>${LABEL[x.kind]}</b><span class="num ${x.confidence_level === "none" ? "" : scoreClass(x.score)}">${x.confidence_level === "none" ? "–" : x.score}</span>
       <small>${x.same_as ? `Same as ${LABEL[x.same_as].toLowerCase()}` : `${x.minutes} min${extra > 0 ? ` · +${extra}` : ""}`}</small></button>`;
   }).join("");
   const factors = Object.entries(r.factors).map(([k, v]) =>
     v === null ? `<div class="bar"><span>${esc(k)}</span><span class="track"></span><span class="muted">No data</span></div>`
-      : `<div class="bar"><span>${esc(k)}</span><span class="track"><span class="fill" style="display:block;width:${v}%;background:${COLOR[scoreClass(v)]}"></span></span><span>${v}</span></div>`).join("");
+      : `<div class="bar"><span>${esc(k)}<small class="muted"> · ${v.measured}% measured</small></span><span class="track"><span class="fill" style="display:block;width:${v.score}%;background:${COLOR[scoreClass(v.score)]}"></span></span><span>${v.score}</span></div>`).join("");
   const notes = [];
   if (r.same_as) notes.push(`This is the same way as the ${LABEL[r.same_as].toLowerCase()} route.`);
-  if (r.low_data) notes.push("Most of this route has no lighting data on the map. The score uses only what is mapped, so treat it as a rough guide.");
+  if (r.confidence_level === "none") notes.push("There isn't enough real data on these streets to rate this route yet. Grey dashes mark the unrated parts. Reports and the street survey fill this in.");
+  else if (r.unrated_pct >= 10) notes.push(`${r.unrated_pct}% of this route is too thinly mapped to rate. It's shown in grey dashes, and the score covers only the rest.`);
   if (state.rain) notes.push("It's raining, so streets may be emptier than usual.");
   if (r.weakest && r.weakest.score < 45) notes.push(`Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because of ${r.weakest.why.toLowerCase()}. It's dashed on the map.`);
   const dusk = r.daylight > 0 && r.daylight < 1;
   renderSheet(`
     <div class="tabs" role="tablist" aria-label="Route options">${tabs}</div>
     <div class="detail">
-      ${gauge(r.score)}
+      ${r.confidence_level === "none" ? "" : gauge(r.score)}
       <div>
-        <h3>${scoreWord(r.score)}</h3>
+        <h3>${r.confidence_level === "none" ? "Not rated" : scoreWord(r.score)}</h3>
+        <p class="conf conf-${r.confidence_level}">${CONF[r.confidence_level]} · ${Math.round(r.confidence * 100)}% measured</p>
         <div class="stats">
           <div><b>${r.minutes} min</b>walk</div>
           <div><b>${fmtDist(r.length_m)}</b>distance</div>
@@ -342,6 +348,7 @@ function renderRoutes() {
     <details class="why"><summary>Directions · ${r.steps.length - 1} ${r.steps.length === 2 ? "step" : "steps"}</summary><ol class="steps-list">${r.steps.map((st) =>
       `<li><span class="turn">${turnIcon(st.turn)}</span>${esc(st.text)}<small>${st.dist ? fmtDist(st.dist) : ""}</small></li>`).join("")}</ol></details>
     <details class="why"><summary>Why this score?</summary><div class="bars">${factors}</div>
+      <p class="muted" style="margin:0 0 8px">Data used: ${r.sources.map(esc).join(", ") || "none"}.</p>
       <p class="muted" style="margin:0 0 12px">Scores compare routes. They mean <b>safer</b>, never guaranteed safe. Trust your instincts.</p></details>
     <div class="actions">
       <button class="btn btn-primary" id="startBtn">${icon("walk")}Start walking</button>
@@ -735,13 +742,15 @@ $("#fakeCallBtn").onclick = () => { $("#sosCancel").click(); fakeCall(); };
 
 // ---------- reports ----------
 const REPORTS = [
-  ["broken_light", "💡", "Broken light"], ["felt_unsafe", "👀", "Felt unsafe"],
-  ["harassment", "🚫", "Harassment"], ["felt_safe", "✅", "Felt safe"],
+  ["lights_on", "💡", "Street is lit"], ["broken_light", "🌑", "Dark or broken light"],
+  ["shops_open", "🏪", "Shops open now"], ["shops_closed", "🔒", "Shops closed now"],
+  ["people_around", "👥", "People around"], ["deserted", "🚶", "Deserted"],
+  ["felt_unsafe", "👀", "Felt unsafe"], ["harassment", "🚫", "Harassment"], ["felt_safe", "✅", "Felt safe"],
 ];
 $("#reportBtn").onclick = () => {
   openDrawer(`
     <h2 id="drawerTitle">Report something</h2>
-    <p>Reports are anonymous and change scores for everyone straight away. They fade after a few weeks.</p>
+    <p>Reports are anonymous and change scores for everyone straight away. "Lit", "shops open" and "people around" are real checks of the street, so they count as measured data for this time of day.</p>
     <div class="report-grid">${REPORTS.map(([k, e, l]) => `<button data-type="${k}" aria-pressed="false"><span>${e}</span>${l}</button>`).join("")}</div>
     <button class="btn btn-primary btn-block" id="reportHere" disabled>${icon("locate")}At my location</button>
     <button class="btn btn-block" id="reportMap" disabled>${icon("flag")}Pick the spot on the map</button>`);
@@ -781,15 +790,24 @@ async function loadHeat() {
   try { segs = await api("/api/heat?" + new URLSearchParams({ bbox, at: whenParam() })); } catch (e) { return toast(e.message); }
   if (seq !== heatSeq || !state.heatOn) return;
   heatLayer?.remove();
-  heatLayer = L.layerGroup(segs.map(([a, b, c, d, s]) =>
-    L.polyline([[a, b], [c, d]], { color: COLOR[scoreClass(s)], weight: 4, opacity: 0.75, interactive: false }))).addTo(map);
+  heatLayer = L.layerGroup(segs.map(([a, b, c, d, s, conf]) => conf < MIN_CONF
+    ? L.polyline([[a, b], [c, d]], { color: COLOR.none, weight: 3, opacity: 0.8, dashArray: "4 6", interactive: false })
+    : L.polyline([[a, b], [c, d]], { color: COLOR[scoreClass(s)], weight: 4, opacity: conf >= 0.5 ? 0.85 : 0.5, interactive: false }))).addTo(map);
   routeLayer.eachLayer((l) => l.bringToFront?.());
+}
+async function explainStreet(pt) {
+  let x;
+  try { x = await api("/api/explain?" + new URLSearchParams({ at_pt: pt.join(","), at: whenParam() })); } catch (e) { return toast(e.message); }
+  const rows = x.factors.map((f) => `<tr><td>${esc(f.factor)}</td><td>${f.score === null ? '<span class="muted">No data</span>' : f.score}</td><td>${esc(f.sources.join(", ") || "—")}</td></tr>`).join("");
+  L.popup({ maxWidth: 320 }).setLatLng(pt).setContent(`<b>${esc(cap(x.name))}</b><br>
+    ${x.confidence_level === "none" ? "Not rated" : `Score ${x.score}`} · ${CONF[x.confidence_level]} (${Math.round(x.confidence * 100)}% measured)
+    <table class="explain"><tr><th>Factor</th><th>Score</th><th>Data</th></tr>${rows}</table>`).openOn(map);
 }
 $("#heatBtn").onclick = () => {
   state.heatOn = !state.heatOn;
   $("#heatBtn").setAttribute("aria-pressed", state.heatOn);
   $("#legend").hidden = !state.heatOn;
-  if (state.heatOn) { loadHeat(); toast(`Safety map for ${timeLabel().toLowerCase()}`); } else { heatLayer?.remove(); heatLayer = null; }
+  if (state.heatOn) { loadHeat(); toast(`Safety map for ${timeLabel().toLowerCase()}. Tap a street to see its data.`); } else { heatLayer?.remove(); heatLayer = null; }
 };
 
 // ---------- drawer, settings, onboarding ----------

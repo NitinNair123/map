@@ -7,6 +7,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import zlib
 from collections import Counter, OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
@@ -65,6 +66,66 @@ def mapillary(s, w, n, e):
         url = page.get("paging", {}).get("next")
         if not url:
             break
+    return {"elements": out}
+
+
+def png_pixels(data):
+    """Rows of (r, g, b) from an 8-bit PNG (grey, RGB, palette or RGBA), standard library only."""
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+    pos, chunks, palette = 8, [], None
+    while pos < len(data):
+        n, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + n]
+        if kind == b"IHDR":
+            w, h, depth, ctype = struct.unpack(">IIBB", body[:10])
+            if depth != 8 or body[12]:
+                raise ValueError("unsupported PNG")
+        elif kind == b"PLTE":
+            palette = [tuple(body[i:i + 3]) for i in range(0, n, 3)]
+        elif kind == b"IDAT":
+            chunks.append(body)
+        pos += 12 + n
+    bpp = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ctype]
+    raw, stride, prev, rows, i = zlib.decompress(b"".join(chunks)), w * bpp, bytearray(w * bpp), [], 0
+    for _ in range(h):
+        f, line = raw[i], bytearray(raw[i + 1:i + 1 + stride])
+        i += 1 + stride
+        for x in range(stride):  # undo the PNG row filter
+            a, b, c = (line[x - bpp] if x >= bpp else 0), prev[x], (prev[x - bpp] if x >= bpp else 0)
+            if f == 4:
+                p = a + b - c
+                pred = a if abs(p - a) <= abs(p - b) and abs(p - a) <= abs(p - c) else b if abs(p - b) <= abs(p - c) else c
+            else:
+                pred = (0, a, b, (a + b) // 2)[f]
+            line[x] = (line[x] + pred) & 255
+        prev = line
+        px = [tuple(line[k:k + bpp]) for k in range(0, stride, bpp)]
+        rows.append([palette[p[0]] if ctype == 3 else (p[0],) * 3 if ctype in (0, 4) else p[:3] for p in px])
+    return rows
+
+
+NIGHT_CELL = 0.005
+
+
+def nightlights(s, w, n, e):
+    """NASA Black Marble night-time brightness (VIIRS, 2016, about 500 m) as one point per pixel, 0 dark to 1 bright."""
+    s, w = math.floor(s / NIGHT_CELL) * NIGHT_CELL, math.floor(w / NIGHT_CELL) * NIGHT_CELL
+    rows_n, cols_n = math.ceil((n - s) / NIGHT_CELL - 1e-9), math.ceil((e - w) / NIGHT_CELL - 1e-9)
+    q = urllib.parse.urlencode({"SERVICE": "WMS", "REQUEST": "GetMap", "VERSION": "1.1.1", "LAYERS": "VIIRS_Black_Marble",
+                                "SRS": "EPSG:4326", "STYLES": "", "FORMAT": "image/png", "TIME": "2016-01-01",
+                                "BBOX": f"{w},{s},{w + cols_n * NIGHT_CELL},{s + rows_n * NIGHT_CELL}", "WIDTH": cols_n, "HEIGHT": rows_n})
+    with urllib.request.urlopen(urllib.request.Request(f"https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?{q}",
+                                                       headers={"User-Agent": "SafeRoute/1.0"}), timeout=20) as r:
+        rows = png_pixels(r.read())
+    out = []
+    for i, row in enumerate(rows):  # image rows run north to south
+        for j, (red, green, blue) in enumerate(row):
+            lum = 0.299 * red + 0.587 * green + 0.114 * blue
+            lat, lon = s + (rows_n - i - 0.5) * NIGHT_CELL, w + (j + 0.5) * NIGHT_CELL
+            # shortcut: brightness scaled so the brightest Delhi cores (~180) count as fully lit; relative, not lux
+            out.append({"type": "node", "id": f"nl{lat:.4f}_{lon:.4f}", "lat": lat, "lon": lon,
+                        "tags": {"nightlight": f"{min(1.0, lum / 180):.2f}"}})
     return {"elements": out}
 
 
@@ -159,6 +220,26 @@ def overture_buildings(s, w, n, e):
                           "lon": (r["bbox"]["xmin"] + r["bbox"]["xmax"]) / 2, "tags": {"building": "yes"}} for r in rows]}
 
 
+def write_tiles(folder, elements, tiles, source=""):
+    """Split elements into per-tile cache files; ways crossing tile edges go in each tile (merging dedupes)."""
+    parts = {t: [] for t in tiles}
+    for el in elements:
+        pts = el.get("geometry") or [el.get("center") or el]
+        lats = [p["lat"] for p in pts if "lat" in p]
+        lons = [p["lon"] for p in pts if "lon" in p]
+        if not lats:
+            continue
+        for i in range(math.floor(min(lats) / TILE), math.floor(max(lats) / TILE) + 1):
+            for j in range(math.floor(min(lons) / TILE), math.floor(max(lons) / TILE) + 1):
+                if (i, j) in parts:
+                    parts[(i, j)].append(el)
+    for t, els in parts.items():
+        path = os.path.join(folder, f"{t[0]}_{t[1]}{'.' + source if source else ''}.json")
+        with open(path + ".tmp", "w") as f:
+            json.dump({"elements": els}, f)
+        os.replace(path + ".tmp", path)
+
+
 class TooFar(ValueError):
     pass
 
@@ -184,7 +265,7 @@ def overpass(s, w, n, e):
 
 
 class TileStore:
-    def __init__(self, folder, fetch=overpass, reports=None, incidents=(), cache_size=6, extras=None, background=(), roads=None):
+    def __init__(self, folder, fetch=overpass, reports=None, incidents=(), cache_size=6, extras=None, background=(), roads=None, stops=()):
         self.folder = folder
         self.fetch = fetch
         self.roads = roads  # a fast street source; when set, slow Overpass detail loads in the background instead
@@ -193,16 +274,24 @@ class TileStore:
         self.pool = ThreadPoolExecutor(2)
         self.reports = reports if reports is not None else []
         self.incidents = list(incidents)
+        self.stops = list(stops)  # timetabled bus and metro stops
         self.areas = OrderedDict()
         self.cache_size = cache_size
         self.locks = defaultdict(threading.Lock)
         self.lock = threading.Lock()
         os.makedirs(folder, exist_ok=True)
+        marker = os.path.join(folder, "extract.json")  # tiles written by import_osm.py: full OSM detail, kept until re-imported
+        self.extracted = set()
+        if os.path.exists(marker):
+            with open(marker) as f:
+                self.extracted = {tuple(t) for t in json.load(f)["tiles"]}
 
     def _path(self, t, source=""):
         return os.path.join(self.folder, f"{t[0]}_{t[1]}{'.' + source if source else ''}.json")
 
     def _fresh(self, t, source=""):
+        if t in self.extracted and source in ("", "roads"):
+            return True
         p = self._path(t, source)
         return os.path.exists(p) and time.time() - os.path.getmtime(p) < TILE_MAX_AGE
 
@@ -222,22 +311,7 @@ class TileStore:
                     raise
                 print(f"{source} {box}: failed ({err})", flush=True)  # an optional source being down must not block trips
                 return
-            parts = {t: [] for t in tiles}
-            for el in osm["elements"]:
-                pts = el.get("geometry") or [el.get("center") or el]
-                lats = [p["lat"] for p in pts if "lat" in p]
-                lons = [p["lon"] for p in pts if "lon" in p]
-                if not lats:
-                    continue
-                for i in range(math.floor(min(lats) / TILE), math.floor(max(lats) / TILE) + 1):
-                    for j in range(math.floor(min(lons) / TILE), math.floor(max(lons) / TILE) + 1):
-                        if (i, j) in parts:  # ways crossing tile edges go in each tile; merging dedupes
-                            parts[(i, j)].append(el)
-            for t, els in parts.items():
-                path = self._path(t, source)
-                with open(path + ".tmp", "w") as f:
-                    json.dump({"elements": els}, f)
-                os.replace(path + ".tmp", path)
+            write_tiles(self.folder, osm["elements"], tiles, source)
         if source in self._background:
             with self.lock:  # rebuild cached areas so the next trip sees the new data
                 for key in [k for k in self.areas if k & set(tiles)]:
@@ -251,9 +325,9 @@ class TileStore:
     def _background(self):
         return self.background | ({""} if self.roads else set())
 
-    def tile(self, t):
+    def tile(self, t, roads=True):
         osm = {"elements": []}
-        for name in ["", "roads", *self.extras]:
+        for name in ["", *(["roads"] if roads else []), *self.extras]:
             if os.path.exists(self._path(t, name)):
                 with open(self._path(t, name)) as f:
                     osm["elements"] += json.load(f)["elements"]
@@ -272,14 +346,15 @@ class TileStore:
             if key in self.areas:
                 self.areas.move_to_end(key)
                 return self.areas[key]
-        jobs = [(c, self._main) for c in self._missing(key, self._main)]
+        main = "" if key & self.extracted else self._main  # imported OSM streets win over Overture roads
+        jobs = [(c, main) for c in self._missing(key, main)]
         jobs += [(c, name) for name in self.extras if name not in self.background for c in self._missing(key, name)]
         with ThreadPoolExecutor(3) as ex:  # Overpass rate-limits per IP, so few parallel requests
             list(ex.map(lambda job: self._fetch_chunk(*job), jobs))
-        for name in self._background:
+        for name in self._background - {main}:
             for c in self._missing(key, name):
                 self.pool.submit(self._fetch_chunk, c, name)
-        parts = [self.tile(t) for t in sorted(key)]
+        parts = [self.tile(t, roads=main == "roads") for t in sorted(key)]
         seen, elements = set(), []
         for osm in parts:
             for el in osm["elements"]:
@@ -292,7 +367,8 @@ class TileStore:
         s, w = min(t[0] for t in key) * TILE, min(t[1] for t in key) * TILE
         n, e = (max(t[0] for t in key) + 1) * TILE, (max(t[1] for t in key) + 1) * TILE
         inside = lambda r: s <= r["lat"] <= n and w <= r["lon"] <= e
-        area = Area({"elements": elements}, [r for r in self.reports if inside(r)], [i for i in self.incidents if inside(i)])
+        area = Area({"elements": elements}, [r for r in self.reports if inside(r)], [i for i in self.incidents if inside(i)],
+                    [st for st in self.stops if inside(st)])
         with self.lock:
             self.areas[key] = area
             while len(self.areas) > self.cache_size:

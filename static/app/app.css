@@ -200,3 +200,8 @@ body.navigating .topbar, body.navigating .legend { display: none; }
 .steps-list .turn svg { width: 18px; height: 18px; }
 .steps-list small { margin-left: auto; color: var(--ink-3); white-space: nowrap; }
 @media (min-width: 900px) { .nav-banner { left: 24px; top: 24px; width: 400px; } .recenter { left: 440px; bottom: 24px; } }
+.conf { margin: 2px 0 6px; font-size: 12px; font-weight: 700; }
+.conf-high { color: var(--safe); } .conf-medium { color: var(--caution); } .conf-low, .conf-none { color: var(--ink-3); }
+.bar small { font-weight: 400; }
+.explain { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; }
+.explain th, .explain td { text-align: left; padding: 3px 4px; border-top: 1px solid var(--line); vertical-align: top; }

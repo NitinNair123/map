@@ -13,12 +13,16 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from safety import REPORT_TYPES, dist
-from tiles import TileStore, TooFar, mapillary, overture_buildings, overture_places, overture_roads, warm_overture
+import gtfs
+from rating import REPORT_TYPES
+from safety import dist
+from tiles import TileStore, TooFar, mapillary, nightlights, overture_buildings, overture_places, overture_roads, warm_overture
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 REPORTS_PATH = os.path.join(DATA_DIR, "reports.json")
 INCIDENTS_PATH = os.path.join(DATA_DIR, "incidents.csv")
+SURVEY_PATH = os.path.join(DATA_DIR, "survey.csv")
+GTFS_DIR = os.path.join(DATA_DIR, "gtfs")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 TRIP_TTL = 12 * 3600
 MAX_TRIPS = 2000
@@ -30,19 +34,22 @@ weather = {}  # rounded (lat, lon) -> {"rain", "checked"}
 geocode_cache = OrderedDict()
 
 
-def load_incidents():
-    """incidents.csv columns: lat,lon,type,when (ISO date-time), e.g. from police open data or news."""
-    if not os.path.exists(INCIDENTS_PATH):
+def load_csv(path, types=None, **extra):
+    """Rows of lat,lon,type,when (ISO date-time), e.g. incidents from police open data, or a street survey."""
+    if not os.path.exists(path):
         return []
     out = []
-    with open(INCIDENTS_PATH, newline="") as f:
+    with open(path, newline="", encoding="utf-8-sig") as f:
         for n, row in enumerate(csv.DictReader(f), 2):
             try:
                 when = datetime.fromisoformat(row["when"])
-                out.append({"lat": float(row["lat"]), "lon": float(row["lon"]), "type": row["type"].strip().lower(),
-                            "hour": when.hour, "ts": when.timestamp()})
+                kind = row["type"].strip().lower()
+                if types and kind not in types:
+                    raise ValueError(f"unknown type {kind!r}")
+                out.append({"lat": float(row["lat"]), "lon": float(row["lon"]), "type": kind,
+                            "hour": when.hour, "weekday": when.weekday(), "ts": when.timestamp(), **extra})
             except (KeyError, ValueError) as e:
-                print(f"incidents.csv line {n} skipped: {e}")
+                print(f"{os.path.basename(path)} line {n} skipped: {e}")
     return out
 
 
@@ -50,16 +57,22 @@ os.makedirs(DATA_DIR, exist_ok=True)
 TOKEN_PATH = os.path.join(DATA_DIR, "mapillary_token.txt")  # data/ is gitignored, so the token never reaches git
 if not os.environ.get("MAPILLARY_TOKEN") and os.path.exists(TOKEN_PATH):
     os.environ["MAPILLARY_TOKEN"] = open(TOKEN_PATH).read().strip()
-EXTRAS = {"mapillary": mapillary} if os.environ.get("MAPILLARY_TOKEN") else {}
+EXTRAS = {"nightlights": nightlights}
+if os.environ.get("MAPILLARY_TOKEN"):
+    EXTRAS["mapillary"] = mapillary
 if importlib.util.find_spec("pyarrow"):
     EXTRAS.update(places=overture_places, buildings=overture_buildings)
     threading.Thread(target=warm_overture, daemon=True).start()
 print("Overture streets, places and buildings:", "on" if "places" in EXTRAS else "off (pip install pyarrow), using slower Overpass for streets", flush=True)
 print("Mapillary lights and cameras:", "on" if os.environ.get("MAPILLARY_TOKEN") else "off (no token)", flush=True)
+SURVEY = load_csv(SURVEY_PATH, REPORT_TYPES, source="Street survey")
+STOPS = gtfs.load(GTFS_DIR)
+print(f"Street survey: {len(SURVEY)} observations. Timetables: {len(STOPS)} stops (put GTFS zips in data/gtfs).", flush=True)
 store = TileStore(os.path.join(DATA_DIR, "tiles"),
-                  reports=json.load(open(REPORTS_PATH)) if os.path.exists(REPORTS_PATH) else [],
-                  incidents=load_incidents(),
-                  extras=EXTRAS, background={"buildings"}, roads=overture_roads if "places" in EXTRAS else None)
+                  reports=(json.load(open(REPORTS_PATH)) if os.path.exists(REPORTS_PATH) else []) + SURVEY,
+                  incidents=load_csv(INCIDENTS_PATH),
+                  extras=EXTRAS, background={"buildings"}, roads=overture_roads if "places" in EXTRAS else None, stops=STOPS)
+print("OpenStreetMap import:", f"{len(store.extracted)} tiles" if store.extracted else "none yet (python import_osm.py makes OSM detail instant)", flush=True)
 
 
 def latlon(s):
@@ -159,6 +172,10 @@ class Handler(SimpleHTTPRequestHandler):
                 when, mid = self.when(q), ((s + n) / 2, (w + e) / 2)
                 area = store.for_trip((s, w), (n, e))
                 return self.send_json(area.heat(when, is_raining(mid, when), (s, w, n, e)))
+            if u.path == "/api/explain":
+                pt = latlon(q["at_pt"][0])
+                when = self.when(q)
+                return self.send_json(store.around(pt, 300).explain(pt, when, is_raining(pt, when)))
             if u.path == "/api/havens":
                 pt = latlon(q["near"][0])
                 return self.send_json(store.around(pt).havens_near(pt, self.when(q)))
@@ -198,7 +215,9 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_json({"error": "not found"}, 404)
 
     def report(self, body):
-        r = {"lat": float(body["lat"]), "lon": float(body["lon"]), "type": body["type"], "ts": time.time()}
+        now = datetime.now()
+        r = {"lat": float(body["lat"]), "lon": float(body["lon"]), "type": body["type"], "ts": now.timestamp(),
+             "hour": now.hour, "weekday": now.weekday()}
         latlon((r["lat"], r["lon"]))
         if r["type"] not in REPORT_TYPES:
             raise ValueError("unknown report type")
@@ -210,7 +229,7 @@ class Handler(SimpleHTTPRequestHandler):
         with lock:
             store.add_report(r)
             with open(REPORTS_PATH + ".tmp", "w") as f:
-                json.dump(store.reports, f)
+                json.dump([x for x in store.reports if "source" not in x], f)  # survey rows stay in survey.csv
             os.replace(REPORTS_PATH + ".tmp", REPORTS_PATH)  # never leave a half-written file
         self.send_json({"ok": True})
 
