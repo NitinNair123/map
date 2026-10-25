@@ -113,9 +113,10 @@ const havenLayer = L.layerGroup().addTo(map);
 let heatLayer = null, meMarker = null, fromMarker = null, toMarker = null;
 const divIcon = (cls, size = 22) => L.divIcon({ className: "", html: `<div class="${cls}"></div>`, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 
-// works anywhere: open where the user last looked, else the whole country until we know where they are
-const lastView = store.get("view", null);
-if (lastView) map.setView(lastView.c, lastView.z); else map.setView([20.6, 78.9], 5);
+// open where the user last looked, else on Delhi NCR (the area with street data) until we know where they are;
+// a zoomed-out saved view (the old whole-country default) is ignored
+const saved = store.get("view", null), lastView = saved && saved.z >= 9 ? saved : null;
+if (lastView) map.setView(lastView.c, lastView.z); else map.setView([28.57, 77.32], 11);
 map.on("moveend", () => {
   const c = map.getCenter();
   store.set("view", { c: [c.lat, c.lng], z: map.getZoom() });
@@ -159,7 +160,8 @@ function onPosition(pos, simulated) {
 $("#locateBtn").onclick = async () => {
   startWatching();
   const p = await currentPosition();
-  if (p) map.setView(p, 17); else toast("Couldn't find you. Check location permission.");
+  if (p) map.setView(p, 17);
+  else toast(window.isSecureContext ? "Couldn't find you. Check location permission." : "Your browser only shares location over https. Type where you are starting from instead.");
 };
 
 // ---------- search ----------
