@@ -12,8 +12,12 @@ from rating import LABELS, SURROUNDINGS
 WALK_MPS = 1.3
 CELL = 0.001  # spatial grid cell in degrees, roughly 100 m
 
-# How much "safer" weighs against distance: cost = length * (1 + lambda * (1 - score/100))
-ROUTE_LAMBDA = {"safest": 10, "balanced": 3, "fastest": 0}
+# How much "safer" weighs against distance in the search: cost = length * (1 + lambda * (1 - credit/100)).
+# Each lambda finds one candidate; more come from re-searching with the streets already used made costlier.
+SEARCH_LAMBDAS = (0, 1, 3, 6, 10, 20)
+DETOUR_ROUNDS = 3
+MAX_DETOUR = 1.8  # candidates longer than this times the fastest route are dropped
+BALANCED_DETOUR = 1.25
 
 COMPASS = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"]
 ROAD_WORDS = {"footway": "the footpath", "path": "the path", "steps": "the steps", "cycleway": "the cycle path",
@@ -420,7 +424,7 @@ class Area:
         # shortcut: linear scan, fine for a campus-sized area; use the grid if the area grows to a city
         return min(self.routable, key=lambda n: dist(pt, self.nodes[n]))
 
-    def _search(self, src, dst, lam, credits):
+    def _search(self, src, dst, lam, credits, penalty=None):
         best, prev = {src: 0.0}, {}
         heap = [(0.0, src)]
         while heap:
@@ -430,7 +434,7 @@ class Area:
             if d > best[u]:
                 continue
             for v, ei in self.adj[u]:
-                nd = d + self.edges[ei]["length"] * (1 + lam * (1 - credits[ei] / 100))
+                nd = d + self.edges[ei]["length"] * (1 + lam * (1 - credits[ei] / 100)) * (1 + (penalty or {}).get(ei, 0))
                 if nd < best.get(v, math.inf):
                     best[v], prev[v] = nd, (u, ei)
                     heapq.heappush(heap, (nd, v))
@@ -441,17 +445,49 @@ class Area:
         path.reverse()
         return path
 
+    def candidates(self, src, dst, credits):
+        """Distinct ways from src to dst: one per safety weighting, plus detours that avoid the streets already found."""
+        found = []
+        for lam in SEARCH_LAMBDAS:
+            found.append(self._search(src, dst, lam, credits))
+        for lam in (0, 3, 10):
+            penalty = defaultdict(float)
+            path = found[SEARCH_LAMBDAS.index(lam)]
+            for _ in range(DETOUR_ROUNDS):
+                for _, ei in path:
+                    penalty[ei] += 0.6
+                path = self._search(src, dst, lam, credits, penalty)
+                found.append(path)
+        length = lambda p: sum(self.edges[ei]["length"] for _, ei in p)
+        fastest = min(length(p) for p in found) or 1
+        kept = []  # (path, its edges, its length), shortest first
+        for p in sorted(found, key=length):
+            edges, lp = {ei for _, ei in p}, length(p)
+            if lp > MAX_DETOUR * fastest:
+                continue
+            # sharing 90% of its length with a kept candidate makes it the same way with a small wiggle
+            if any(sum(self.edges[ei]["length"] for ei in edges & k) >= 0.9 * min(lp, lk) for _, k, lk in kept):
+                continue
+            kept.append((p, edges, lp))
+        return [p for p, _, _ in kept]
+
     def routes(self, start, end, when, rain=False):
-        """Safest, balanced and fastest routes between two (lat, lon) points."""
+        """Every candidate route is scored; returns the safest, a balanced one (at most 25% longer) and the fastest."""
         rated = self.ratings(when, rain)
         credits = [rating.credit(s, c) for s, c in rated]
         src, dst = self.nearest(start), self.nearest(end)
-        paths = {k: self._search(src, dst, lam, credits) for k, lam in ROUTE_LAMBDA.items()}
-        fastest_len = sum(self.edges[ei]["length"] for _, ei in paths["fastest"]) or 1
-        out = [self._summary(k, p, rated, when, fastest_len, dst) for k, p in paths.items()]
-        for i, r in enumerate(out):
-            r["same_as"] = next((o["kind"] for o in out[:i] if o["coords"] == r["coords"]), None)
-        return out
+        paths = self.candidates(src, dst, credits)
+        fastest_len = sum(self.edges[ei]["length"] for _, ei in paths[0]) or 1  # candidates come shortest first
+        scored = [self._summary("", p, rated, when, fastest_len, dst) for p in paths]
+        ranked = sorted(scored, key=lambda r: (-r["score"], r["length_m"]))
+        fastest = scored[0]
+        safest = ranked[0]
+        balanced = next(r for r in ranked if r["length_m"] <= BALANCED_DETOUR * fastest["length_m"] or r is fastest)
+        out = []
+        for kind, r in (("safest", safest), ("fastest", fastest), ("balanced", balanced)):  # a repeat points at safest or fastest
+            out.append({**r, "kind": kind, "checked": len(scored), "rank": ranked.index(r) + 1,
+                        "same_as": next((o["kind"] for o in out if o["coords"] == r["coords"]), None)})
+        return [out[0], out[2], out[1]]
 
     def _summary(self, kind, path, rated, when, fastest_len, dst):
         length = sum(self.edges[ei]["length"] for _, ei in path)

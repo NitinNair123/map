@@ -319,6 +319,8 @@ function renderRoutes() {
     v === null ? `<div class="bar"><span>${esc(k)}</span><span class="track"></span><span class="muted">No data</span></div>`
       : `<div class="bar"><span>${esc(k)}<small class="muted"> · ${v.measured}% measured</small></span><span class="track"><span class="fill" style="display:block;width:${v.score}%;background:${COLOR[scoreClass(v.score)]}"></span></span><span>${v.score}</span></div>`).join("");
   const notes = [];
+  if (r.checked > 1) notes.push(`We scored ${r.checked} different ways there. This one ranks #${r.rank} for safety.`);
+  else if (r.checked === 1) notes.push("This is the only sensible way there on the map, so all three options are the same.");
   if (r.same_as) notes.push(`This is the same way as the ${LABEL[r.same_as].toLowerCase()} route.`);
   if (r.confidence_level === "none") notes.push("There isn't enough real data on these streets to rate this route yet. Grey dashes mark the unrated parts. Reports and the street survey fill this in.");
   else if (r.unrated_pct >= 10) notes.push(`${r.unrated_pct}% of this route is too thinly mapped to rate. It's shown in grey dashes, and the score covers only the rest.`);

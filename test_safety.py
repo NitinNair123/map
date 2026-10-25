@@ -58,8 +58,20 @@ class RouteTest(unittest.TestCase):
 
     def test_identical_routes_are_flagged(self):
         r = self.kinds(NIGHT)
-        self.assertEqual(r["balanced"]["same_as"], "safest")
+        self.assertEqual(r["balanced"]["same_as"], "fastest")  # the lit detour is 1.4x, too long to count as balanced
         self.assertIsNone(r["safest"]["same_as"])
+
+    def test_every_way_is_scored_and_ranked(self):
+        r = self.kinds(NIGHT)
+        self.assertEqual(r["safest"]["checked"], 2)  # the footway and the market street; wiggles are merged
+        self.assertEqual(r["safest"]["rank"], 1)
+        self.assertEqual(r["fastest"]["rank"], 2)
+        grid = []  # a 4x4 block grid has many ways through it, and the search must find several of them
+        for i in range(5):
+            grid.append(way(100 + i, [10 * i + j for j in range(5)], [(28.0 + 0.001 * i, 77.0 + 0.001 * j) for j in range(5)], highway="residential"))
+            grid.append(way(200 + i, [10 * j + i for j in range(5)], [(28.0 + 0.001 * j, 77.0 + 0.001 * i) for j in range(5)], highway="residential"))
+        routes = Area({"elements": grid}).routes((28.0, 77.0), (28.004, 77.004), NIGHT)
+        self.assertGreaterEqual(routes[0]["checked"], 3)
 
     def test_shops_closed_lowers_score(self):
         self.assertLess(self.kinds(LATE)["safest"]["score"], self.kinds(NIGHT)["safest"]["score"])
@@ -347,7 +359,7 @@ class ImportTest(unittest.TestCase):
         self.assertEqual(sum(area.building_cells.values()), 1)  # Overture includes OSM, so never both
 
 
-    @unittest.skipUnless(__import__("importlib").util.find_spec("osmium"), "pip install osmium")
+    @unittest.skipUnless(__import__("importlib.util").util.find_spec("osmium"), "pip install osmium")
     def test_import_end_to_end(self):
         import json
         import import_osm
