@@ -12,7 +12,7 @@ CELL = 0.001  # spatial grid cell in degrees, roughly 100 m
 # How much "safer" weighs against distance: cost = length * (1 + lambda * (1 - score/100))
 ROUTE_LAMBDA = {"safest": 10, "balanced": 3, "fastest": 0}
 
-# (full daylight, full dark) weight per factor; each column sums to 100. Twilight blends the two.
+# (full daylight, full dark) weight per factor. Twilight blends the two; factors with no data are left out.
 WEIGHTS = {
     "lighting": (5, 25),
     "activity": (25, 25),
@@ -21,13 +21,14 @@ WEIGHTS = {
     "surroundings": (15, 15),
     "escape": (10, 5),
     "transit": (10, 5),
+    "overlooked": (5, 10),
 }
 COMPASS = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"]
 ROAD_WORDS = {"footway": "the footpath", "path": "the path", "steps": "the steps", "cycleway": "the cycle path",
               "pedestrian": "the pedestrian street", "service": "the lane", "track": "the track", "living_street": "the lane"}
 FACTOR_LABELS = {
     "lighting": "Lighting", "activity": "Open places", "security": "Police & CCTV", "path": "Footpath & road",
-    "surroundings": "Surroundings", "escape": "Ways out", "transit": "Transport",
+    "surroundings": "Surroundings", "escape": "Ways out", "transit": "Transport", "overlooked": "Buildings around",
 }
 
 # Main roads have people and traffic; alleys, tracks and steps are isolated
@@ -164,8 +165,27 @@ PLACE_AMENITIES = {"restaurant", "cafe", "fast_food", "atm", "bank", "marketplac
                    "dentist", "post_office", "library", "events_venue", "coworking_space", "bureau_de_change"}
 
 
+OVERTURE_NIGHTLIFE = {"bar", "pub", "night_club", "liquor_store", "beer_bar", "cocktail_bar", "wine_bar", "lounge", "hookah_bar"}
+
+
+def classify_overture(cat):
+    if "police" in cat:
+        return "police"
+    if cat in OVERTURE_NIGHTLIFE:
+        return "nightlife"
+    if "station" in cat and "gas" not in cat or cat in ("bus_stop", "taxi_stand", "transportation"):
+        return "transit"
+    if any(w in cat for w in ("hospital", "pharmacy", "clinic", "emergency", "gas_station", "hotel")):
+        return "haven"
+    return "place"
+
+
 def classify(tags):
     a, shop = tags.get("amenity"), tags.get("shop")
+    if "overture" in tags:
+        return classify_overture(tags["overture"])
+    if tags.get("building"):
+        return "building"  # counted per grid cell, not kept as a place
     if tags.get("highway") == "street_lamp":
         return "lamp"
     if tags.get("man_made") == "surveillance":
@@ -199,6 +219,7 @@ class Area:
         self.edges = []
         self.pois = []
         self.grid = defaultdict(list)
+        self.building_cells = defaultdict(int)
         self.zones = []  # isolating land: {"kind", "poly" or "line"}
         self.zone_grid = defaultdict(list)
         self.reports = []
@@ -214,10 +235,12 @@ class Area:
             elif "lat" in el or "center" in el:
                 pt = (el["lat"], el["lon"]) if "lat" in el else (el["center"]["lat"], el["center"]["lon"])
                 kind = classify(tags)
-                if kind:
+                if kind == "building":
+                    self.building_cells[self._cell(pt)] += 1
+                elif kind:
                     self.grid[self._cell(pt)].append(len(self.pois))
                     self.pois.append({"kind": kind, "pt": pt, "hours": tags.get("opening_hours"),
-                                      "name": tags.get("name") or (tags.get("shop") or tags.get("amenity") or kind).replace("_", " ")})
+                                      "name": tags.get("name") or (tags.get("shop") or tags.get("amenity") or tags.get("overture") or kind).replace("_", " ")})
 
         self.police = [p["pt"] for p in self.pois if p["kind"] == "police"]
         for e in self.edges:
@@ -272,6 +295,8 @@ class Area:
             if p["kind"] != "police" and seg_dist(p["pt"], pa, pb) <= {"lamp": 20, "cctv": 50, "transit": 150}.get(p["kind"], 60):
                 near[p["kind"]].append(i)
         e["near"] = near
+        c = self._cell(mid)
+        e["buildings_ha"] = sum(self.building_cells.get((c[0] + i, c[1] + j), 0) for i in (-1, 0, 1) for j in (-1, 0, 1)) / 9.8
         e["police_m"] = min((dist(mid, p) for p in self.police), default=math.inf)
         e["lamp_level"] = min(1, len(near["lamp"]) * 35 / max(e["length"], 35))  # one lamp per ~35 m is fully lit
         kinds = set()
@@ -401,6 +426,8 @@ class Area:
             "surroundings": surroundings,
             "escape": escape,
             "transit": 1.0 if near["transit"] else 0.0,
+            # homes and shops overlooking the street; unknown until building footprints are loaded for this area
+            "overlooked": min(1, e["buildings_ha"] / 20) if self.building_cells else None,
         }, open_places
 
     def edge_score(self, e, when, light, rain=False):
@@ -487,7 +514,7 @@ class Area:
         isolated = run = 0.0
         haven_gap = gap = 0.0
         factor_sum, factor_len = defaultdict(float), defaultdict(float)
-        places, havens, lamps, cctv, unknown_hours = set(), {}, set(), set(), set()
+        places, havens, lamps, cctv, unknown_hours, mapped = set(), {}, set(), set(), set(), set()
         lit_len = dark_len = 0.0
         police_m = math.inf
         underpasses = 0
@@ -508,6 +535,7 @@ class Area:
                 havens.setdefault(i, len(havens))
             lamps.update(e["near"]["lamp"])
             cctv.update(e["near"]["cctv"])
+            mapped.update(e["near"]["place"] + e["near"]["haven"])
             unknown_hours.update(i for i in e["near"]["place"] + e["near"]["haven"] if self.is_place_open(self.pois[i], when) is None)
             if feats["lighting"] is not None:
                 lit_len += e["length"] if feats["lighting"] >= 0.5 else 0
@@ -525,9 +553,9 @@ class Area:
         turns = sum(st["turn"] not in ("straight", "arrive", "depart") for st in steps)
 
         no_light = length - lit_len - dark_len
-        reasons = [f"{len(places)} places open now along the way"]
+        reasons = [f"{len(mapped)} shops and places along the way", f"{len(places)} confirmed open now"]
         if unknown_hours:
-            reasons.append(f"{len(unknown_hours)} more with no published hours")
+            reasons.append(f"{len(unknown_hours)} with no published hours")
         reasons.append(f"{round(100 * lit_len / length)}% lit, {round(100 * dark_len / length)}% unlit")
         if no_light >= 1:
             reasons.append(f"No lighting data for {round(100 * no_light / length)}%")

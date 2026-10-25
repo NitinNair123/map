@@ -6,7 +6,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from collections import OrderedDict, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 from safety import Area, dist, seg_dist
@@ -67,6 +67,42 @@ def mapillary(s, w, n, e):
     return {"elements": out}
 
 
+OVERTURE = "overturemaps-us-west-2/release/2026-10-21.0"  # shortcut: pinned release, bump monthly from stac.overturemaps.org
+
+
+def _overture(theme, s, w, n, e, columns):
+    import pyarrow.compute as pc  # optional dependency: pip install pyarrow
+    import pyarrow.dataset as ds
+    import pyarrow.fs as fs
+    data = ds.dataset(f"{OVERTURE}/theme={theme}/type={theme[:-1]}/", format="parquet",
+                      filesystem=fs.S3FileSystem(anonymous=True, region="us-west-2"))
+    x, y = pc.field("bbox", "xmin"), pc.field("bbox", "ymin")
+    return data.to_table(filter=(x >= w) & (x <= e) & (y >= s) & (y <= n), columns=columns + ["id", "bbox"]).to_pylist()
+
+
+def overture_places(s, w, n, e):
+    """Businesses and services from Overture Maps (Meta, Microsoft and others), minus closed and badly placed ones."""
+    rows = _overture("places", s, w, n, e, ["names", "basic_category", "confidence", "operating_status"])
+    stacked = Counter((r["bbox"]["xmin"], r["bbox"]["ymin"]) for r in rows)
+    out = []
+    for r in rows:
+        at = (r["bbox"]["xmin"], r["bbox"]["ymin"])
+        if (r["confidence"] or 0) < 0.5 or r["operating_status"] in ("permanently_closed", "temporarily_closed"):
+            continue
+        if stacked[at] >= 3:  # many places on one exact point were placed at a locality centre, not their door
+            continue
+        out.append({"type": "node", "id": f"ovp{r['id']}", "lat": at[1], "lon": at[0],
+                    "tags": {"overture": r["basic_category"] or "place", "name": (r["names"] or {}).get("primary") or ""}})
+    return {"elements": out}
+
+
+def overture_buildings(s, w, n, e):
+    """Building footprints (OSM, Google and Microsoft) as centre points, to measure how built-up a street is."""
+    rows = _overture("buildings", s, w, n, e, [])
+    return {"elements": [{"type": "node", "id": f"ovb{r['id']}", "lat": (r["bbox"]["ymin"] + r["bbox"]["ymax"]) / 2,
+                          "lon": (r["bbox"]["xmin"] + r["bbox"]["xmax"]) / 2, "tags": {"building": "yes"}} for r in rows]}
+
+
 class TooFar(ValueError):
     pass
 
@@ -92,10 +128,12 @@ def overpass(s, w, n, e):
 
 
 class TileStore:
-    def __init__(self, folder, fetch=overpass, reports=None, incidents=(), cache_size=6, extras=None):
+    def __init__(self, folder, fetch=overpass, reports=None, incidents=(), cache_size=6, extras=None, background=()):
         self.folder = folder
         self.fetch = fetch
-        self.extras = extras or {}  # name -> fetch(s, w, n, e) for extra per-tile sources, cached beside the OSM tile
+        self.extras = extras or {}  # name -> fetch(s, w, n, e) for extra sources, cached beside the OSM tile
+        self.background = set(background)  # slow extras: fetched after the trip is answered, used from the next one
+        self.pool = ThreadPoolExecutor(1)
         self.reports = reports if reports is not None else []
         self.incidents = list(incidents)
         self.areas = OrderedDict()
@@ -111,14 +149,22 @@ class TileStore:
         p = self._path(t, source)
         return os.path.exists(p) and time.time() - os.path.getmtime(p) < TILE_MAX_AGE
 
-    def _fetch_chunk(self, tiles):
-        """One Overpass request for a block of missing tiles, split back into per-tile cache files."""
-        with self.locks[min(tiles)]:  # two trips needing the same block download it once
-            tiles = [t for t in tiles if not self._fresh(t)]
+    def _fetch_chunk(self, tiles, source=""):
+        """One request for a block of missing tiles from one source, split back into per-tile cache files."""
+        with self.locks[(min(tiles), source)]:  # two trips needing the same block download it once
+            tiles = [t for t in tiles if not self._fresh(t, source)]
             if not tiles:
                 return
-            osm = self.fetch(min(t[0] for t in tiles) * TILE, min(t[1] for t in tiles) * TILE,
-                             (max(t[0] for t in tiles) + 1) * TILE, (max(t[1] for t in tiles) + 1) * TILE)
+            fetch = self.extras[source] if source else self.fetch
+            box = (min(t[0] for t in tiles) * TILE, min(t[1] for t in tiles) * TILE,
+                   (max(t[0] for t in tiles) + 1) * TILE, (max(t[1] for t in tiles) + 1) * TILE)
+            try:
+                osm = fetch(*box)
+            except (OSError, ValueError, KeyError) as err:
+                if not source:
+                    raise
+                print(f"{source} {box}: failed ({err})", flush=True)  # an optional source being down must not block trips
+                return
             parts = {t: [] for t in tiles}
             for el in osm["elements"]:
                 pts = el.get("geometry") or [el.get("center") or el]
@@ -131,28 +177,30 @@ class TileStore:
                         if (i, j) in parts:  # ways crossing tile edges go in each tile; merging dedupes
                             parts[(i, j)].append(el)
             for t, els in parts.items():
-                with open(self._path(t) + ".tmp", "w") as f:
+                path = self._path(t, source)
+                with open(path + ".tmp", "w") as f:
                     json.dump({"elements": els}, f)
-                os.replace(self._path(t) + ".tmp", self._path(t))
+                os.replace(path + ".tmp", path)
+        if source in self.background:
+            with self.lock:  # rebuild cached areas so the next trip sees the new data
+                for key in [k for k in self.areas if k & set(tiles)]:
+                    del self.areas[key]
 
     def tile(self, t):
         with open(self._path(t)) as f:
             osm = json.load(f)
-        for name, fetch in self.extras.items():
-            path = self._path(t, name)
-            with self.locks[(t, name)]:
-                if not self._fresh(t, name):
-                    try:
-                        extra = fetch(t[0] * TILE, t[1] * TILE, (t[0] + 1) * TILE, (t[1] + 1) * TILE)
-                    except (OSError, ValueError, KeyError) as err:  # an optional source being down must not block trips
-                        print(f"{name} {t}: failed ({err})", flush=True)
-                        continue
-                    with open(path + ".tmp", "w") as f:
-                        json.dump(extra, f)
-                    os.replace(path + ".tmp", path)
-                with open(path) as f:
+        for name in self.extras:
+            if os.path.exists(self._path(t, name)):
+                with open(self._path(t, name)) as f:
                     osm["elements"] += json.load(f)["elements"]
         return osm
+
+    def _missing(self, tiles, source=""):
+        chunks = defaultdict(list)
+        for t in sorted(tiles):
+            if not self._fresh(t, source):
+                chunks[(t[0] // CHUNK, t[1] // CHUNK)].append(t)
+        return list(chunks.values())
 
     def area(self, tiles):
         key = frozenset(tiles)
@@ -160,14 +208,14 @@ class TileStore:
             if key in self.areas:
                 self.areas.move_to_end(key)
                 return self.areas[key]
-        chunks = defaultdict(list)
-        for t in sorted(key):
-            if not self._fresh(t):
-                chunks[(t[0] // CHUNK, t[1] // CHUNK)].append(t)
-        with ThreadPoolExecutor(2) as ex:  # Overpass rate-limits per IP, so few parallel requests
-            list(ex.map(self._fetch_chunk, chunks.values()))
-        with ThreadPoolExecutor(4) as ex:
-            parts = list(ex.map(self.tile, sorted(key)))
+        jobs = [(c, "") for c in self._missing(key)]
+        jobs += [(c, name) for name in self.extras if name not in self.background for c in self._missing(key, name)]
+        with ThreadPoolExecutor(3) as ex:  # Overpass rate-limits per IP, so few parallel requests
+            list(ex.map(lambda job: self._fetch_chunk(*job), jobs))
+        for name in self.background:
+            for c in self._missing(key, name):
+                self.pool.submit(self._fetch_chunk, c, name)
+        parts = [self.tile(t) for t in sorted(key)]
         seen, elements = set(), []
         for osm in parts:
             for el in osm["elements"]:

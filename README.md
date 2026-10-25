@@ -31,6 +31,11 @@ and open the https link on the phone. Then use "Add to Home Screen".
 
 ### Optional data
 
+- **Overture Maps** (free, no key): about 88 million businesses and services (from Meta, Microsoft and others)
+  and building footprints (OSM, Google, Microsoft). Turn it on with `pip install pyarrow`. Places load with
+  the trip, in a few seconds. Buildings take about 40 s per area, so they load in the background and count
+  from the next trip. Places marked closed, with low confidence, or stacked on a locality centre are dropped.
+
 - **Mapillary** (free): street lights and CCTV cameras detected in street-level photos. Get a client token at
   https://www.mapillary.com/dashboard/developers and put it in `data/mapillary_token.txt` (gitignored), or set
   the `MAPILLARY_TOKEN` environment variable.
@@ -55,6 +60,7 @@ night using the real sun position for your area, so dusk counts as dusk.
 | Surroundings | 15 | 15 | parks, construction sites, rail lines, scrub, cemeteries and industrial land next to the road |
 | Ways out | 10 | 5 | dead ends and long stretches without side streets |
 | Transport | 10 | 5 | bus stops, stations and taxi stands within 150 m |
+| Buildings around | 5 | 10 | building footprints per hectare around the street (Overture) |
 
 On top of that:
 

@@ -1,5 +1,6 @@
 """Website, app and JSON API. Usage: python server.py [port]"""
 import csv
+import importlib.util
 import json
 import os
 import secrets
@@ -13,7 +14,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from safety import REPORT_TYPES, dist
-from tiles import TileStore, TooFar, mapillary
+from tiles import TileStore, TooFar, mapillary, overture_buildings, overture_places
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 REPORTS_PATH = os.path.join(DATA_DIR, "reports.json")
@@ -49,11 +50,15 @@ os.makedirs(DATA_DIR, exist_ok=True)
 TOKEN_PATH = os.path.join(DATA_DIR, "mapillary_token.txt")  # data/ is gitignored, so the token never reaches git
 if not os.environ.get("MAPILLARY_TOKEN") and os.path.exists(TOKEN_PATH):
     os.environ["MAPILLARY_TOKEN"] = open(TOKEN_PATH).read().strip()
+EXTRAS = {"mapillary": mapillary} if os.environ.get("MAPILLARY_TOKEN") else {}
+if importlib.util.find_spec("pyarrow"):
+    EXTRAS.update(places=overture_places, buildings=overture_buildings)
+print("Overture places and buildings:", "on" if "places" in EXTRAS else "off (pip install pyarrow)", flush=True)
 print("Mapillary lights and cameras:", "on" if os.environ.get("MAPILLARY_TOKEN") else "off (no token)", flush=True)
 store = TileStore(os.path.join(DATA_DIR, "tiles"),
                   reports=json.load(open(REPORTS_PATH)) if os.path.exists(REPORTS_PATH) else [],
                   incidents=load_incidents(),
-                  extras={"mapillary": mapillary} if os.environ.get("MAPILLARY_TOKEN") else {})
+                  extras=EXTRAS, background={"buildings"})
 
 
 def latlon(s):

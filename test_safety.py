@@ -4,7 +4,7 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from safety import Area, daylight, is_open
+from safety import classify, Area, daylight, is_open
 from tiles import TILE, TileStore, TooFar, tiles_near
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -51,7 +51,7 @@ class RouteTest(unittest.TestCase):
         self.assertGreater(r["safest"]["length_m"], 350)
         self.assertLess(r["fastest"]["length_m"], 300)
         self.assertGreater(r["safest"]["score"], r["fastest"]["score"])
-        self.assertTrue(any("places open now" in s for s in r["safest"]["reasons"]))
+        self.assertTrue(any("confirmed open now" in s for s in r["safest"]["reasons"]))
         self.assertIn("Lighting", r["safest"]["factors"])
 
     def test_identical_routes_are_flagged(self):
@@ -184,6 +184,30 @@ class NoGuessingTest(unittest.TestCase):
         self.assertIsNone(r["factors"]["Lighting"])
         self.assertTrue(r["low_data"])
         self.assertIn("No lighting data for 100%", r["reasons"])
+
+class OpenDataTest(unittest.TestCase):
+    def test_overture_categories(self):
+        self.assertEqual(classify({"overture": "pharmacy_and_drug_store"}), "haven")
+        self.assertEqual(classify({"overture": "bar"}), "nightlife")
+        self.assertEqual(classify({"overture": "barber"}), "place")
+        self.assertEqual(classify({"overture": "train_station"}), "transit")
+        self.assertEqual(classify({"overture": "gas_station"}), "haven")
+
+    def test_buildings_overlook_street(self):
+        els = fixture()["elements"] + [node(f"b{k}", (28.0004, 77.0005 + k * 0.0001), building="yes") for k in range(20)]
+        area = Area({"elements": els})
+        feats = lambda a: a.factors(a.edges[1], NIGHT, 0)[0]["overlooked"]
+        self.assertIsNone(feats(Area(fixture())))  # no footprints loaded: unknown, not zero
+        self.assertGreater(feats(area), 0)
+
+    def test_slow_source_is_fetched_in_background(self):
+        d = tempfile.mkdtemp()
+        b = lambda *a: {"elements": [node("b1", (28.0004, 77.0005), building="yes")]}
+        store = TileStore(d, fetch=lambda *a: fixture(), extras={"buildings": b}, background={"buildings"})
+        store.for_trip(A, B)
+        store.pool.shutdown(wait=True)
+        self.assertTrue(store.for_trip(A, B).building_cells)
+
 
 if __name__ == "__main__":
     unittest.main()
