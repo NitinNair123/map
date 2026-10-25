@@ -68,6 +68,7 @@ def mapillary(s, w, n, e):
     return {"elements": out}
 
 
+_datasets, _datasets_lock = {}, threading.Lock()
 OVERTURE = "overturemaps-us-west-2/release/2026-10-21.0"  # shortcut: pinned release, bump monthly from stac.overturemaps.org
 
 
@@ -75,13 +76,28 @@ def _overture(theme, s, w, n, e, columns, kind=None, where=None):
     import pyarrow.compute as pc  # optional dependency: pip install pyarrow
     import pyarrow.dataset as ds
     import pyarrow.fs as fs
-    data = ds.dataset(f"{OVERTURE}/theme={theme}/type={kind or theme[:-1]}/", format="parquet",
-                      filesystem=fs.S3FileSystem(anonymous=True, region="us-west-2"))
+    path = f"{OVERTURE}/theme={theme}/type={kind or theme[:-1]}/"
+    with _datasets_lock:  # reuse the dataset: it keeps each file's metadata, so later queries skip hundreds of reads
+        if path not in _datasets:
+            _datasets[path] = ds.dataset(path, format="parquet", filesystem=fs.S3FileSystem(anonymous=True, region="us-west-2"))
+        data = _datasets[path]
+    started = time.time()
     b = lambda k: pc.field("bbox", k)
     f = (b("xmax") >= w) & (b("xmin") <= e) & (b("ymax") >= s) & (b("ymin") <= n)
     for k, v in (where or {}).items():
         f &= pc.field(k) == v
-    return data.to_table(filter=f, columns=columns + ["id", "bbox"]).to_pylist()
+    rows = data.to_table(filter=f, columns=columns + ["id", "bbox"]).to_pylist()
+    print(f"overture {kind or theme}: {len(rows)} in {time.time() - started:.0f}s", flush=True)
+    return rows
+
+
+def warm_overture():
+    """Load Overture file metadata at startup, so the first trip doesn't wait for it."""
+    for fetch in (overture_roads, overture_places, overture_buildings):
+        try:
+            fetch(0, 0, 0.0001, 0.0001)
+        except OSError as err:
+            print(f"overture warm-up failed ({err})", flush=True)
 
 
 def overture_roads(s, w, n, e):

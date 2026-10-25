@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from safety import REPORT_TYPES, dist
-from tiles import TileStore, TooFar, mapillary, overture_buildings, overture_places, overture_roads
+from tiles import TileStore, TooFar, mapillary, overture_buildings, overture_places, overture_roads, warm_overture
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 REPORTS_PATH = os.path.join(DATA_DIR, "reports.json")
@@ -53,6 +53,7 @@ if not os.environ.get("MAPILLARY_TOKEN") and os.path.exists(TOKEN_PATH):
 EXTRAS = {"mapillary": mapillary} if os.environ.get("MAPILLARY_TOKEN") else {}
 if importlib.util.find_spec("pyarrow"):
     EXTRAS.update(places=overture_places, buildings=overture_buildings)
+    threading.Thread(target=warm_overture, daemon=True).start()
 print("Overture streets, places and buildings:", "on" if "places" in EXTRAS else "off (pip install pyarrow), using slower Overpass for streets", flush=True)
 print("Mapillary lights and cameras:", "on" if os.environ.get("MAPILLARY_TOKEN") else "off (no token)", flush=True)
 store = TileStore(os.path.join(DATA_DIR, "tiles"),
