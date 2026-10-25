@@ -13,11 +13,20 @@ QUERY = """
 way["highway"~"^(trunk|primary|secondary|tertiary|primary_link|secondary_link|tertiary_link|unclassified|residential|living_street|pedestrian|service|footway|path|cycleway|steps|track)$"]["foot"!="no"]["access"!~"^(private|no)$"]({bbox});
 out body geom;
 (
+  way["landuse"~"^(construction|brownfield|greenfield|cemetery|industrial|farmland|quarry|railway)$"]({bbox});
+  way["natural"~"^(wood|scrub)$"]({bbox});
+  way["leisure"="park"]({bbox});
+  way["railway"="rail"]({bbox});
+);
+out tags geom;
+(
   node["highway"~"^(street_lamp|bus_stop)$"]({bbox});
   nwr["man_made"="surveillance"]({bbox});
   nwr["amenity"]({bbox});
   nwr["shop"]({bbox});
   nwr["tourism"="hotel"]({bbox});
+  nwr["building"]["name"]({bbox});
+  nwr["railway"~"^(station|subway_entrance)$"]({bbox});
 );
 out center tags;
 """

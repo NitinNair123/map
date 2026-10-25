@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Live trip · SafeRoute</title>
+<meta name="robots" content="noindex">
+<link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="/theme.css">
+<style>
+  html, body { height: 100%; overflow: hidden; }
+  #map { position: fixed; inset: 0; }
+  .card { position: fixed; z-index: 500; left: 12px; right: 12px; bottom: calc(env(safe-area-inset-bottom) + 12px); max-width: 420px; margin: 0 auto; background: var(--surface); border-radius: 22px; box-shadow: var(--shadow-lg); padding: 18px; display: grid; gap: 8px; }
+  .status { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; font-size: 13px; padding: 5px 12px; border-radius: 99px; width: max-content; }
+  .status.live { background: var(--safe-soft); color: var(--safe); }
+  .status.live::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--safe); animation: p 1.6s infinite; }
+  .status.stale { background: var(--caution-soft); color: var(--caution); }
+  .status.done { background: var(--brand-soft); color: var(--brand); }
+  @keyframes p { 50% { opacity: .3; } }
+  .card h1 { font-size: 22px; }
+  .card p { margin: 0; color: var(--ink-2); }
+  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px; }
+  .me { width: 20px; height: 20px; border-radius: 50%; background: #6d4aff; border: 3px solid #fff; box-shadow: 0 0 0 10px rgba(109,74,255,.2); }
+  .dest { width: 22px; height: 22px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); background: #f04438; border: 3px solid #fff; }
+</style>
+</head>
+<body>
+<div id="map" aria-label="Map of the live trip"></div>
+<section class="card" aria-live="polite">
+  <span id="status" class="status live">Connecting…</span>
+  <h1 id="title">Live trip</h1>
+  <p id="detail">Loading the latest location.</p>
+  <div class="actions">
+    <a class="btn btn-danger" href="tel:112">Call 112</a>
+    <a class="btn" id="mapsLink" href="#" target="_blank" rel="noopener">Open in Maps</a>
+  </div>
+</section>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const id = new URLSearchParams(location.search).get("id");
+const $ = (s) => document.querySelector(s);
+const map = L.map("map", { zoomControl: false }).setView([20.6, 78.9], 5);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+const icon = (c) => L.divIcon({ className: "", html: `<div class="${c}"></div>`, iconSize: [22, 22], iconAnchor: [11, 11] });
+let me, dest, trail, first = true;
+const ago = (s) => s < 60 ? "just now" : s < 3600 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`;
+
+async function poll() {
+  let t;
+  try {
+    const res = await fetch(`/api/trip/${encodeURIComponent(id || "")}`);
+    t = await res.json();
+    if (!res.ok) throw new Error(t.error);
+  } catch (e) {
+    $("#status").className = "status stale"; $("#status").textContent = "Not available";
+    $("#title").textContent = "This trip has ended";
+    $("#detail").textContent = e.message || "The link may be wrong or the trip finished more than 12 hours ago.";
+    return;
+  }
+  const who = t.name || "Your friend";
+  const last = t.points[t.points.length - 1];
+  const since = Date.now() / 1000 - (last ? last[2] : t.updated);
+  if (!dest && t.dest) dest = L.marker(t.dest, { icon: icon("dest") }).addTo(map).bindTooltip("Destination");
+  if (last) {
+    const pts = t.points.map((p) => [p[0], p[1]]);
+    trail ? trail.setLatLngs(pts) : (trail = L.polyline(pts, { color: "#6d4aff", weight: 5, opacity: .7 }).addTo(map));
+    me ? me.setLatLng(pts[pts.length - 1]) : (me = L.marker(pts[pts.length - 1], { icon: icon("me") }).addTo(map));
+    $("#mapsLink").href = `https://maps.google.com/?q=${last[0]},${last[1]}`;
+    if (first) { map.fitBounds(L.latLngBounds([pts[pts.length - 1], t.dest]).pad(0.4)); first = false; }
+  }
+  const s = $("#status");
+  if (t.ended) {
+    s.className = "status done"; s.textContent = "Trip ended";
+    $("#title").textContent = `${who} ended the trip`;
+    $("#detail").textContent = last ? `Last seen ${ago(since)}.` : "";
+    return;
+  }
+  if (since > 300) {
+    s.className = "status stale"; s.textContent = `No update for ${Math.round(since / 60)} min`;
+    $("#title").textContent = `Check on ${who}`;
+    $("#detail").textContent = "Their phone may have lost signal or battery. Try calling them.";
+  } else {
+    s.className = "status live"; s.textContent = "Live";
+    $("#title").textContent = `${who} is walking`;
+    const mins = t.eta ? Math.max(0, Math.round(t.eta - (Date.now() / 1000 - t.started) / 60)) : null;
+    $("#detail").textContent = `Updated ${ago(since)}${mins !== null ? ` · about ${mins} min to go` : ""}.`;
+  }
+  setTimeout(poll, 10000);
+}
+poll();
+</script>
+</body>
+</html>

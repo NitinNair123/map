@@ -3,197 +3,269 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SafeRoute</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<title>SafeRoute: walk the safer way</title>
+<meta name="description" content="SafeRoute picks the safest walking route, not just the fastest. It checks lighting, open shops, police, CCTV and community reports for the exact time you leave.">
+<meta name="theme-color" content="#6d4aff">
+<meta property="og:title" content="SafeRoute: walk the safer way">
+<meta property="og:description" content="Walking directions that pick the safest way home, with SOS, live trip sharing and check-ins.">
+<meta property="og:image" content="/icons/icon-512.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap">
+<link rel="stylesheet" href="/theme.css">
 <style>
-  :root { --bg: #fff; --fg: #1d1d1f; --muted: #6b6b70; --card: #f4f4f6; --safe: #1a9e5c; --mid: #d98a00; --risk: #d63a3a; --accent: #6b3fd4; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #151517; --fg: #f2f2f5; --muted: #a0a0a8; --card: #232327; } }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; font: 15px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
-  #map { position: absolute; inset: 0; }
-  .panel { position: absolute; z-index: 1000; left: 12px; right: 12px; background: var(--bg); border-radius: 14px; box-shadow: 0 4px 20px #0003; padding: 12px; }
-  #top { top: 12px; max-width: 460px; }
-  #sheet { bottom: 12px; max-width: 460px; max-height: 45vh; overflow-y: auto; display: none; }
-  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .hint { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
-  button, input { font: inherit; border-radius: 10px; border: 1px solid #8884; padding: 8px 12px; background: var(--card); color: var(--fg); min-height: 40px; }
-  button { cursor: pointer; }
-  button.primary { background: var(--accent); color: #fff; border: 0; }
-  button.on { outline: 2px solid var(--accent); }
-  input[type=datetime-local] { flex: 1; min-width: 0; }
-  .card { background: var(--card); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer; border-left: 6px solid; }
-  .card.sel { outline: 2px solid var(--accent); }
-  .card h3 { margin: 0 0 4px; font-size: 16px; display: flex; justify-content: space-between; }
-  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-  .chip { background: var(--bg); border-radius: 99px; padding: 2px 8px; font-size: 12px; }
-  .warn { color: var(--mid); font-size: 13px; }
-  #sos { position: absolute; z-index: 1000; right: 16px; bottom: calc(45vh + 28px); width: 64px; height: 64px; border-radius: 50%; background: var(--risk); color: #fff; border: 0; font-weight: 700; font-size: 17px; box-shadow: 0 4px 16px #0005; }
-  #sosbox { display: none; margin-top: 8px; }
-  #sosbox a { display: inline-block; margin: 4px 6px 0 0; padding: 8px 12px; border-radius: 10px; background: var(--risk); color: #fff; text-decoration: none; }
-  #reportbar { display: none; margin-top: 8px; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 20px; }
+  header.nav { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 85%, transparent); backdrop-filter: blur(12px); border-bottom: 1px solid var(--line); }
+  .nav .wrap { display: flex; align-items: center; gap: 24px; height: 68px; }
+  .logo { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 19px; color: var(--ink); text-decoration: none; letter-spacing: -.02em; }
+  .logo img { width: 34px; height: 34px; }
+  .nav nav { display: flex; gap: 22px; margin-left: auto; }
+  .nav nav a { color: var(--ink-2); text-decoration: none; font-weight: 600; font-size: 14px; }
+  .nav nav a:hover { color: var(--ink); }
+  .nav .btn { min-height: 42px; }
+  @media (max-width: 760px) { .nav nav { display: none; } .nav .btn { margin-left: auto; } }
+
+  .hero { padding: 64px 0 40px; overflow: hidden; }
+  .hero .wrap { display: grid; grid-template-columns: 1.1fr .9fr; gap: 48px; align-items: center; }
+  .eyebrow { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 99px; background: var(--brand-soft); color: var(--brand); font-weight: 700; font-size: 13px; }
+  .hero h1 { font-size: clamp(40px, 6vw, 64px); font-weight: 800; letter-spacing: -.035em; margin: 18px 0; }
+  .hero h1 em { font-style: normal; background: linear-gradient(90deg, var(--brand), #12b76a); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .hero p.lead { font-size: 19px; color: var(--ink-2); max-width: 540px; margin: 0 0 28px; }
+  .cta { display: flex; gap: 12px; flex-wrap: wrap; }
+  .cta .btn { min-height: 54px; padding: 0 26px; font-size: 16px; }
+  .trust { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 22px; color: var(--ink-3); font-size: 14px; font-weight: 600; }
+  .trust span::before { content: "✓ "; color: var(--safe); }
+
+  .phone { position: relative; width: 300px; height: 610px; margin: 0 auto; border-radius: 46px; background: #0e0c15; padding: 12px; box-shadow: var(--shadow-lg), 0 0 0 1px rgba(255,255,255,.06) inset; }
+  .phone .screen { position: relative; width: 100%; height: 100%; border-radius: 36px; overflow: hidden; background: #eef0ea; }
+  .phone svg.mapart { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .float { position: absolute; background: var(--surface); color: var(--ink); border-radius: 16px; box-shadow: var(--shadow); padding: 10px 14px; font-size: 13px; font-weight: 700; }
+  .float small { display: block; color: var(--ink-3); font-weight: 600; font-size: 11px; }
+  .f1 { left: -40px; top: 120px; } .f2 { right: -36px; top: 300px; } .f3 { left: 18px; right: 18px; bottom: 18px; border-radius: 20px; padding: 14px; }
+  .f3 .row { display: flex; justify-content: space-between; align-items: center; }
+  .big { font-size: 26px; font-weight: 800; color: var(--safe); }
+  @media (max-width: 900px) { .hero .wrap { grid-template-columns: 1fr; } .f1 { left: -10px; } .f2 { right: -10px; } }
+
+  section { padding: 80px 0; }
+  .alt { background: var(--bg-2); }
+  .head { max-width: 640px; margin-bottom: 40px; }
+  .head h2 { font-size: clamp(30px, 4vw, 42px); font-weight: 800; }
+  .head p { color: var(--ink-2); font-size: 17px; margin: 12px 0 0; }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 22px; padding: 22px; }
+  .card h3 { font-size: 18px; margin: 14px 0 6px; }
+  .card p { margin: 0; color: var(--ink-2); font-size: 15px; }
+  .ic { width: 46px; height: 46px; border-radius: 14px; display: grid; place-items: center; font-size: 22px; background: var(--brand-soft); }
+  .tag { display: inline-block; margin-top: 12px; font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 99px; background: var(--bg-2); color: var(--ink-3); }
+
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; counter-reset: s; }
+  .steps .card::before { counter-increment: s; content: counter(s); display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: var(--brand); color: #fff; font-weight: 800; }
+  @media (max-width: 760px) { .steps { grid-template-columns: 1fr; } }
+
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .compare .card { border-width: 2px; }
+  .compare .safe { border-color: var(--safe); }
+  .compare .fast { border-color: var(--line); }
+  .compare ul { margin: 12px 0 0; padding-left: 18px; color: var(--ink-2); }
+  @media (max-width: 760px) { .compare { grid-template-columns: 1fr; } }
+
+  .privacy { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: center; }
+  .privacy ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 14px; }
+  .privacy li { display: flex; gap: 12px; font-size: 16px; }
+  .privacy li b { display: block; }
+  .privacy li span.ck { flex: none; width: 28px; height: 28px; border-radius: 50%; background: var(--safe-soft); color: var(--safe); display: grid; place-items: center; font-weight: 800; }
+  @media (max-width: 760px) { .privacy { grid-template-columns: 1fr; } }
+
+  .b2b { background: linear-gradient(135deg, #2a1d6e, #6d4aff); color: #fff; border-radius: 28px; padding: 48px; display: grid; grid-template-columns: 1.3fr 1fr; gap: 32px; align-items: center; }
+  .b2b h2 { font-size: 34px; font-weight: 800; }
+  .b2b p, .b2b li { color: rgba(255,255,255,.85); }
+  .b2b ul { margin: 0; padding-left: 18px; display: grid; gap: 8px; }
+  .b2b .btn { background: #fff; color: #2a1d6e; border: 0; }
+  @media (max-width: 760px) { .b2b { grid-template-columns: 1fr; padding: 28px; } }
+
+  .faq { max-width: 760px; }
+  .faq details { border-bottom: 1px solid var(--line); padding: 18px 0; }
+  .faq summary { font-weight: 700; font-size: 17px; cursor: pointer; list-style: none; display: flex; justify-content: space-between; gap: 12px; }
+  .faq summary::after { content: "+"; color: var(--brand); font-size: 22px; line-height: 1; }
+  .faq details[open] summary::after { content: "−"; }
+  .faq p { color: var(--ink-2); margin: 10px 0 0; }
+
+  .final { text-align: center; }
+  .final h2 { font-size: clamp(32px, 5vw, 48px); font-weight: 800; }
+  .final p { color: var(--ink-2); font-size: 18px; }
+  .final .cta { justify-content: center; margin-top: 24px; }
+  footer { border-top: 1px solid var(--line); padding: 28px 0; color: var(--ink-3); font-size: 14px; }
+  footer .wrap { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  #iosTip { display: none; margin-top: 14px; color: var(--ink-2); font-size: 14px; }
 </style>
 </head>
 <body>
-<div id="map" role="application" aria-label="Map. Tap to set start and destination."></div>
+<header class="nav">
+  <div class="wrap">
+    <a class="logo" href="/"><img src="/icons/icon.svg" alt="">SafeRoute</a>
+    <nav aria-label="Main">
+      <a href="#how">How it works</a><a href="#checks">What we check</a><a href="#tools">Safety tools</a><a href="#privacy">Privacy</a><a href="#campus">For campuses</a>
+    </nav>
+    <a class="btn btn-primary" href="/app/">Open app</a>
+  </div>
+</header>
 
-<div id="top" class="panel">
-  <div class="row">
-    <button id="locate" aria-label="Start from my location">📍 My location</button>
-    <input id="when" type="datetime-local" aria-label="Departure time">
+<main>
+<section class="hero">
+  <div class="wrap">
+    <div>
+      <span class="eyebrow">🛡️ Built for walking home at night</span>
+      <h1>Not the fastest way. <em>The safer way.</em></h1>
+      <p class="lead">SafeRoute checks every street on your walk for lighting, open shops, police, CCTV, isolated stretches and reports from other walkers, for the exact time you're leaving. Then it shows you the safer way there.</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="/app/">Find my safest route</a>
+        <button class="btn" id="installBtn">Install on my phone</button>
+      </div>
+      <p id="iosTip">On iPhone: open this page in Safari, tap <b>Share</b>, then <b>Add to Home Screen</b>.</p>
+      <div class="trust"><span>Free</span><span>No sign-up</span><span>Works on any phone</span></div>
+    </div>
+    <div style="position:relative">
+      <div class="phone" role="img" aria-label="SafeRoute app showing a green safest route next to a red fastest route">
+        <div class="screen">
+          <svg class="mapart" viewBox="0 0 276 586" aria-hidden="true">
+            <rect width="276" height="586" fill="#eef0ea"/>
+            <rect x="150" y="70" width="110" height="120" rx="10" fill="#d8ecd2"/>
+            <rect x="20" y="320" width="90" height="110" rx="10" fill="#e3e1da"/>
+            <g stroke="#fff" stroke-width="14" stroke-linecap="round">
+              <path d="M-10 120 H290"/><path d="M-10 250 H290"/><path d="M-10 400 H290"/><path d="M60 -10 V600"/><path d="M200 -10 V600"/><path d="M130 250 V600"/>
+            </g>
+            <path d="M60 470 V250 H200 V120" fill="none" stroke="#fff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M60 470 V250 H200 V120" fill="none" stroke="#12b76a" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M60 470 L110 400 L150 330 L175 260 L200 120" fill="none" stroke="#f04438" stroke-width="5" stroke-dasharray="3 8" stroke-linecap="round" opacity=".8"/>
+            <g fill="#12b76a" stroke="#fff" stroke-width="3"><circle cx="60" cy="330" r="7"/><circle cx="110" cy="250" r="7"/><circle cx="170" cy="250" r="7"/><circle cx="200" cy="190" r="7"/></g>
+            <circle cx="60" cy="470" r="10" fill="#6d4aff" stroke="#fff" stroke-width="4"/>
+            <path d="M200 106 a12 12 0 1 1 0.1 0 Z" fill="#f04438" stroke="#fff" stroke-width="3"/>
+          </svg>
+          <div class="float f3"><div class="row"><div><small>SAFEST · 9 MIN</small>Well lit, 14 open shops</div><div class="big">86</div></div></div>
+        </div>
+      </div>
+      <div class="float f1"><small>Avoids</small>Dark park path</div>
+      <div class="float f2"><small>Police</small>within 300 m</div>
+    </div>
   </div>
-  <div class="row" style="margin-top:8px">
-    <button id="go" class="primary">Find safest route</button>
-    <button id="heatBtn" aria-pressed="false">Safety map</button>
-    <button id="reportBtn" aria-pressed="false">Report</button>
-    <button id="share">Share trip</button>
-  </div>
-  <div id="reportbar" class="row">
-    <span class="hint">Pick a type, then tap the spot:</span>
-    <button data-type="broken_light">💡 Broken light</button>
-    <button data-type="felt_unsafe">👀 Felt unsafe</button>
-    <button data-type="harassment">🚫 Harassment</button>
-    <button data-type="felt_safe">✅ Felt safe</button>
-  </div>
-  <p id="msg" class="hint" aria-live="polite">Tap the map to set your start, then tap again for your destination.</p>
-  <div id="sosbox">
-    <strong>Emergency</strong><br>
-    <a href="tel:112">📞 Call 112</a><a id="smsLink" href="#">✉️ SMS my contact</a>
-    <button id="setContact">Set trusted contact</button>
-  </div>
-</div>
+</section>
 
-<button id="sos" aria-label="SOS emergency options">SOS</button>
-<div id="sheet" class="panel" aria-live="polite"></div>
+<section id="how" class="alt">
+  <div class="wrap">
+    <div class="head"><h2>Three taps to a safer walk</h2><p>No account and nothing to set up. Open it and go.</p></div>
+    <div class="steps">
+      <div class="card"><h3>Say where you're going</h3><p>Search a place or tap the map. Pick "leave now" or a later time, because 7 pm and 1 am are different walks.</p></div>
+      <div class="card"><h3>Compare three routes</h3><p>Safest, Balanced and Fastest, each with a score out of 100, the extra minutes, and plain reasons like "well lit, 14 open shops".</p></div>
+      <div class="card"><h3>Walk with backup</h3><p>Share a live link with friends. If you stop, wander off route or run late, SafeRoute checks you're OK.</p></div>
+    </div>
+  </div>
+</section>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<section id="checks">
+  <div class="wrap">
+    <div class="head"><h2>What we check on every street</h2><p>Every stretch of road gets a score from 0 to 100, recalculated for the hour you walk. After sunset, lighting and open shops count for more.</p></div>
+    <div class="grid">
+      <div class="card"><div class="ic">💡</div><h3>Lighting</h3><p>Street lamps and lit roads, plus broken lights people report. Matters most after dark.</p><span class="tag">Real sunset for your city</span></div>
+      <div class="card"><div class="ic">🏪</div><h3>Open places</h3><p>Shops, cafes, pharmacies and petrol pumps that are open at that moment. These are eyes on the street and places to step into.</p><span class="tag">Opening hours checked by the hour</span></div>
+      <div class="card"><div class="ic">👮</div><h3>Police & CCTV</h3><p>Distance to the nearest police station, and cameras along the way.</p></div>
+      <div class="card"><div class="ic">🌳</div><h3>Isolated surroundings</h3><p>Parks at night, construction sites, rail lines, scrubland and underpasses are flagged and avoided.</p></div>
+      <div class="card"><div class="ic">🚪</div><h3>Ways out</h3><p>Dead-end lanes and long stretches with no side streets score lower, because you can't turn off if something feels wrong.</p></div>
+      <div class="card"><div class="ic">🚌</div><h3>Transport nearby</h3><p>Bus stops, stations and taxi stands give you a quick exit.</p></div>
+      <div class="card"><div class="ic">📍</div><h3>Reports & history</h3><p>Anonymous reports from walkers ("felt unsafe", "harassment", "felt safe") and imported incident data, weighted by how recent they are and the time of day.</p></div>
+      <div class="card"><div class="ic">🌧️</div><h3>Weather</h3><p>Rain empties the streets, so scores drop a little when it's pouring.</p></div>
+    </div>
+    <div class="compare" style="margin-top:28px">
+      <div class="card safe"><span class="score-pill good">Safest · 86</span><h3>+3 minutes</h3><ul><li>Main road, well lit the whole way</li><li>14 shops and a pharmacy open</li><li>Police station within 300 m</li></ul></div>
+      <div class="card fast"><span class="score-pill bad">Fastest · 31</span><h3>Shortest walk</h3><ul><li>220 m unlit path through a park</li><li>Nowhere open for 400 m</li><li>Dead-end lane with no way out</li></ul></div>
+    </div>
+  </div>
+</section>
+
+<section id="tools" class="alt">
+  <div class="wrap">
+    <div class="head"><h2>Help, one press away</h2><p>Because a good route is only half of it.</p></div>
+    <div class="grid">
+      <div class="card"><div class="ic" style="background:var(--risk-soft)">🆘</div><h3>Hold-to-SOS</h3><p>Hold for 1.5 seconds. Your contacts get a live location link, and calling 112 is one tap away. Holding means you won't trigger it by accident.</p></div>
+      <div class="card"><div class="ic">📡</div><h3>Live trip sharing</h3><p>Friends follow your walk on a map, no app needed. The link stops working when you arrive.</p></div>
+      <div class="card"><div class="ic">⏱️</div><h3>Automatic check-ins</h3><p>Stopped too long, off your route, or running late? We ask if you're OK. No answer in 60 seconds starts SOS.</p></div>
+      <div class="card"><div class="ic">📞</div><h3>Fake call</h3><p>A realistic incoming call gives you an excuse to leave an uncomfortable situation.</p></div>
+      <div class="card"><div class="ic">🏥</div><h3>Safe-place radar</h3><p>The nearest pharmacy, hospital, petrol pump or shop that's open right now, always on screen.</p></div>
+      <div class="card"><div class="ic">🔊</div><h3>Loud siren</h3><p>A piercing alarm from your phone's speaker to draw attention fast.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="privacy">
+  <div class="wrap privacy">
+    <div class="head" style="margin:0"><h2>Your safety app shouldn't track you</h2><p>We built SafeRoute so it knows as little about you as possible.</p></div>
+    <ul>
+      <li><span class="ck">✓</span><div><b>No account, no email</b>Open it and use it.</div></li>
+      <li><span class="ck">✓</span><div><b>Contacts stay on your phone</b>They are never uploaded.</div></li>
+      <li><span class="ck">✓</span><div><b>Location only while you share</b>Live trips are wiped when they end, and after 12 hours at most.</div></li>
+      <li><span class="ck">✓</span><div><b>Anonymous reports</b>No names are attached, ever.</div></li>
+      <li><span class="ck">✓</span><div><b>We never sell data</b>Not to advertisers, not to anyone.</div></li>
+    </ul>
+  </div>
+</section>
+
+<section id="campus">
+  <div class="wrap">
+    <div class="b2b">
+      <div>
+        <h2>Bring SafeRoute to your campus or city</h2>
+        <p>Universities, hostels, companies with late shifts and city councils can give everyone a safer walk home.</p>
+        <ul>
+          <li>We map your area and add data from night-time walk audits</li>
+          <li>Import your security team's incident logs</li>
+          <li>Your own branding and local emergency numbers</li>
+          <li>Reports of broken lights go straight to your facilities team</li>
+        </ul>
+      </div>
+      <div style="display:grid;gap:12px">
+        <a class="btn" id="contactBtn" href="mailto:hello@example.com?subject=SafeRoute%20for%20our%20campus">Talk to us</a>
+        <p style="margin:0;font-size:14px">We usually reply within a day.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap faq">
+    <div class="head"><h2>Questions</h2></div>
+    <details><summary>Does a high score mean a route is safe?</summary><p>No route is ever guaranteed safe. A score means "safer than the other options, based on what we know". We show the reasons and flag stretches with little data, so you can judge for yourself. Always trust your instincts.</p></details>
+    <details><summary>Where does the data come from?</summary><p>OpenStreetMap for roads, lamps, shops, opening hours, police and cameras. Anonymous reports from SafeRoute users. Incident data from partners and public sources where it's available, and live weather.</p></details>
+    <details><summary>Which areas does it cover?</summary><p>Each SafeRoute area is mapped and checked before launch, starting with campuses and the neighbourhoods around them. If your area isn't covered yet, tell us.</p></details>
+    <details><summary>Do I need to install anything?</summary><p>No. It runs in your browser. Installing it to your home screen makes it open faster and work like an app, including the SOS shortcut.</p></details>
+    <details><summary>Does SOS call the police automatically?</summary><p>SOS texts your trusted contacts a live location link and puts a one-tap call to 112 in front of you. Phones don't let websites place calls on their own, so you stay in control.</p></details>
+    <details><summary>How much does it cost?</summary><p>SafeRoute is free for walkers. Campuses and organisations pay for custom mapping, data and branding.</p></details>
+  </div>
+</section>
+
+<section class="final">
+  <div class="wrap">
+    <h2>Get home the safer way tonight</h2>
+    <p>Free, private, and ready in your browser.</p>
+    <div class="cta"><a class="btn btn-primary" href="/app/">Open SafeRoute</a></div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap"><span>© SafeRoute</span><span>Map data © OpenStreetMap contributors · In an emergency, call 112</span></div>
+</footer>
+
 <script>
-const $ = id => document.getElementById(id);
-const COLORS = { safest: "var(--safe)", balanced: "var(--mid)", fastest: "var(--risk)" };
-const HEX = { safest: "#1a9e5c", balanced: "#d98a00", fastest: "#d63a3a" };
-const LABEL = { safest: "Safest", balanced: "Balanced", fastest: "Fastest" };
-const map = L.map("map", { zoomControl: false, preferCanvas: true });
-L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
-
-let start = null, end = null, routes = [], routeLayers = L.layerGroup().addTo(map), heatLayer = null, reportType = null, here = null;
-const pins = L.layerGroup().addTo(map);
-
-const pad = n => String(n).padStart(2, "0");
-const d = new Date();
-$("when").value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-const msg = t => $("msg").textContent = t;
-const store = { get: k => { try { return localStorage.getItem(k); } catch { return null; } },
-                set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
-
-fetch("/api/area").then(r => r.json()).then(({ bounds: [s, w, n, e] }) => map.fitBounds([[s, w], [n, e]]));
-
-function drawPins() {
-  pins.clearLayers();
-  if (start) L.circleMarker(start, { radius: 8, color: "#fff", weight: 3, fillColor: "#1a9e5c", fillOpacity: 1 }).addTo(pins).bindTooltip("Start");
-  if (end) L.circleMarker(end, { radius: 8, color: "#fff", weight: 3, fillColor: "#6b3fd4", fillOpacity: 1 }).addTo(pins).bindTooltip("Destination");
-}
-
-map.on("click", async ev => {
-  const p = [ev.latlng.lat, ev.latlng.lng];
-  if (reportType) return sendReport(p);
-  if (!start || (start && end)) { start = p; end = null; routeLayers.clearLayers(); $("sheet").style.display = "none"; msg("Now tap your destination."); }
-  else { end = p; findRoutes(); }
-  drawPins();
-});
-
-$("locate").onclick = () => navigator.geolocation.getCurrentPosition(
-  pos => { here = start = [pos.coords.latitude, pos.coords.longitude]; end = null; drawPins(); map.panTo(start); msg("Start set to your location. Tap your destination."); },
-  () => msg("Couldn't get your location. Tap the map to set your start instead."),
-  { enableHighAccuracy: true, timeout: 10000 });
-
-$("go").onclick = () => start && end ? findRoutes() : msg("Set a start and destination first.");
-$("when").onchange = () => { if (start && end) findRoutes(); if (heatLayer) loadHeat(); };
-
-async function findRoutes() {
-  msg("Scoring routes…");
-  const q = new URLSearchParams({ from: start.join(","), to: end.join(","), at: $("when").value });
-  const res = await fetch("/api/route?" + q).then(r => r.json()).catch(() => ({ error: "Server not reachable" }));
-  if (res.error) return msg(res.error);
-  routes = res;
-  msg("Tap a card to see that route.");
-  showRoutes("safest");
-}
-
-function showRoutes(sel) {
-  routeLayers.clearLayers();
-  // draw the selected route last so it sits on top
-  [...routes].sort((a, b) => (a.kind === sel) - (b.kind === sel)).forEach(r => {
-    L.polyline(r.coords, { color: HEX[r.kind], weight: r.kind === sel ? 7 : 4, opacity: r.kind === sel ? 0.95 : 0.45 }).addTo(routeLayers);
-    if (r.kind === sel && r.weakest && r.weakest.score < 40)
-      L.polyline(r.weakest.coords, { color: "#000", weight: 10, opacity: 0.5, dashArray: "4 8" }).addTo(routeLayers)
-        .bindTooltip(`Weakest stretch (score ${r.weakest.score})`);
-  });
-  const fastest = routes.find(r => r.kind === "fastest");
-  $("sheet").innerHTML = routes.map(r => {
-    const extra = r.minutes - fastest.minutes;
-    return `<div class="card ${r.kind === sel ? "sel" : ""}" style="border-color:${COLORS[r.kind]}" data-kind="${r.kind}" tabindex="0" role="button">
-      <h3><span>${LABEL[r.kind]} · ${r.score}</span><span>${r.minutes} min${extra > 0 ? ` (+${extra})` : ""}</span></h3>
-      ${r.low_data ? `<div class="warn">Low data here, so treat this score as a rough guess</div>` : ""}
-      <div class="chips">${r.reasons.map(t => `<span class="chip">${t}</span>`).join("")}</div>
-      ${r.weakest && r.weakest.score < 40 ? `<div class="hint">Weakest stretch: ${r.weakest.highway} (score ${r.weakest.score}), shown dashed on the map</div>` : ""}
-    </div>`;
-  }).join("") + `<p class="hint">Scores mean "safer than the alternatives", not "safe". Stay alert.</p>`;
-  $("sheet").style.display = "block";
-  $("sheet").querySelectorAll(".card").forEach(c => c.onclick = c.onkeydown = e => { if (!e.key || e.key === "Enter") showRoutes(c.dataset.kind); });
-}
-
-async function loadHeat() {
-  const segs = await fetch("/api/heat?" + new URLSearchParams({ at: $("when").value })).then(r => r.json());
-  if (heatLayer) heatLayer.remove();
-  heatLayer = L.layerGroup(segs.map(([a, b, c, d, s]) =>
-    L.polyline([[a, b], [c, d]], { color: s >= 60 ? HEX.safest : s >= 35 ? HEX.balanced : HEX.fastest, weight: 3, opacity: 0.7, interactive: false }))).addTo(map);
-}
-$("heatBtn").onclick = () => {
-  const on = !heatLayer;
-  $("heatBtn").classList.toggle("on", on); $("heatBtn").setAttribute("aria-pressed", on);
-  if (on) loadHeat(); else { heatLayer.remove(); heatLayer = null; }
+let promptEvent = null;
+addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); promptEvent = e; });
+document.getElementById("installBtn").onclick = async () => {
+  if (promptEvent) { promptEvent.prompt(); promptEvent = null; return; }
+  if (/iphone|ipad|ipod/i.test(navigator.userAgent)) { document.getElementById("iosTip").style.display = "block"; return; }
+  location.href = "/app/";
 };
-
-$("reportBtn").onclick = () => {
-  const open = $("reportbar").style.display !== "flex";
-  $("reportbar").style.display = open ? "flex" : "none";
-  $("reportBtn").setAttribute("aria-pressed", open);
-  if (!open) reportType = null;
-};
-document.querySelectorAll("#reportbar button").forEach(b => b.onclick = () => {
-  reportType = b.dataset.type;
-  document.querySelectorAll("#reportbar button").forEach(x => x.classList.toggle("on", x === b));
-  msg("Tap the spot on the map to report it.");
-});
-async function sendReport(p) {
-  const r = await fetch("/api/report", { method: "POST", body: JSON.stringify({ lat: p[0], lon: p[1], type: reportType }) }).then(r => r.json());
-  msg(r.ok ? "Thanks, your report is anonymous and already counts in the scores." : r.error);
-  reportType = null; $("reportbar").style.display = "none"; $("reportBtn").setAttribute("aria-pressed", false);
-  if (r.ok && start && end) findRoutes();
-  if (r.ok && heatLayer) loadHeat();
-}
-
-const mapsLink = p => `https://maps.google.com/?q=${p[0].toFixed(6)},${p[1].toFixed(6)}`;
-function withLocation(cb) {
-  navigator.geolocation.getCurrentPosition(pos => cb([pos.coords.latitude, pos.coords.longitude]), () => cb(here || start), { enableHighAccuracy: true, timeout: 5000 });
-}
-$("sos").onclick = () => {
-  $("sosbox").style.display = "block";
-  withLocation(p => {
-    const phone = store.get("contact") || "";
-    $("smsLink").href = `sms:${phone}?&body=${encodeURIComponent("SOS! I need help. My location: " + (p ? mapsLink(p) : "unknown"))}`;
-  });
-};
-$("setContact").onclick = () => {
-  const v = prompt("Trusted contact's phone number", store.get("contact") || "");
-  if (v !== null) { store.set("contact", v.trim()); $("sos").click(); }
-};
-$("share").onclick = () => withLocation(p => {
-  const r = routes.find(x => x.kind === "safest");
-  const text = `I'm walking ${r ? `the safest route (about ${r.minutes} min)` : "home"}. I'm here: ${p ? mapsLink(p) : "unknown"}` +
-    (end ? `. Heading to ${mapsLink(end)}` : "");
-  if (navigator.share) navigator.share({ text }).catch(() => {});
-  else navigator.clipboard.writeText(text).then(() => msg("Trip details copied, paste them to a friend."));
-});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 </script>
 </body>
 </html>

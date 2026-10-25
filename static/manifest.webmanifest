@@ -1,0 +1,22 @@
+{
+  "name": "SafeRoute: walk the safer way",
+  "short_name": "SafeRoute",
+  "description": "Walking directions that pick the safest way, not just the fastest, with SOS, live trip sharing and check-ins.",
+  "id": "/app/",
+  "start_url": "/app/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f0d16",
+  "theme_color": "#6d4aff",
+  "categories": ["navigation", "travel", "lifestyle"],
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icons/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ],
+  "shortcuts": [
+    { "name": "SOS", "url": "/app/?sos=1", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] }
+  ]
+}

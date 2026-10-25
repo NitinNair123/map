@@ -1,8 +1,11 @@
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
-from safety import Area, is_open
+from safety import Area, daylight, is_open
+
+IST = timezone(timedelta(hours=5, minutes=30))
+NIGHT, LATE, NOON = (datetime(2026, 10, 25, h, 0, tzinfo=IST) for h in (22, 2, 12))
 
 # A sits west of B. The direct way is a short, dark footway. The 1.4x detour north is a
 # lit residential street with lamps and shops that are open until 23:00.
@@ -21,12 +24,15 @@ def node(nid, pt, **tags):
 def fixture():
     els = [
         way(1, [1, 2], [A, B], highway="footway"),
-        way(2, [1, 10, 11, 12, 13, 2], NORTH, highway="residential"),
+        way(2, [1, 10, 11, 12, 13, 2], NORTH, highway="residential", name="Market Road"),
+        way(3, [11, 20], [(28.0005, 77.001), (28.0012, 77.001)], highway="service"),  # dead-end lane off the street
     ]
     for i, ((a1, o1), (a2, o2)) in enumerate(zip(NORTH, NORTH[1:])):
         for k in range(4):  # a lamp about every 35 m
             els.append(node(100 + 4 * i + k, (a1 + (a2 - a1) * k / 4 + 0.0001, o1 + (o2 - o1) * k / 4), highway="street_lamp"))
-        els.append(node(200 + i, ((a1 + a2) / 2 + 0.0002, (o1 + o2) / 2), shop="convenience", opening_hours="Mo-Su 08:00-23:00"))
+        els.append(node(200 + i, ((a1 + a2) / 2 + 0.0002, (o1 + o2) / 2), shop="convenience",
+                        opening_hours="Mo-Su 08:00-23:00", name=f"Shop {i}"))
+    els.append(node(300, (28.0007, 77.0025), amenity="pharmacy", opening_hours="24/7", name="City Pharmacy"))
     return {"elements": els}
 
 
@@ -38,26 +44,63 @@ class RouteTest(unittest.TestCase):
         return {r["kind"]: r for r in self.area.routes(A, B, when)}
 
     def test_night_safest_takes_lit_street(self):
-        r = self.kinds(datetime(2026, 10, 25, 22, 0))
+        r = self.kinds(NIGHT)
         self.assertGreater(r["safest"]["length_m"], 350)
         self.assertLess(r["fastest"]["length_m"], 300)
         self.assertGreater(r["safest"]["score"], r["fastest"]["score"])
         self.assertTrue(any("open places" in s for s in r["safest"]["reasons"]))
+        self.assertIn("Lighting", r["safest"]["factors"])
+
+    def test_identical_routes_are_flagged(self):
+        r = self.kinds(NIGHT)
+        self.assertEqual(r["balanced"]["same_as"], "safest")
+        self.assertIsNone(r["safest"]["same_as"])
 
     def test_shops_closed_lowers_score(self):
-        late = self.kinds(datetime(2026, 10, 26, 2, 0))["safest"]["score"]
-        evening = self.kinds(datetime(2026, 10, 25, 22, 0))["safest"]["score"]
-        self.assertLess(late, evening)
+        self.assertLess(self.kinds(LATE)["safest"]["score"], self.kinds(NIGHT)["safest"]["score"])
 
     def test_harassment_report_lowers_score(self):
-        when = datetime(2026, 10, 25, 22, 0)
-        before = self.kinds(when)["safest"]["score"]
+        before = self.kinds(NIGHT)["safest"]["score"]
         self.area.add_report({"lat": 28.0005, "lon": 77.0015, "type": "harassment", "ts": time.time()})
-        self.assertLess(self.kinds(when)["safest"]["score"], before)
+        self.assertLess(self.kinds(NIGHT)["safest"]["score"], before)
+
+    def test_incident_at_same_hour_counts_more(self):
+        when = NIGHT.timestamp()
+        evening = Area(fixture(), incidents=[{"lat": 28.0005, "lon": 77.0015, "type": "assault", "hour": 22, "ts": when}])
+        morning = Area(fixture(), incidents=[{"lat": 28.0005, "lon": 77.0015, "type": "assault", "hour": 9, "ts": when}])
+        s = lambda a: {r["kind"]: r for r in a.routes(A, B, NIGHT)}["safest"]["score"]
+        self.assertLess(s(evening), s(morning))
+
+    def test_dead_end_lane_has_no_way_out(self):
+        lane = next(e for e in self.area.edges if e["highway"] == "service")
+        feats, _ = self.area.factors(lane, NIGHT, 0)
+        self.assertEqual(feats["escape"], 0.2)
+
+    def test_park_hurts_at_night_only(self):
+        osm = fixture()
+        park = [(28.0004, 77.0), (28.0004, 77.003), (27.9996, 77.003), (27.9996, 77.0), (28.0004, 77.0)]
+        osm["elements"].append(way(9, list(range(900, 905)), park, leisure="park"))
+        area = Area(osm)
+        foot = next(e for e in area.edges if e["highway"] == "footway")
+        self.assertEqual(foot["zones"], ["park"])
+        night, _ = area.factors(foot, NIGHT, 0)
+        day, _ = area.factors(foot, NOON, 1)
+        self.assertLess(night["surroundings"], day["surroundings"])
+
+    def test_havens_and_search(self):
+        h = self.area.havens_near((28.0007, 77.0024), LATE)
+        self.assertEqual(h[0]["name"], "City Pharmacy")  # the only place open at 2 am
+        self.assertEqual(self.area.search("market")[0]["name"], "Market Road")
 
 
-class OpeningHoursTest(unittest.TestCase):
-    def test_forms(self):
+class TimeTest(unittest.TestCase):
+    def test_daylight(self):
+        self.assertEqual(daylight(28.6, 77.2, NOON), 1.0)
+        self.assertEqual(daylight(28.6, 77.2, NIGHT), 0.0)
+        dusk = datetime(2026, 10, 25, 17, 45, tzinfo=IST)  # sunset in Delhi is about 17:35 in late October
+        self.assertTrue(0 < daylight(28.6, 77.2, dusk) < 1)
+
+    def test_opening_hours(self):
         sat_1am, mon_noon = datetime(2026, 10, 24, 1, 0), datetime(2026, 10, 26, 12, 0)
         self.assertTrue(is_open("24/7", sat_1am))
         self.assertTrue(is_open("Mo-Fr 09:00-18:00", mon_noon))

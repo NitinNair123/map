@@ -1,0 +1,755 @@
+"use strict";
+
+// ---------- small helpers ----------
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const pad = (n) => String(n).padStart(2, "0");
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("sr." + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("sr." + k, JSON.stringify(v)); } catch {} },
+};
+const icon = (id) => `<svg aria-hidden="true"><use href="#i-${id}"/></svg>`;
+const scoreClass = (s) => (s >= 65 ? "good" : s >= 40 ? "ok" : "bad");
+const scoreWord = (s) => (s >= 65 ? "Safer" : s >= 40 ? "Take care" : "Avoid if you can");
+const COLOR = { good: "#12b76a", ok: "#f79009", bad: "#f04438" };
+const LABEL = { safest: "Safest", balanced: "Balanced", fastest: "Fastest" };
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+const fmtDist = (m) => (m < 1000 ? `${Math.round(m / 10) * 10} m` : `${(m / 1000).toFixed(1)} km`);
+
+function isoLocal(d) {
+  const off = -d.getTimezoneOffset(), a = Math.abs(off);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:00${off >= 0 ? "+" : "-"}${pad(Math.floor(a / 60))}:${pad(a % 60)}`;
+}
+function metres(a, b) {
+  const x = ((b[1] - a[1]) * Math.PI / 180) * Math.cos(((a[0] + b[0]) / 2) * Math.PI / 180);
+  const y = ((b[0] - a[0]) * Math.PI / 180);
+  return 6371000 * Math.hypot(x, y);
+}
+function segDist(p, a, b) {
+  const k = Math.cos(a[0] * Math.PI / 180) * 111320;
+  const px = (p[1] - a[1]) * k, py = (p[0] - a[0]) * 110540, bx = (b[1] - a[1]) * k, by = (b[0] - a[0]) * 110540;
+  const t = Math.max(0, Math.min(1, (px * bx + py * by) / (bx * bx + by * by || 1)));
+  return Math.hypot(px - t * bx, py - t * by);
+}
+async function api(path, body) {
+  const res = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
+  const data = await res.json().catch(() => ({ error: "Unexpected response from the server" }));
+  if (!res.ok || data.error) throw new Error(data.error || `Request failed (${res.status})`);
+  return data;
+}
+let toastTimer;
+function toast(msg, ms = 3200) {
+  const t = $("#toast");
+  t.textContent = msg; t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.hidden = true), ms);
+}
+const vibrate = (p) => navigator.vibrate && navigator.vibrate(p);
+
+// ---------- theme ----------
+function applyTheme() {
+  const t = store.get("theme", "system");
+  if (t === "system") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.dataset.theme = t;
+  const dark = t === "dark" || (t === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.toggleAttribute("data-dark", dark);
+}
+applyTheme();
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
+
+// ---------- state ----------
+const state = {
+  from: null, fromLabel: "", // null start means "my location"
+  to: null, toLabel: "",
+  when: null, // null means now
+  here: null,
+  routes: [], sel: "safest", rain: false,
+  trip: null,
+  installPrompt: null,
+};
+
+// ---------- map ----------
+const map = L.map("map", { zoomControl: false, attributionControl: true, preferCanvas: true });
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+const routeLayer = L.layerGroup().addTo(map);
+const havenLayer = L.layerGroup().addTo(map);
+let heatLayer = null, meMarker = null, fromMarker = null, toMarker = null;
+const divIcon = (cls, size = 22) => L.divIcon({ className: "", html: `<div class="${cls}"></div>`, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
+
+api("/api/area").then(({ bounds: [s, w, n, e] }) => {
+  state.bounds = [[s, w], [n, e]];
+  map.fitBounds(state.bounds, { padding: [20, 20] });
+}).catch(() => { map.setView([20.6, 78.9], 5); toast("Can't reach the SafeRoute server"); });
+
+function setMarker(which, pt) {
+  const old = which === "from" ? fromMarker : toMarker;
+  if (old) old.remove();
+  const m = pt ? L.marker(pt, { icon: divIcon(`pin ${which === "from" ? "start" : "end"}`), keyboard: false }).addTo(map) : null;
+  if (which === "from") fromMarker = m; else toMarker = m;
+}
+
+// ---------- location ----------
+let watchId = null;
+function startWatching() {
+  if (watchId !== null || !navigator.geolocation) return;
+  watchId = navigator.geolocation.watchPosition(onPosition, (err) => {
+    if (err.code === err.PERMISSION_DENIED) toast("Location is off. You can still pick places on the map.");
+    navigator.geolocation.clearWatch(watchId); watchId = null;
+  }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
+}
+function currentPosition(timeout = 8000) {
+  if (state.here && Date.now() - state.hereAt < 30000) return Promise.resolve(state.here);
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve(state.here);
+    navigator.geolocation.getCurrentPosition((p) => { onPosition(p); resolve(state.here); }, () => resolve(state.here), { enableHighAccuracy: true, timeout });
+  });
+}
+function onPosition(pos) {
+  const pt = [pos.coords.latitude, pos.coords.longitude];
+  state.here = pt; state.hereAt = Date.now();
+  if (!meMarker) meMarker = L.marker(pt, { icon: divIcon("me-dot", 18), keyboard: false, zIndexOffset: 1000 }).addTo(map);
+  else meMarker.setLatLng(pt);
+  if (state.trip) onTripPosition(pt);
+}
+$("#locateBtn").onclick = async () => {
+  startWatching();
+  const p = await currentPosition();
+  if (p) map.setView(p, 17); else toast("Couldn't find you. Check location permission.");
+};
+
+// ---------- search ----------
+let searchSeq = 0, activeField = null;
+function bindSearch(input, which) {
+  input.addEventListener("focus", () => { activeField = which; showResults(input.value); });
+  input.addEventListener("input", () => showResults(input.value));
+  input.addEventListener("keydown", (e) => {
+    const items = [...$("#results").children];
+    const cur = items.findIndex((li) => li.getAttribute("aria-selected") === "true");
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const next = items[(cur + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length];
+      items.forEach((li) => li.setAttribute("aria-selected", li === next));
+    } else if (e.key === "Enter" && items.length) items[Math.max(cur, 0)].click();
+    else if (e.key === "Escape") hideResults();
+  });
+}
+bindSearch($("#fromInput"), "from");
+bindSearch($("#toInput"), "to");
+document.addEventListener("pointerdown", (e) => { if (!e.target.closest(".search-card")) hideResults(); });
+function hideResults() { $("#results").hidden = true; }
+
+async function showResults(q) {
+  const seq = ++searchSeq;
+  const extra = [];
+  if (activeField === "from") extra.push({ name: "Your location", kind: "Use GPS", here: true });
+  extra.push({ name: "Choose on map", kind: "Tap anywhere on the map", pick: true });
+  let found = [];
+  if (q.trim().length >= 2) found = await api("/api/search?q=" + encodeURIComponent(q)).catch(() => []);
+  if (seq !== searchSeq) return;
+  const list = $("#results");
+  list.innerHTML = "";
+  [...found, ...extra].forEach((r, i) => {
+    const li = document.createElement("li");
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", i === 0 && found.length ? "true" : "false");
+    li.innerHTML = `<span class="ico">${icon(r.here ? "locate" : r.pick ? "flag" : r.kind === "street" ? "walk" : "store")}</span><span><b>${esc(r.name)}</b><small>${esc(cap(String(r.kind).replace(/_/g, " ")))}</small></span>`;
+    li.onclick = () => choose(r);
+    list.appendChild(li);
+  });
+  list.hidden = false;
+}
+async function choose(r) {
+  hideResults();
+  const which = activeField;
+  if (r.pick) { pickMode = which; toast(`Tap the map to set your ${which === "from" ? "start" : "destination"}`); return; }
+  if (r.here) {
+    startWatching();
+    state.from = null; state.fromLabel = ""; $("#fromInput").value = ""; setMarker("from", null);
+  } else setPlace(which, r.pt, r.name);
+  document.activeElement.blur();
+  maybeRoute();
+}
+function setPlace(which, pt, label) {
+  state[which] = pt; state[which + "Label"] = label;
+  $(which === "from" ? "#fromInput" : "#toInput").value = label;
+  setMarker(which, pt);
+}
+$("#swapBtn").onclick = () => {
+  const f = [state.from, state.fromLabel], t = [state.to, state.toLabel];
+  if (!t[0]) return;
+  setPlace("from", t[0], t[1]);
+  if (f[0]) setPlace("to", f[0], f[1]);
+  else if (state.here) setPlace("to", state.here, "Your location");
+  maybeRoute();
+};
+
+let pickMode = null, reportType = null;
+map.on("click", (e) => {
+  const pt = [e.latlng.lat, e.latlng.lng];
+  if (reportType) return sendReport(pt);
+  if (state.trip) return;
+  const which = pickMode || "to";
+  pickMode = null;
+  setPlace(which, pt, "Dropped pin");
+  maybeRoute();
+});
+
+// ---------- time ----------
+function timeLabel() {
+  if (!state.when) return "Leave now";
+  const d = state.when, today = new Date();
+  const day = d.toDateString() === today.toDateString() ? "Today" : d.toLocaleDateString([], { weekday: "short" });
+  return `${day} ${d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+}
+$("#timeChip").onclick = () => {
+  const d = state.when || new Date();
+  openDrawer(`
+    <h2 id="drawerTitle">When are you leaving?</h2>
+    <p>Scores change through the day: shops close, streets empty and lighting matters more after sunset.</p>
+    <input type="datetime-local" id="leaveAt" class="input" value="${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}">
+    <button class="btn btn-primary btn-block" id="leaveSet">Set time</button>
+    <button class="btn btn-block" id="leaveNow">Leave now</button>`);
+  $("#leaveSet").onclick = () => { const v = $("#leaveAt").value; state.when = v ? new Date(v) : null; afterTime(); };
+  $("#leaveNow").onclick = () => { state.when = null; afterTime(); };
+};
+function afterTime() {
+  closeDrawer();
+  $("#timeLabel").textContent = timeLabel();
+  if (heatLayer) loadHeat();
+  maybeRoute();
+}
+const whenParam = () => isoLocal(state.when || new Date());
+
+// ---------- routing ----------
+async function maybeRoute() {
+  if (!state.to) return renderIdle();
+  let from = state.from;
+  if (!from) {
+    startWatching();
+    from = await currentPosition();
+    if (!from) { renderSheet(`<div class="empty"><div class="badge">${icon("locate")}</div><div><h3>Where are you starting?</h3><p class="muted">Turn on location, or type a start point above.</p></div></div>`); $("#fromInput").focus(); return; }
+  }
+  if (metres(from, state.to) < 30) {
+    routeLayer.clearLayers(); havenLayer.clearLayers();
+    return renderSheet(`<div class="empty"><div class="badge">${icon("check")}</div><div><h3>You're already there</h3><p class="muted">Pick a destination further away.</p></div></div>`);
+  }
+  renderSheet(`<div class="empty"><div class="badge">${icon("shield")}</div><div><h3>Checking every street…</h3><p class="muted">Lighting, open shops, police, CCTV and reports for ${esc(timeLabel().toLowerCase())}.</p></div></div>`);
+  try {
+    const q = new URLSearchParams({ from: from.join(","), to: state.to.join(","), at: whenParam() });
+    const res = await api("/api/route?" + q);
+    state.routes = res.routes; state.rain = res.rain; state.routeFrom = from;
+    state.sel = "safest";
+    drawRoutes(true);
+    renderRoutes();
+  } catch (err) {
+    renderSheet(`<div class="note">${icon("alert")}<span>${esc(err.message)}</span></div>`);
+  }
+}
+
+function drawRoutes(fit) {
+  routeLayer.clearLayers(); havenLayer.clearLayers();
+  const order = [...state.routes].filter((r) => !r.same_as).sort((a, b) => (a.kind === state.sel) - (b.kind === state.sel));
+  for (const r of order) {
+    const sel = r.kind === state.sel || (state.routes.find((x) => x.kind === state.sel)?.same_as === r.kind);
+    const c = COLOR[scoreClass(r.score)];
+    if (sel) L.polyline(r.coords, { color: "#fff", weight: 11, opacity: 0.9 }).addTo(routeLayer);
+    const line = L.polyline(r.coords, { color: sel ? c : "#8f8aa0", weight: sel ? 7 : 5, opacity: sel ? 1 : 0.6 }).addTo(routeLayer);
+    line.on("click", (e) => { L.DomEvent.stop(e); if (!state.trip) { state.sel = r.kind; drawRoutes(); renderRoutes(); } });
+    if (sel) {
+      if (r.weakest && r.weakest.score < 45)
+        L.polyline(r.weakest.coords, { color: "#16131f", weight: 7, opacity: 0.8, dashArray: "2 10", lineCap: "round" }).addTo(routeLayer)
+          .bindTooltip(`Weakest stretch: ${esc(r.weakest.name)}`);
+      r.havens.forEach((h) => L.marker(h.pt, { icon: divIcon("haven-dot", 14), keyboard: false }).addTo(havenLayer).bindTooltip(`Open now: ${esc(h.name)}`));
+    }
+  }
+  if (fit) {
+    const all = state.routes.flatMap((r) => r.coords);
+    const desk = innerWidth >= 900; // keep the route clear of the search card and the sheet
+    if (all.length) map.fitBounds(all, { paddingTopLeft: desk ? [460, 40] : [20, 190], paddingBottomRight: desk ? [40, 40] : [20, innerHeight * 0.45] });
+  }
+}
+
+function gauge(score) {
+  const c = 2 * Math.PI * 36, cls = scoreClass(score);
+  return `<div class="gauge" role="img" aria-label="Safety score ${score} out of 100">
+    <svg viewBox="0 0 84 84"><circle class="track" cx="42" cy="42" r="36"/><circle class="val" cx="42" cy="42" r="36" stroke="${COLOR[cls]}" stroke-dasharray="${c}" stroke-dashoffset="${c * (1 - score / 100)}"/></svg>
+    <div><span>${score}<small>SCORE</small></span></div></div>`;
+}
+
+function renderRoutes() {
+  const r = state.routes.find((x) => x.kind === state.sel);
+  const fastest = state.routes.find((x) => x.kind === "fastest");
+  const tabs = state.routes.map((x) => {
+    const extra = x.minutes - fastest.minutes;
+    return `<button class="tab" role="tab" aria-selected="${x.kind === state.sel}" data-kind="${x.kind}">
+      <b>${LABEL[x.kind]}</b><span class="num ${scoreClass(x.score)}">${x.score}</span>
+      <small>${x.same_as ? `Same as ${LABEL[x.same_as].toLowerCase()}` : `${x.minutes} min${extra > 0 ? ` · +${extra}` : ""}`}</small></button>`;
+  }).join("");
+  const factors = Object.entries(r.factors).map(([k, v]) =>
+    `<div class="bar"><span>${esc(k)}</span><span class="track"><span class="fill" style="display:block;width:${v}%;background:${COLOR[scoreClass(v)]}"></span></span><span>${v}</span></div>`).join("");
+  const notes = [];
+  if (r.same_as) notes.push(`This is the same way as the ${LABEL[r.same_as].toLowerCase()} route.`);
+  if (r.low_data) notes.push("We have little data for these streets, so treat this score as a rough guide.");
+  if (state.rain) notes.push("It's raining, so streets may be emptier than usual.");
+  if (r.weakest && r.weakest.score < 45) notes.push(`Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because of ${r.weakest.why.toLowerCase()}. It's dashed on the map.`);
+  const dusk = r.daylight > 0 && r.daylight < 1;
+  renderSheet(`
+    <div class="tabs" role="tablist" aria-label="Route options">${tabs}</div>
+    <div class="detail">
+      ${gauge(r.score)}
+      <div>
+        <h3>${scoreWord(r.score)}</h3>
+        <div class="stats">
+          <div><b>${r.minutes} min</b>walk</div>
+          <div><b>${fmtDist(r.length_m)}</b>distance</div>
+          <div><b>${r.turns}</b>${r.turns === 1 ? "turn" : "turns"}</div>
+        </div>
+      </div>
+    </div>
+    <ul class="tags">
+      ${r.reasons.map((t) => `<li>${esc(t)}</li>`).join("")}
+      ${r.warnings.map((t) => `<li class="warn">${esc(t)}</li>`).join("")}
+      <li class="info">${r.daylight >= 1 ? "Daylight" : dusk ? "Dusk" : "After dark"}</li>
+    </ul>
+    ${notes.map((n) => `<div class="note">${icon("alert")}<span>${esc(n)}</span></div>`).join("")}
+    <details class="why"><summary>Why this score?</summary><div class="bars">${factors}</div>
+      <p class="muted" style="margin:0 0 12px">Scores compare routes. They mean <b>safer</b>, never guaranteed safe. Trust your instincts.</p></details>
+    <div class="actions">
+      <button class="btn btn-primary" id="startBtn">${icon("walk")}Start walking</button>
+      <button class="btn" id="shareRouteBtn" aria-label="Share this trip">${icon("share")}</button>
+    </div>`);
+  document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => { state.sel = t.dataset.kind; drawRoutes(); renderRoutes(); }));
+  $("#startBtn").onclick = startTrip;
+  $("#shareRouteBtn").onclick = () => startTrip({ shareOnly: true });
+}
+
+// ---------- sheet ----------
+function renderSheet(html) { $("#sheetBody").innerHTML = html; }
+// keep the SOS button floating just above the sheet whatever its height
+new ResizeObserver(([e]) => document.documentElement.style.setProperty("--sheet-h", e.target.offsetHeight + "px")).observe($("#sheet"));
+async function renderIdle() {
+  routeLayer.clearLayers(); havenLayer.clearLayers();
+  const hour = new Date().getHours();
+  const greet = hour < 5 ? "Out late?" : hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
+  const contacts = store.get("contacts", []);
+  const install = state.installPrompt
+    ? `<button class="btn btn-block" id="installBtn">${icon("check")}Install SafeRoute on this phone</button>`
+    : isIOS() && !standalone() ? `<p class="muted">Install: tap <b>Share</b> then <b>Add to Home Screen</b>.</p>` : "";
+  renderSheet(`
+    <div class="sheet-head"><div><h3>${greet}</h3><p class="muted" style="margin:0">Search a place or tap the map to see the safest way there.</p></div></div>
+    ${contacts.length ? "" : `<button class="btn btn-block" id="addContactsBtn">${icon("user")}Add a trusted contact for SOS</button>`}
+    <div id="nearby"></div>
+    ${install}`);
+  $("#addContactsBtn")?.addEventListener("click", openSettings);
+  $("#installBtn")?.addEventListener("click", async () => { state.installPrompt.prompt(); state.installPrompt = null; renderIdle(); });
+  if (state.here) {
+    const list = await api(`/api/havens?near=${state.here.join(",")}&at=${encodeURIComponent(whenParam())}`).catch(() => []);
+    if (list.length && $("#nearby")) {
+      $("#nearby").innerHTML = `<p class="muted" style="margin:12px 0 4px">Open near you right now</p>` + list.slice(0, 3).map((h) =>
+        `<div class="haven"><span class="ico">${icon(h.kind === "police" ? "shield" : "store")}</span><div><b>${esc(h.name)}</b><div class="muted">${fmtDist(h.distance_m)} away</div></div></div>`).join("");
+    }
+  }
+}
+
+// ---------- live trip ----------
+const tripLink = (id) => `${location.origin}/t/?id=${id}`;
+async function createTrip(dest, eta) {
+  const t = await api("/api/trip", { dest, eta, name: store.get("myName", "") });
+  if (state.here) api(`/api/trip/${t.id}`, { key: t.key, lat: state.here[0], lon: state.here[1] }).catch(() => {});
+  return t;
+}
+async function shareText(text, url) {
+  if (navigator.share) {
+    try { await navigator.share({ title: "SafeRoute", text, url }); return true; } catch (e) { if (e.name === "AbortError") return false; }
+  }
+  const contacts = store.get("contacts", []);
+  if (contacts.length) { location.href = smsLink(contacts, `${text} ${url}`); return true; }
+  try { await navigator.clipboard.writeText(`${text} ${url}`); toast("Link copied. Paste it to a friend."); return true; } catch { return false; }
+}
+const smsLink = (contacts, body) => `sms:${contacts.map((c) => c.phone.replace(/[^\d+]/g, "")).join(",")}?&body=${encodeURIComponent(body)}`;
+
+async function startTrip(opts = {}) {
+  const r = state.routes.find((x) => x.kind === state.sel);
+  let t;
+  try { t = await createTrip(state.to, r.minutes); } catch (e) { return toast(e.message); }
+  const shared = shareText(`I'm walking to ${state.toLabel || "my destination"} with SafeRoute, about ${r.minutes} min. Follow me live:`, tripLink(t.id));
+  if (opts.shareOnly) { await shared; return; }
+  startWatching();
+  state.trip = { ...t, route: r, started: Date.now(), offCount: 0, lastMovePt: state.here, lastMoveAt: Date.now(), lastPost: 0, nextCheck: 0 };
+  routeLayer.eachLayer((l) => l.options.color === "#8f8aa0" && routeLayer.removeLayer(l));
+  try { state.wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+  renderTrip();
+  if (state.here) map.setView(state.here, 17);
+}
+
+function routeProgress(pt, coords) {
+  let best = Infinity, idx = 0;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const d = segDist(pt, coords[i], coords[i + 1]);
+    if (d < best) { best = d; idx = i; }
+  }
+  let left = metres(pt, coords[idx + 1] || coords[idx]);
+  for (let i = idx + 1; i < coords.length - 1; i++) left += metres(coords[i], coords[i + 1]);
+  return { off: best, idx, left };
+}
+
+function renderTrip() {
+  const t = state.trip, r = t.route;
+  const p = state.here ? routeProgress(state.here, r.coords) : { left: r.length_m, idx: 0 };
+  const done = Math.max(0, Math.min(100, 100 * (1 - p.left / Math.max(r.length_m, 1))));
+  const ahead = state.here ? r.havens.map((h) => ({ ...h, d: metres(state.here, h.pt) })).sort((a, b) => a.d - b.d)[0] : r.havens[0];
+  renderSheet(`
+    <div class="nav-head"><div style="flex:1"><h3>${Math.max(1, Math.round(p.left / 1.3 / 60))} min · ${fmtDist(p.left)} left</h3>
+      <p class="muted" style="margin:0">to ${esc(state.toLabel || "destination")}</p></div><span class="live">Sharing live</span></div>
+    <div class="progress"><div style="width:${done}%"></div></div>
+    ${ahead ? `<div class="haven"><span class="ico">${icon("store")}</span><div><b>${esc(ahead.name)}</b><div class="muted">Open now${ahead.d ? ` · ${fmtDist(ahead.d)}` : ""}. Step in if anything feels off.</div></div></div>` : ""}
+    <div class="actions"><button class="btn btn-primary" id="safeBtn">${icon("check")}I've arrived safely</button>
+      <button class="btn" id="tripShare" aria-label="Share live link again">${icon("share")}</button></div>
+    <button class="btn btn-ghost btn-block" id="endTrip">End trip</button>`);
+  $("#safeBtn").onclick = () => endTrip(true);
+  $("#endTrip").onclick = () => endTrip(false);
+  $("#tripShare").onclick = () => shareText("Follow my walk live on SafeRoute:", tripLink(t.id));
+}
+
+function onTripPosition(pt) {
+  const t = state.trip, r = t.route;
+  const p = routeProgress(pt, r.coords);
+  if (metres(pt, t.lastMovePt || pt) > 15) { t.lastMovePt = pt; t.lastMoveAt = Date.now(); }
+  if (Date.now() - t.lastPost > 10000) {
+    t.lastPost = Date.now();
+    api(`/api/trip/${t.id}`, { key: t.key, lat: pt[0], lon: pt[1] }).catch(() => {});
+  }
+  if (metres(pt, r.coords[r.coords.length - 1]) < 40) return endTrip(true, true);
+  t.offCount = p.off > 50 ? t.offCount + 1 : 0;
+  if (t.offCount >= 3) { t.offCount = 0; checkIn("You seem to have left your route."); }
+  renderTrip();
+}
+
+setInterval(() => {
+  const t = state.trip;
+  if (!t || !$("#checkin").hidden || !$("#sosOverlay").hidden || Date.now() < t.nextCheck) return;
+  const buffer = store.get("buffer", 10) * 60000;
+  if (Date.now() - t.lastMoveAt > 4 * 60000) checkIn("You haven't moved for a few minutes.");
+  else if (Date.now() - t.started > t.route.minutes * 60000 * 1.5 + buffer) checkIn("You're taking longer than expected.");
+}, 5000);
+
+async function endTrip(safe, auto) {
+  const t = state.trip;
+  if (!t) return;
+  state.trip = null;
+  state.routes = [];
+  api(`/api/trip/${t.id}`, { key: t.key, ended: true }).catch(() => {});
+  state.wakeLock?.release?.().catch(() => {});
+  vibrate(200);
+  const contacts = store.get("contacts", []);
+  renderSheet(`<div class="empty"><div class="badge" style="background:var(--safe-soft);color:var(--safe)">${icon("check")}</div>
+    <div><h3>${safe ? (auto ? "You've arrived" : "Glad you're safe") : "Trip ended"}</h3><p class="muted">Live sharing has stopped.</p></div></div>
+    ${safe && contacts.length ? `<a class="btn btn-primary btn-block" style="margin-top:12px" href="${esc(smsLink(contacts, "I've reached safely 🙂 (sent from SafeRoute)"))}">Tell my contacts I'm safe</a>` : ""}
+    <button class="btn btn-block" style="margin-top:8px" id="newTrip">Plan another trip</button>`);
+  $("#newTrip").onclick = () => { state.to = null; $("#toInput").value = ""; setMarker("to", null); renderIdle(); };
+}
+
+// ---------- check-in ----------
+let checkTimer = null;
+function checkIn(why) {
+  if (state.trip) state.trip.nextCheck = Date.now() + 3 * 60000;
+  $("#checkWhy").textContent = why;
+  $("#checkin").hidden = false;
+  vibrate([300, 150, 300, 150, 300]);
+  beep();
+  let left = 60;
+  $("#checkSecs").textContent = left;
+  clearInterval(checkTimer);
+  checkTimer = setInterval(() => {
+    left -= 1; $("#checkSecs").textContent = left;
+    if (left % 10 === 0) { vibrate(400); beep(); }
+    if (left <= 0) { closeCheckIn(); openSOS(); }
+  }, 1000);
+  $("#checkOk").focus();
+}
+function closeCheckIn() { clearInterval(checkTimer); $("#checkin").hidden = true; }
+$("#checkOk").onclick = () => { closeCheckIn(); if (state.trip) { state.trip.lastMoveAt = Date.now(); state.trip.started = Date.now() - state.trip.route.minutes * 30000; } toast("Okay, we'll keep watching your trip."); };
+$("#checkHelp").onclick = () => { closeCheckIn(); openSOS(true); };
+
+// ---------- SOS ----------
+const sosBtn = $("#sosBtn");
+let holdTimer = null;
+sosBtn.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  sosBtn.classList.add("holding");
+  vibrate(30);
+  holdTimer = setTimeout(() => { sosBtn.classList.remove("holding"); openSOS(); }, 1500);
+});
+["pointerup", "pointerleave", "pointercancel"].forEach((ev) => sosBtn.addEventListener(ev, () => {
+  if (holdTimer && sosBtn.classList.contains("holding")) toast("Press and hold SOS to call for help");
+  clearTimeout(holdTimer); holdTimer = null; sosBtn.classList.remove("holding");
+}));
+sosBtn.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSOS(); } });
+sosBtn.addEventListener("contextmenu", (e) => e.preventDefault());
+
+let sosTimer = null;
+async function openSOS(now = false) {
+  $("#sosOverlay").hidden = false;
+  vibrate([500, 200, 500]);
+  let left = now ? 0 : 5;
+  const tick = () => {
+    $("#sosCount").textContent = left > 0 ? left : "SOS";
+    $("#sosCount").classList.toggle("done", left <= 0);
+    $("#sosSecs").textContent = left;
+    if (left <= 0) { clearInterval(sosTimer); alertContacts(); }
+    left -= 1;
+  };
+  clearInterval(sosTimer);
+  tick();
+  if (!now) sosTimer = setInterval(tick, 1000);
+  $("#sosCancel").focus();
+  startWatching();
+  const pt = await currentPosition(5000);
+  if (pt) {
+    const hv = await api(`/api/havens?near=${pt.join(",")}`).catch(() => []);
+    $("#sosHavens").innerHTML = hv.length ? `<b>Nearest open places</b><br>${hv.slice(0, 3).map((h) => `${esc(h.name)} · ${fmtDist(h.distance_m)}`).join("<br>")}` : "";
+  }
+}
+async function alertContacts() {
+  $("#sosTitle").textContent = "Help is a tap away";
+  $("#sosSub").textContent = "Your contacts get your live location. Call 112 if you're in danger.";
+  const contacts = store.get("contacts", []);
+  const pt = await currentPosition(5000);
+  let link = "";
+  try {
+    if (!state.trip) { const t = await createTrip(pt || state.to, 0); state.sosTrip = t; link = tripLink(t.id); }
+    else link = tripLink(state.trip.id);
+  } catch {}
+  const maps = pt ? `https://maps.google.com/?q=${pt[0].toFixed(6)},${pt[1].toFixed(6)}` : "";
+  const body = `SOS from ${store.get("myName", "me") || "me"}: I need help. ${link ? "Live location: " + link : ""} ${maps}`.trim();
+  if (contacts.length) location.href = smsLink(contacts, body);
+  else shareText(body, link);
+  // keep the SOS trip's dot moving while the screen is open
+  if (state.sosTrip && !state.trip) {
+    clearInterval(state.sosPing);
+    state.sosPing = setInterval(async () => {
+      const p = await currentPosition(5000);
+      if (p && state.sosTrip) api(`/api/trip/${state.sosTrip.id}`, { key: state.sosTrip.key, lat: p[0], lon: p[1] }).catch(() => {});
+    }, 15000);
+  }
+}
+$("#sosAlertNow").onclick = () => { clearInterval(sosTimer); $("#sosCount").textContent = "SOS"; $("#sosCount").classList.add("done"); alertContacts(); };
+$("#sosCancel").onclick = () => {
+  clearInterval(sosTimer); clearInterval(state.sosPing); stopSiren();
+  if (state.sosTrip) { api(`/api/trip/${state.sosTrip.id}`, { key: state.sosTrip.key, ended: true }).catch(() => {}); state.sosTrip = null; }
+  $("#sosOverlay").hidden = true;
+  $("#sosTitle").textContent = "Alerting your contacts";
+  $("#sosSub").innerHTML = 'Sending your live location in <b id="sosSecs">5</b> seconds. Tap cancel if you\'re OK.';
+};
+
+// ---------- sound: siren, beeps, ringtone ----------
+let audio = null, siren = null, ring = null;
+const ctx = () => (audio ||= new (window.AudioContext || window.webkitAudioContext)());
+function beep() {
+  try {
+    const a = ctx(), o = a.createOscillator(), g = a.createGain();
+    o.frequency.value = 880; g.gain.value = 0.3; o.connect(g).connect(a.destination);
+    o.start(); o.stop(a.currentTime + 0.25);
+  } catch {}
+}
+function stopSiren() { if (siren) { siren.stop(); siren = null; } $("#sirenBtn").setAttribute("aria-pressed", "false"); }
+$("#sirenBtn").onclick = () => {
+  if (siren) return stopSiren();
+  const a = ctx(), o = a.createOscillator(), lfo = a.createOscillator(), depth = a.createGain(), g = a.createGain();
+  o.type = "square"; o.frequency.value = 1000;
+  lfo.frequency.value = 1.5; depth.gain.value = 400;
+  lfo.connect(depth).connect(o.frequency);
+  g.gain.value = 1; o.connect(g).connect(a.destination);
+  o.start(); lfo.start();
+  siren = { stop() { o.stop(); lfo.stop(); } };
+  $("#sirenBtn").setAttribute("aria-pressed", "true");
+};
+function startRing() {
+  try {
+    const a = ctx(), g = a.createGain(), o1 = a.createOscillator(), o2 = a.createOscillator();
+    o1.frequency.value = 440; o2.frequency.value = 480; g.gain.value = 0;
+    o1.connect(g); o2.connect(g); g.connect(a.destination);
+    o1.start(); o2.start();
+    const t0 = a.currentTime;
+    for (let i = 0; i < 20; i++) { g.gain.setValueAtTime(0.15, t0 + i * 6); g.gain.setValueAtTime(0, t0 + i * 6 + 2); }
+    ring = { stop() { o1.stop(); o2.stop(); } };
+  } catch {}
+  vibrate([1000, 500, 1000, 500, 1000, 500, 1000]);
+}
+function stopRing() { ring?.stop(); ring = null; vibrate(0); }
+
+// ---------- fake call ----------
+let callTimer = null;
+function fakeCall() {
+  const name = store.get("caller", "Mom");
+  $("#callerName").textContent = name;
+  $("#callerInitial").textContent = name.trim()[0]?.toUpperCase() || "?";
+  $("#callStatus").textContent = "mobile · incoming call";
+  $("#callActions").innerHTML = `<button class="round decline" id="declineCall" aria-label="Decline">${icon("phone")}</button><button class="round accept" id="acceptCall" aria-label="Accept">${icon("phone")}</button>`;
+  $("#fakeCall").hidden = false;
+  startRing();
+  $("#acceptCall").onclick = () => {
+    stopRing();
+    let s = 0;
+    $("#callActions").innerHTML = `<button class="round decline" id="declineCall" aria-label="Hang up">${icon("phone")}</button>`;
+    $("#declineCall").onclick = endCall;
+    clearInterval(callTimer);
+    callTimer = setInterval(() => { s++; $("#callStatus").textContent = `${pad(Math.floor(s / 60))}:${pad(s % 60)}`; }, 1000);
+    $("#callStatus").textContent = "00:00";
+  };
+  $("#declineCall").onclick = endCall;
+}
+function endCall() { stopRing(); clearInterval(callTimer); $("#fakeCall").hidden = true; }
+$("#fakeCallBtn").onclick = () => { $("#sosCancel").click(); fakeCall(); };
+
+// ---------- reports ----------
+const REPORTS = [
+  ["broken_light", "💡", "Broken light"], ["felt_unsafe", "👀", "Felt unsafe"],
+  ["harassment", "🚫", "Harassment"], ["felt_safe", "✅", "Felt safe"],
+];
+$("#reportBtn").onclick = () => {
+  openDrawer(`
+    <h2 id="drawerTitle">Report something</h2>
+    <p>Reports are anonymous and change scores for everyone straight away. They fade after a few weeks.</p>
+    <div class="report-grid">${REPORTS.map(([k, e, l]) => `<button data-type="${k}" aria-pressed="false"><span>${e}</span>${l}</button>`).join("")}</div>
+    <button class="btn btn-primary btn-block" id="reportHere" disabled>${icon("locate")}At my location</button>
+    <button class="btn btn-block" id="reportMap" disabled>${icon("flag")}Pick the spot on the map</button>`);
+  let type = null;
+  document.querySelectorAll(".report-grid button").forEach((b) => (b.onclick = () => {
+    type = b.dataset.type;
+    document.querySelectorAll(".report-grid button").forEach((x) => x.setAttribute("aria-pressed", x === b));
+    $("#reportHere").disabled = $("#reportMap").disabled = false;
+  }));
+  $("#reportHere").onclick = async () => {
+    closeDrawer();
+    reportType = type;
+    const p = await currentPosition();
+    if (p) sendReport(p); else { reportType = null; toast("Couldn't get your location. Pick the spot on the map instead."); }
+  };
+  $("#reportMap").onclick = () => { closeDrawer(); reportType = type; $("#reportBtn").classList.add("on"); toast("Tap where it happened", 6000); };
+};
+async function sendReport(pt) {
+  const type = reportType;
+  reportType = null; $("#reportBtn").classList.remove("on");
+  try {
+    await api("/api/report", { lat: pt[0], lon: pt[1], type });
+    toast("Thanks. Your report is helping others get home safer.");
+    if (heatLayer) loadHeat();
+    if (state.routes.length && !state.trip) maybeRoute();
+  } catch (e) { toast(e.message); }
+}
+
+// ---------- safety map ----------
+async function loadHeat() {
+  const segs = await api("/api/heat?" + new URLSearchParams({ at: whenParam() })).catch(() => []);
+  heatLayer?.remove();
+  heatLayer = L.layerGroup(segs.map(([a, b, c, d, s]) =>
+    L.polyline([[a, b], [c, d]], { color: COLOR[scoreClass(s)], weight: 4, opacity: 0.75, interactive: false }))).addTo(map);
+  routeLayer.eachLayer((l) => l.bringToFront?.());
+}
+$("#heatBtn").onclick = () => {
+  const on = !heatLayer;
+  $("#heatBtn").setAttribute("aria-pressed", on);
+  $("#legend").hidden = !on;
+  if (on) { loadHeat(); toast(`Safety map for ${timeLabel().toLowerCase()}`); } else { heatLayer.remove(); heatLayer = null; }
+};
+
+// ---------- drawer, settings, onboarding ----------
+function openDrawer(html) {
+  $("#drawerBody").innerHTML = html;
+  $("#drawer").hidden = false;
+  $("#drawer").querySelector("input, button:not(.close)")?.focus();
+}
+function closeDrawer() { $("#drawer").hidden = true; }
+$("#drawer").addEventListener("click", (e) => { if (e.target.id === "drawer" || e.target.closest("[data-close]")) closeDrawer(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#drawer").hidden) closeDrawer(); });
+
+function contactsHtml() {
+  const list = store.get("contacts", []);
+  return (list.length ? list.map((c, i) => `<div class="contact"><span class="avatar-s">${esc(c.name[0]?.toUpperCase() || "?")}</span><div><b>${esc(c.name)}</b><small>${esc(c.phone)}</small></div>
+    <button class="icon-btn" data-del="${i}" aria-label="Remove ${esc(c.name)}" style="box-shadow:none">${icon("trash")}</button></div>`).join("")
+    : `<p class="muted">No contacts yet. SOS and check-ins alert the people you add here.</p>`) +
+    `<form class="form" id="contactForm"><input name="name" placeholder="Name" required maxlength="40" aria-label="Contact name">
+     <input name="phone" type="tel" placeholder="Phone" required pattern="[\\d\\s\\+\\-\\(\\)]{6,}" aria-label="Contact phone">
+     <button class="btn btn-primary" type="submit">${icon("user")}Add contact</button></form>`;
+}
+function bindContacts(rerender) {
+  $("#contactForm").onsubmit = (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const list = store.get("contacts", []);
+    list.push({ name: f.get("name").trim(), phone: f.get("phone").trim() });
+    store.set("contacts", list);
+    rerender();
+  };
+  document.querySelectorAll("[data-del]").forEach((b) => (b.onclick = () => {
+    const list = store.get("contacts", []);
+    list.splice(+b.dataset.del, 1);
+    store.set("contacts", list);
+    rerender();
+  }));
+}
+function openSettings() {
+  const sel = (id, val, opts) => `<select id="${id}" class="input">${opts.map(([v, l]) => `<option value="${v}" ${String(v) === String(val) ? "selected" : ""}>${l}</option>`).join("")}</select>`;
+  openDrawer(`
+    <h2 id="drawerTitle">Settings</h2>
+    <h3 style="font-size:16px;margin-top:6px">Trusted contacts</h3>
+    <div id="contactsBox" style="display:grid;gap:8px">${contactsHtml()}</div>
+    <div class="row"><label for="myName">Your name in alerts</label><input id="myName" class="input" style="width:50%" maxlength="40" value="${esc(store.get("myName", ""))}"></div>
+    <div class="row"><label for="buffer">Check in if I'm late by</label>${sel("buffer", store.get("buffer", 10), [[5, "5 min"], [10, "10 min"], [15, "15 min"], [30, "30 min"]])}</div>
+    <div class="row"><label for="caller">Fake caller name</label><input id="caller" class="input" style="width:50%" maxlength="30" value="${esc(store.get("caller", "Mom"))}"></div>
+    <div class="row"><span>Fake call</span><button class="btn" id="fakeIn10">Ring me in 10 s</button></div>
+    <div class="row"><label for="theme">Appearance</label>${sel("theme", store.get("theme", "system"), [["system", "Automatic"], ["light", "Light"], ["dark", "Dark"]])}</div>
+    <div class="row"><span>Your data</span><button class="btn" id="wipe">Delete everything</button></div>
+    <p class="muted">Your contacts and settings stay on this phone. Trip locations are deleted when a trip ends. We never sell location data.</p>`);
+  const rerender = () => { $("#contactsBox").innerHTML = contactsHtml(); bindContacts(rerender); };
+  bindContacts(rerender);
+  $("#myName").onchange = (e) => store.set("myName", e.target.value.trim());
+  $("#caller").onchange = (e) => store.set("caller", e.target.value.trim() || "Mom");
+  $("#buffer").onchange = (e) => store.set("buffer", +e.target.value);
+  $("#theme").onchange = (e) => { store.set("theme", e.target.value); applyTheme(); };
+  $("#fakeIn10").onclick = () => { closeDrawer(); toast("Fake call in 10 seconds. You can lock your screen."); setTimeout(fakeCall, 10000); };
+  $("#wipe").onclick = () => { if (confirm("Delete your contacts and settings from this phone?")) { try { Object.keys(localStorage).filter((k) => k.startsWith("sr.")).forEach((k) => localStorage.removeItem(k)); } catch {} location.reload(); } };
+}
+$("#settingsBtn").onclick = openSettings;
+
+function onboarding(step = 0) {
+  const dots = `<div class="steps">${[0, 1, 2].map((i) => `<i class="${i === step ? "on" : ""}"></i>`).join("")}</div>`;
+  const pages = [
+    `<div class="hero-ico">${icon("shield")}</div><h2 id="drawerTitle">Get there the safer way</h2>
+     <p>SafeRoute checks every street on your walk for lighting, open shops, police, CCTV, isolated stretches and reports from people like you, for the exact time you're leaving.</p>
+     <button class="btn btn-primary btn-block" data-next>Continue</button>`,
+    `<div class="hero-ico">${icon("check")}</div><h2 id="drawerTitle">Private by design</h2>
+     <ul class="promise"><li>${icon("check")}No account needed</li><li>${icon("check")}Contacts never leave your phone</li>
+     <li>${icon("check")}Live location only while you share a trip, deleted when it ends</li><li>${icon("check")}We never sell your data</li></ul>
+     <button class="btn btn-primary btn-block" data-next>Continue</button>`,
+    `<div class="hero-ico">${icon("user")}</div><h2 id="drawerTitle">Who should we alert?</h2>
+     <p>When you hold SOS or miss a check-in, SafeRoute texts your live location to these people.</p>
+     <div id="contactsBox" style="display:grid;gap:8px">${contactsHtml()}</div>
+     <button class="btn btn-primary btn-block" id="finishOnboard">${icon("locate")}Done, use my location</button>
+     <button class="btn btn-ghost btn-block" id="skipOnboard">Skip for now</button>`,
+  ];
+  openDrawer(pages[step] + dots);
+  $("#drawer .close").hidden = step < 2;
+  $("[data-next]")?.addEventListener("click", () => onboarding(step + 1));
+  if (step === 2) {
+    const rerender = () => { $("#contactsBox").innerHTML = contactsHtml(); bindContacts(rerender); };
+    bindContacts(rerender);
+    const finish = (locate) => { store.set("onboarded", true); $("#drawer .close").hidden = false; closeDrawer(); if (locate) $("#locateBtn").click(); renderIdle(); };
+    $("#finishOnboard").onclick = () => finish(true);
+    $("#skipOnboard").onclick = () => finish(false);
+  }
+}
+
+// ---------- install (PWA) ----------
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
+const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); state.installPrompt = e; if (!state.to) renderIdle(); });
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+
+// ---------- start ----------
+renderIdle();
+if (!store.get("onboarded", false)) onboarding();
+else if (navigator.permissions) navigator.permissions.query({ name: "geolocation" }).then((p) => { if (p.state === "granted") { startWatching(); currentPosition().then(() => !state.to && renderIdle()); } }).catch(() => {});
+const params = new URLSearchParams(location.search);
+if (params.get("sos") === "1") openSOS();

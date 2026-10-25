@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SafeRoute</title>
+<meta name="theme-color" content="#6d4aff">
+<meta name="description" content="Walking directions that pick the safest way, not just the fastest.">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="/theme.css">
+<link rel="stylesheet" href="/app/app.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-locate" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="currentColor"/><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 1v3M12 20v3M1 12h3M20 12h3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="m3 13 9 5 9-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+    <symbol id="i-flag" viewBox="0 0 24 24"><path d="M5 21V4m0 0h11l-2 4 2 4H5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 2 4 5v6c0 5 3.5 9.5 8 11 4.5-1.5 8-6 8-11V5l-8-3Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="m9 12 2 2 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-phone" viewBox="0 0 24 24"><path d="M5 3h4l2 5-2.5 1.5a11 11 0 0 0 6 6L16 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 5a2 2 0 0 1 2-2Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+    <symbol id="i-share" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="6" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="18" cy="19" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4" stroke="currentColor" stroke-width="2"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" fill="none" stroke="currentColor" stroke-width="1.6"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v5l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-walk" viewBox="0 0 24 24"><circle cx="13" cy="4" r="2" fill="currentColor"/><path d="m9 21 2-6 3 3v3M7 12l2-4h4l3 4M11 8l-1 5 3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-siren" viewBox="0 0 24 24"><path d="M7 18v-6a5 5 0 0 1 10 0v6M5 21h14v-3H5v3ZM12 2v2M4.2 5.2l1.4 1.4M19.8 5.2l-1.4 1.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M4 21a8 8 0 0 1 16 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2 20h20L12 3Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v4M12 17v.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-store" viewBox="0 0 24 24"><path d="M3 9 5 4h14l2 5M4 9v11h16V9M3 9h18M9 20v-6h6v6" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+    <symbol id="i-swap" viewBox="0 0 24 24"><path d="M7 4v16m0 0-3-3m3 3 3-3M17 20V4m0 0-3 3m3-3 3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+
+<main id="map" aria-label="Map"></main>
+
+<!-- Search -->
+<section class="topbar" aria-label="Plan a route">
+  <div class="search-card">
+    <div class="field">
+      <span class="dot from" aria-hidden="true"></span>
+      <input id="fromInput" placeholder="Your location" autocomplete="off" aria-label="Start">
+    </div>
+    <div class="field">
+      <span class="dot to" aria-hidden="true"></span>
+      <input id="toInput" placeholder="Where to?" autocomplete="off" aria-label="Destination">
+    </div>
+    <button class="icon-btn swap" id="swapBtn" aria-label="Swap start and destination"><svg><use href="#i-swap"/></svg></button>
+    <ul id="results" class="results" role="listbox" hidden></ul>
+  </div>
+  <div class="chips">
+    <button class="chip" id="timeChip"><svg><use href="#i-clock"/></svg><span id="timeLabel">Leave now</span></button>
+    <input type="datetime-local" id="timeInput" class="sr-only" aria-label="Departure time">
+    <span class="spacer"></span>
+    <button class="chip round-chip" id="locateBtn" aria-label="Show my location"><svg><use href="#i-locate"/></svg></button>
+    <button class="chip round-chip" id="heatBtn" aria-label="Safety map" aria-pressed="false"><svg><use href="#i-layers"/></svg></button>
+    <button class="chip round-chip" id="reportBtn" aria-label="Report something"><svg><use href="#i-flag"/></svg></button>
+    <button class="chip round-chip" id="settingsBtn" aria-label="Settings and trusted contacts"><svg><use href="#i-settings"/></svg></button>
+  </div>
+</section>
+<div id="legend" class="legend" hidden>
+  <span><i style="background:var(--safe)"></i>Safer</span><span><i style="background:var(--caution)"></i>Take care</span><span><i style="background:var(--risk)"></i>Avoid</span>
+</div>
+
+<button id="sosBtn" class="sos" aria-label="SOS. Press and hold for emergency help">
+  <svg class="ring" viewBox="0 0 72 72" aria-hidden="true"><circle cx="36" cy="36" r="33"/></svg>
+  <span>SOS</span>
+</button>
+
+<!-- Bottom sheet -->
+<section id="sheet" class="sheet" aria-live="polite">
+  <div class="grabber" aria-hidden="true"></div>
+  <div id="sheetBody"></div>
+</section>
+
+<!-- SOS overlay -->
+<div id="sosOverlay" class="overlay sos-overlay" role="alertdialog" aria-modal="true" aria-labelledby="sosTitle" hidden>
+  <div class="sos-inner">
+    <div class="sos-count" id="sosCount">5</div>
+    <h2 id="sosTitle">Alerting your contacts</h2>
+    <p id="sosSub">Sending your live location in <b id="sosSecs">5</b> seconds. Tap cancel if you're OK.</p>
+    <div class="sos-actions">
+      <a class="btn btn-block sos-call" href="tel:112"><svg><use href="#i-phone"/></svg>Call 112</a>
+      <button class="btn btn-block" id="sosAlertNow"><svg><use href="#i-share"/></svg>Alert contacts now</button>
+      <button class="btn btn-block" id="sirenBtn" aria-pressed="false"><svg><use href="#i-siren"/></svg>Loud siren</button>
+      <button class="btn btn-block" id="fakeCallBtn"><svg><use href="#i-phone"/></svg>Fake incoming call</button>
+    </div>
+    <div id="sosHavens" class="sos-havens"></div>
+    <button class="btn btn-ghost btn-block sos-cancel" id="sosCancel">I'm OK, cancel</button>
+  </div>
+</div>
+
+<!-- Fake call -->
+<div id="fakeCall" class="overlay fake-call" role="dialog" aria-modal="true" aria-label="Incoming call" hidden>
+  <div class="caller">
+    <div class="avatar" id="callerInitial">M</div>
+    <h2 id="callerName">Mom</h2>
+    <p id="callStatus">mobile · incoming call</p>
+  </div>
+  <div class="call-actions" id="callActions">
+    <button class="round decline" id="declineCall" aria-label="Decline"><svg><use href="#i-phone"/></svg></button>
+    <button class="round accept" id="acceptCall" aria-label="Accept"><svg><use href="#i-phone"/></svg></button>
+  </div>
+</div>
+
+<!-- Check-in -->
+<div id="checkin" class="overlay dim" role="alertdialog" aria-modal="true" aria-labelledby="checkTitle" hidden>
+  <div class="modal">
+    <div class="modal-icon warn"><svg><use href="#i-alert"/></svg></div>
+    <h2 id="checkTitle">Are you OK?</h2>
+    <p id="checkWhy">You've left your route.</p>
+    <p class="muted">If you don't answer in <b id="checkSecs">60</b> s, we'll start SOS.</p>
+    <button class="btn btn-primary btn-block" id="checkOk"><svg><use href="#i-check"/></svg>I'm OK</button>
+    <button class="btn btn-danger btn-block" id="checkHelp">I need help</button>
+  </div>
+</div>
+
+<!-- Settings / onboarding -->
+<div id="drawer" class="overlay dim" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" hidden>
+  <div class="modal drawer">
+    <button class="icon-btn close" data-close aria-label="Close"><svg><use href="#i-close"/></svg></button>
+    <div id="drawerBody"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/app/app.js"></script>
+</body>
+</html>
