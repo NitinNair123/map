@@ -1,0 +1,27 @@
+name: NCR map check
+on:
+  push:
+    branches: [claude/project-thread-9zvevn]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install osmium
+      - run: python -m unittest test_safety
+  ncr:
+    # the full import downloads about 575 MB and takes 10-15 minutes, so it runs only when asked
+    if: contains(github.event.head_commit.message, '[ncr-check]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install osmium
+      - run: python -u import_osm.py
+      - run: python -u check_ncr.py
