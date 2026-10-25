@@ -22,10 +22,11 @@ TABLES = [  # "Districtwise Crime Against Women 2017 onwards" and "... 2024 Onwa
 ]
 BOX = (28.2, 76.8, 28.95, 77.75)  # Delhi NCR
 STATES = {"Delhi", "NCT of Delhi", "Uttar Pradesh", "Haryana"}
-# The two street-harassment heads: assault to outrage modesty (IPC 354, BNS 74-76) and insulting modesty (IPC 509,
-# BNS 79). The 2024 table names its columns differently, so both spellings are listed.
+# The two street-harassment heads: assault to outrage modesty (IPC 354 with 354A-D, BNS 74-78) and insulting modesty
+# (IPC 509, BNS 79). The 2024 table splits 354 into five heads with new names, so both spellings are listed.
 COUNTS = {"assault": ("assault_on_womenabove_18", "assault_on_women_below_18", "assault_outrage_modesty_women",
-                      "assault_women_outrage_modesty_girls", "assault_criminal_force_disrobe_women", "assault_criminal_force_disrobe_girls"),
+                      "assault_women_outrage_modesty_girls", "assault_criminal_force_disrobe_women", "assault_criminal_force_disrobe_girls",
+                      "sexual_harassment_women", "sexual_harassment_girls", "voyeurism_women", "voyeurism_girls", "stalking_women", "stalking_girls"),
           "insult": ("insult_to_the_modesty_of_women_above_18", "insult_to_the_modesty_of_women_below_18", "insult_modesty_women",
                      "insult_modesty_women_girls")}
 UA = {"User-Agent": "SafeRoute/1.0 (student safety app; github.com/NitinNair123/map)"}
