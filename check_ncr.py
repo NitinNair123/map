@@ -29,7 +29,8 @@ for name, (a, b) in TRIPS.items():
     print(f"\n== {name}: {len(e)} street segments, area loaded in {loaded:.1f}s, routes in {took:.2f}s")
     print(f"   with lanes {sum(1 for x in e if x['lanes'])}, maxspeed {sum(1 for x in e if x['maxspeed'])},"
           f" surface {sum(1 for x in e if x['surface'])}, near a crossing {sum(1 for x in e if x['near']['crossing'])},"
-          f" near a guard post {sum(1 for x in e if x['near']['guard'])}; buildings {sum(area.building_cells.values())}")
+          f" near a guard post {sum(1 for x in e if x['near']['guard'])}; buildings {sum(area.building_cells.values())},"
+          f" CCTV cameras {sum(p['kind'] == 'cctv' for p in area.pois)}")
     for r in routes:
         print(f"   {r['kind']:9} score {r['score']:>3} confidence {r['confidence']:.2f} ({r['confidence_level']})"
               f" {r['length_m']} m, rank {r['rank']} of {r['checked']}, same as {r['same_as']}, unrated {r['unrated_pct']}%")
