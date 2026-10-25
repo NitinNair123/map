@@ -672,10 +672,11 @@ class Area:
             cctv.update(e["near"]["cctv"])
             mapped.update(e["near"]["place"] + e["near"]["haven"])
             unknown_hours.update(i for i in e["near"]["place"] + e["near"]["haven"] if place_open[i] is None)
-            dark_here = bool(feats["lighting"]) and feats["lighting"]["value"] < 0.5 and lt < 1
-            if feats["lighting"]:
-                lit_len += e["length"] if feats["lighting"]["value"] >= 0.5 else 0
-                dark_len += e["length"] if feats["lighting"]["value"] < 0.5 else 0
+            street_light = feats["lighting"] and feats["lighting"]["street"]
+            dark_here = bool(street_light) and street_light["value"] < 0.5 and lt < 1
+            if street_light:
+                lit_len += e["length"] if street_light["value"] >= 0.5 else 0
+                dark_len += e["length"] if street_light["value"] < 0.5 else 0
             if dark_here and dark_from is None:
                 dark_from = done
             elif not dark_here and dark_from is not None:

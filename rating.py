@@ -107,6 +107,17 @@ def votes(reports):
     return list(latest.values())
 
 
+def street_lighting(area, e, reports):
+    """Lighting evidence about this street itself: reports, the OSM lit tag and mapped lamps, without satellite brightness."""
+    lighting = list(reports)
+    if e["lit"] in LIT_TAGS:
+        lighting.append((LIT_TAGS[e["lit"]], QUALITY["osm_tag"], "OpenStreetMap lit tag"))
+    if e["near"]["lamp"]:
+        src = {area.pois[i].get("source", "OpenStreetMap") for i in e["near"]["lamp"]}
+        lighting.append((e["lamp_level"], QUALITY["lamps"], f"Street lamps ({', '.join(sorted(src))})"))
+    return lighting
+
+
 def factors(area, e, when, light, now=None):
     """Every factor for one street segment at one time, each None when nothing measures it."""
     now = now or time.time()
@@ -122,15 +133,11 @@ def factors(area, e, when, light, now=None):
                 continue
             obs[factor].append((value, QUALITY["observed"] * freshness(r["ts"], now), r.get("source", "Reports from people walking here")))
 
-    lighting = list(obs["lighting"])
-    if e["lit"] in LIT_TAGS:
-        lighting.append((LIT_TAGS[e["lit"]], QUALITY["osm_tag"], "OpenStreetMap lit tag"))
-    if near["lamp"]:
-        src = {area.pois[i].get("source", "OpenStreetMap") for i in near["lamp"]}
-        lighting.append((e["lamp_level"], QUALITY["lamps"], f"Street lamps ({', '.join(sorted(src))})"))
-    if e.get("nightlight") is not None:
-        lighting.append((e["nightlight"], QUALITY["nightlight"], "NASA night lights 2016 (area)"))
+    street = street_lighting(area, e, obs["lighting"])
+    lighting = street + ([(e["nightlight"], QUALITY["nightlight"], "NASA night lights 2016 (area)")] if e.get("nightlight") is not None else [])
     out["lighting"] = combine(lighting)
+    if out["lighting"]:
+        out["lighting"]["street"] = combine(street)  # what "% lit" counts: area brightness alone can't say a street is lit
 
     activity = list(obs["activity"])
     places = near["place"] + near["haven"]

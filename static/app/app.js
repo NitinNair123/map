@@ -443,7 +443,7 @@ function renderRoutes() {
     ${r.compared && r.compared.length > 1 ? `<details class="why"><summary>${r.rank === 1 ? "Why this is the safest" : `Why this ranks #${r.rank}`} · ${r.checked} ways scanned</summary>
       <ul class="why-list">${(r.why || []).map((t) => `<li class="${t.startsWith("But:") ? "warn" : ""}">${esc(t)}</li>`).join("")}</ul>
       <div class="compare"><table><thead><tr><th>#</th><th>Score</th><th>Time</th><th>Lit</th><th>Open</th><th>Unrated</th></tr></thead><tbody>
-      ${r.compared.map((c) => `<tr class="${c.rank === r.rank ? "this" : ""}"><td>${c.rank}</td><td><b class="${c.confidence_level === "none" ? "" : scoreClass(c.score)}">${c.confidence_level === "none" ? "–" : c.score}</b></td><td>${c.minutes} min</td><td>${c.stats.lit_pct ?? "–"}%</td><td>${c.stats.open_now ?? 0}</td><td>${c.unrated_pct}%</td></tr>`).join("")}
+      ${r.compared.map((c) => `<tr class="${c.rank === r.rank ? "this" : ""}"><td>${c.rank}</td><td><b class="${c.confidence_level === "none" ? "" : scoreClass(c.score)}">${c.confidence_level === "none" ? "–" : c.score}</b></td><td>${c.minutes} min</td><td>${c.stats.lit_pct || c.stats.dark_pct ? `${c.stats.lit_pct}%` : "–"}</td><td>${c.stats.open_now ?? 0}</td><td>${c.unrated_pct}%</td></tr>`).join("")}
       </tbody></table></div></details>` : ""}
     ${(state.area || []).map((a) => `<details class="why"><summary>Past crime in ${esc(a.district)} · ${a.year}</summary>
       <p style="margin:0 0 8px">Police recorded <b>${a.assault}</b> cases of assault on women (IPC 354, BNS 74-78) and <b>${a.insult}</b> of insulting a woman's modesty (IPC 509, BNS 79) across the whole district in ${a.year}${a.previous ? `, against ${a.previous.assault} and ${a.previous.insult} in ${a.previous.year}` : ""}.</p>

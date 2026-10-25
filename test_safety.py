@@ -267,6 +267,7 @@ class EvidenceTest(unittest.TestCase):
         feats = self.rate(Area({"elements": self.els + [px]}))[2]
         self.assertEqual(feats["lighting"]["quality"], rating.QUALITY["nightlight"])
         self.assertAlmostEqual(feats["lighting"]["value"], 0.8)
+        self.assertIsNone(feats["lighting"]["street"])  # a bright area doesn't make this street count as lit
 
     def test_timetable_says_if_a_stop_is_served_now(self):
         deps = [[0] * 24 for _ in range(7)]
