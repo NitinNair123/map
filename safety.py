@@ -410,7 +410,7 @@ class Area:
     def ratings(self, when, rain=False):
         """(score, confidence) for every segment at this time."""
         light = self.light(when)
-        key = (when.weekday(), when.hour, round(light, 1), rain)
+        key = (when.weekday(), when.hour, when.minute, round(light, 1), rain)  # to the minute: opening hours end at any minute
         if key not in self._cache:
             if len(self._cache) > 200:
                 self._cache.clear()
@@ -479,7 +479,8 @@ class Area:
         paths = self.candidates(src, dst, credits)
         fastest_len = sum(self.edges[ei]["length"] for _, ei in paths[0]) or 1  # candidates come shortest first
         scored = [self._summary("", p, rated, when, fastest_len, dst) for p in paths]
-        ranked = sorted(scored, key=lambda r: (-r["score"], r["length_m"]))
+        # unrated length counts against a route, so a mostly unknown way is never ranked above a measured one
+        ranked = sorted(scored, key=lambda r: (-r["score"] * (100 - r["unrated_pct"]) / 100, r["length_m"]))
         fastest = scored[0]
         safest = ranked[0]
         balanced = next(r for r in ranked if r["length_m"] <= BALANCED_DETOUR * fastest["length_m"] or r is fastest)

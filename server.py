@@ -8,7 +8,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -30,12 +30,26 @@ SURVEY_PATH = os.path.join(DATA_DIR, "survey.csv")
 GTFS_DIR = os.path.join(DATA_DIR, "gtfs")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 TRIP_TTL = 12 * 3600
-MAX_TRIPS = 2000
+MAX_TRIPS = 20000
+PER_ADDRESS_HOUR = {"trip": 60, "report": 60}  # one network address can be many phones (mobile carriers share them)
 lock = threading.Lock()
 # shortcut: live trips live in memory and vanish on restart, move to Redis when running more than one server
 trips = {}
 weather = {}  # rounded (lat, lon) -> {"rain", "checked"}
 geocode_cache = OrderedDict()
+# shortcut: limits live in memory and reset on restart; fine for one server process
+recent = defaultdict(list)  # (kind, address) -> request times in the last hour
+
+
+def allow(kind, address):
+    """True while this address made fewer than PER_ADDRESS_HOUR[kind] such requests in the last hour."""
+    now = time.time()
+    with lock:
+        times = recent[(kind, address)] = [t for t in recent[(kind, address)] if now - t < 3600]
+        if len(times) >= PER_ADDRESS_HOUR[kind]:
+            return False
+        times.append(now)
+        return True
 
 
 def load_csv(path, types=None, **extra):
@@ -52,7 +66,7 @@ def load_csv(path, types=None, **extra):
                     raise ValueError(f"unknown type {kind!r}")
                 out.append({"lat": float(row["lat"]), "lon": float(row["lon"]), "type": kind,
                             "hour": when.hour, "weekday": when.weekday(), "ts": when.timestamp(), **extra})
-            except (KeyError, ValueError) as e:
+            except (KeyError, ValueError, TypeError, AttributeError) as e:  # a missing column reads as None
                 print(f"{os.path.basename(path)} line {n} skipped: {e}")
     return out
 
@@ -197,6 +211,13 @@ class Handler(SimpleHTTPRequestHandler):
             raise ValueError("expected an object")
         return body
 
+    def address(self):
+        """The caller's address. Behind a tunnel every request comes from this machine, and the tunnel adds the real one last."""
+        forwarded = self.headers.get("X-Forwarded-For")
+        if forwarded and self.client_address[0] in ("127.0.0.1", "::1"):
+            return forwarded.split(",")[-1].strip()
+        return self.client_address[0]
+
     def when(self, q):
         return datetime.fromisoformat(q["at"][0]) if q.get("at", [""])[0] else datetime.now()
 
@@ -260,7 +281,12 @@ class Handler(SimpleHTTPRequestHandler):
         lat, lon = latlon((body["lat"], body["lon"]))
         if body["type"] not in REPORT_TYPES:
             raise ValueError("unknown report type")
-        r = REPORTS.add(lat, lon, body["type"], self.client_address[0])
+        # the walker's own clock, so "deserted at 22:00" stays 22:00 on a server in another time zone
+        seen = datetime.fromisoformat(body["at"]) if body.get("at") else datetime.now()
+        if abs(seen.timestamp() - time.time()) > 3600:
+            raise ValueError("report time is not now")
+        address = self.address()
+        r = allow("report", address) and REPORTS.add(lat, lon, body["type"], str(body.get("device") or address)[:64], seen)
         if not r:
             return self.send_json({"error": "Thanks! You've sent a lot of reports this hour, please try again later."}, 429)
         store.add_report(r)
@@ -268,6 +294,8 @@ class Handler(SimpleHTTPRequestHandler):
 
     def start_trip(self, body):
         dest = latlon(body["dest"])
+        if not allow("trip", self.address()):
+            return self.send_json({"error": "Too many live trips from this network, try again shortly."}, 429)
         with lock:
             expire_trips()
             if len(trips) >= MAX_TRIPS:

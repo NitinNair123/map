@@ -669,7 +669,7 @@ async function openSOS(now = false) {
   startWatching();
   const pt = await currentPosition(5000);
   if (pt) {
-    const hv = await api(`/api/havens?near=${pt.join(",")}`).catch(() => []);
+    const hv = await api(`/api/havens?near=${pt.join(",")}&at=${encodeURIComponent(isoLocal(new Date()))}`).catch(() => []);
     $("#sosHavens").innerHTML = hv.length ? `<b>Nearest open places</b><br>${hv.slice(0, 3).map((h) => `${esc(h.name)} · ${fmtDist(h.distance_m)}`).join("<br>")}` : "";
   }
 }
@@ -796,11 +796,17 @@ $("#reportBtn").onclick = () => {
   };
   $("#reportMap").onclick = () => { closeDrawer(); reportType = type; $("#reportBtn").classList.add("on"); toast("Tap where it happened", 6000); };
 };
+// a random id made once on this phone, so people sharing one network address still count as separate reporters
+function deviceId() {
+  let id = store.get("device", "");
+  if (!id) { id = crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2) + Date.now(); store.set("device", id); }
+  return id;
+}
 async function sendReport(pt) {
   const type = reportType;
   reportType = null; $("#reportBtn").classList.remove("on");
   try {
-    await api("/api/report", { lat: pt[0], lon: pt[1], type });
+    await api("/api/report", { lat: pt[0], lon: pt[1], type, at: isoLocal(new Date()), device: deviceId() });
     toast("Thanks. Your report is helping others get home safer.");
     if (state.heatOn) loadHeat();
     if (state.routes.length && !state.trip) maybeRoute();

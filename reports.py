@@ -43,15 +43,16 @@ class Reports:
                 r["hour"], r["weekday"] = t.hour, t.weekday()
         return out
 
-    def add(self, lat, lon, kind, address):
-        """The new report, or None when this person already sent PER_HOUR reports in the last hour."""
-        by = hashlib.sha256((self.salt + address).encode()).hexdigest()[:16]
-        now = datetime.now()
+    def add(self, lat, lon, kind, sender, seen=None):
+        """The new report, or None when this sender (device id or address) already sent PER_HOUR in the last hour.
+        seen is the reporter's local time, which sets the hour and weekday the report describes."""
+        by = hashlib.sha256((self.salt + sender).encode()).hexdigest()[:16]
+        when = seen or datetime.now()
         with self.lock:
             sent = self.db.execute("SELECT COUNT(*) FROM reports WHERE by = ? AND ts > ?", (by, time.time() - 3600)).fetchone()[0]
             if sent >= PER_HOUR:
                 return None
-            r = {"lat": lat, "lon": lon, "type": kind, "ts": now.timestamp(), "hour": now.hour, "weekday": now.weekday(), "by": by}
+            r = {"lat": lat, "lon": lon, "type": kind, "ts": time.time(), "hour": when.hour, "weekday": when.weekday(), "by": by}
             self.db.execute("INSERT INTO reports VALUES (:lat, :lon, :type, :ts, :hour, :weekday, :by)", r)
             self.db.commit()
         return r

@@ -334,7 +334,7 @@ class TileStore:
         return os.path.join(self.folder, f"{t[0]}_{t[1]}{'.' + source if source else ''}.json")
 
     def _fresh(self, t, source=""):
-        if t in self.extracted and source in ("", "roads"):
+        if t in self.extracted and source == "":
             return True
         p = self._path(t, source)
         return os.path.exists(p) and time.time() - os.path.getmtime(p) < SOURCE_MAX_AGE.get(source, TILE_MAX_AGE)
@@ -391,7 +391,8 @@ class TileStore:
             if key in self.areas:
                 self.areas.move_to_end(key)
                 return self.areas[key]
-        main = "" if key & self.extracted else self._main  # imported OSM streets win over Overture roads
+        # imported OSM streets when the whole area is imported; otherwise one street source for every tile, so the network stays connected
+        main = "" if key <= self.extracted else self._main
         jobs = [(c, main) for c in self._missing(key, main)]
         jobs += [(c, name) for name in self.extras if name not in self.background for c in self._missing(key, name)]
         with ThreadPoolExecutor(3) as ex:  # Overpass rate-limits per IP, so few parallel requests

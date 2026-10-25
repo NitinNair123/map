@@ -40,6 +40,12 @@ def fixture():
     return {"elements": els}
 
 
+def overture_fixture():
+    """The fixture streets as Overture segments, linked to their OSM ways."""
+    return {"elements": [{**el, "id": f"ovr{el['id']}", "tags": {"highway": el["tags"]["highway"], "overture_road": "yes", "osm_way": el["id"]}}
+                         for el in fixture()["elements"] if el["type"] == "way"]}
+
+
 class RouteTest(unittest.TestCase):
     def setUp(self):
         self.area = Area(fixture())
@@ -209,6 +215,29 @@ class NoGuessingTest(unittest.TestCase):
         self.assertEqual(rating.credit(90, 0.8), 90)
 
 
+    def test_mostly_unrated_route_is_not_safest(self):
+        m = (28.0, 77.0004)
+        els = [way(1, [1, 5], [A, m], highway="secondary", lit="yes"),
+               way(2, [5, 2], [m, B], highway="footway"),  # no lighting data, a shop with no hours: not rated
+               node(50, (28.0001, 77.002), shop="kiosk"),
+               way(3, [1, 10, 11, 12, 13, 2], NORTH, highway="residential", lit="yes")]
+        for i, ((a1, o1), (a2, o2)) in enumerate(zip(NORTH, NORTH[1:])):
+            els.append(node(200 + i, ((a1 + a2) / 2 + 0.0004, (o1 + o2) / 2), shop="convenience", opening_hours="Mo-Su 08:00-21:00"))
+        safest = Area({"elements": els}).routes(A, B, NIGHT)[0]
+        self.assertEqual(safest["unrated_pct"], 0)  # the measured street, not the 87% unknown shortcut
+
+    def test_closing_time_counts_to_the_minute(self):
+        els = fixture()
+        for el in els["elements"]:
+            if el["tags"].get("opening_hours") == "Mo-Su 08:00-23:00":
+                el["tags"]["opening_hours"] = "Mo-Su 08:00-22:30"
+        late = NIGHT.replace(minute=45)
+        fresh = Area(els).routes(A, B, late)[0]["score"]
+        warm = Area(els)
+        warm.routes(A, B, NIGHT)  # 22:00, shops still open
+        self.assertEqual(warm.routes(A, B, late)[0]["score"], fresh)
+
+
 class EvidenceTest(unittest.TestCase):
     def setUp(self):
         self.els = [way(1, [1, 2], [A, B], highway="residential"), node(9, (28.01, 77.01), amenity="police")]
@@ -292,13 +321,7 @@ class OpenDataTest(unittest.TestCase):
 
 
     def test_fast_roads_with_osm_detail_later(self):
-        def roads(*a):  # the fixture streets as Overture segments, linked to their OSM ways
-            out = []
-            for el in fixture()["elements"]:
-                if el["type"] == "way":
-                    tags = {"highway": el["tags"]["highway"], "overture_road": "yes", "osm_way": el["id"]}
-                    out.append({**el, "id": f"ovr{el['id']}", "tags": tags})
-            return {"elements": out}
+        roads = lambda *a: overture_fixture()
         osm_calls = []
         def osm(*a):
             osm_calls.append(a)
@@ -327,6 +350,26 @@ class ImportTest(unittest.TestCase):
         fail = lambda *a: self.fail("imported tiles must not be fetched")
         area = TileStore(d, fetch=fail, roads=fail).for_trip(A, B)
         self.assertEqual(len(area.edges), len(Area(fixture()).edges))
+
+    def test_trip_half_inside_the_import_keeps_its_streets(self):
+        import json
+        from tiles import write_tiles
+        d = tempfile.mkdtemp()
+        tiles = sorted(tiles_near(A, B, 400))
+        write_tiles(d, fixture()["elements"], tiles[:1])
+        with open(os.path.join(d, "extract.json"), "w") as f:
+            json.dump({"tiles": tiles[:1]}, f)
+        asked = []
+        def roads(*box):
+            asked.append(box)
+            return overture_fixture()
+        def overpass_down(*a):
+            raise ConnectionError("Map data servers are busy")
+        store = TileStore(d, fetch=overpass_down, roads=roads)
+        area = store.for_trip(A, B)
+        store.pool.shutdown(wait=True)
+        self.assertTrue(asked)  # the tiles outside the import come from Overture, not the slow Overpass
+        self.assertEqual(len(area.edges), len(Area(fixture()).edges))  # one connected street network, no duplicates
 
     def test_import_matches_overpass_selection(self):
         import import_osm
@@ -461,6 +504,20 @@ class CollectionTest(unittest.TestCase):
         with open(os.path.join(d, "reports.db"), "rb") as f:
             self.assertNotIn(b"1.2.3.4", f.read())
         self.assertEqual(len({r["by"] for r in db.all() if r["by"]}), 1)
+
+
+class ReportSenderTest(unittest.TestCase):
+    def test_each_phone_counts_once_and_keeps_its_own_hour(self):
+        from reports import Reports
+        db = Reports(os.path.join(tempfile.mkdtemp(), "reports.db"))
+        seen = datetime(2026, 10, 25, 22, 10, tzinfo=IST)  # a server on UTC would call this 16:40
+        r = db.add(28.0, 77.0, "deserted", "phone-a", seen)
+        self.assertEqual((r["hour"], r["weekday"]), (22, 6))
+        db.add(28.0, 77.0, "deserted", "phone-b", seen)  # same network address, another phone
+        self.assertEqual(len(rating.votes(db.all())), 2)
+        for _ in range(9):
+            db.add(28.0, 77.0, "deserted", "phone-a", seen)
+        self.assertIsNone(db.add(28.0, 77.0, "deserted", "phone-a", seen))  # 10 an hour per phone
 
 
 if __name__ == "__main__":
