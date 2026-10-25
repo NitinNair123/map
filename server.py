@@ -14,6 +14,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
+import crime
 import gtfs
 from import_osm import search as offline_search
 from rating import REPORT_TYPES
@@ -27,6 +28,7 @@ SEARCH_DB = os.path.join(DATA_DIR, "tiles", "search.db")
 REIMPORT_DAYS = 30
 INCIDENTS_PATH = os.path.join(DATA_DIR, "incidents.csv")
 SURVEY_PATH = os.path.join(DATA_DIR, "survey.csv")
+CRIME = crime.load()  # data/crime/districts.json from python crime.py, or None
 GTFS_DIR = os.path.join(DATA_DIR, "gtfs")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 TRIP_TTL = 12 * 3600
@@ -246,7 +248,8 @@ class Handler(SimpleHTTPRequestHandler):
                 a, b = latlon(q["from"][0]), latlon(q["to"][0])
                 when = self.when(q)
                 rain = is_raining(a, when)
-                return self.send_json({"routes": store.for_trip(a, b).routes(a, b, when, rain), "rain": rain})
+                return self.send_json({"routes": store.for_trip(a, b).routes(a, b, when, rain), "rain": rain,
+                                       "area": crime.around(CRIME, [a, b])})
             if u.path.startswith("/api/trip/"):
                 t = trips.get(u.path.rsplit("/", 1)[1])
                 if not t:

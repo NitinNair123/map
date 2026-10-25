@@ -263,7 +263,7 @@ async function maybeRoute() {
     const q = new URLSearchParams({ from: from.join(","), to: state.to.join(","), at: whenParam() });
     const res = await api("/api/route?" + q);
     if (seq !== routeSeq) return; // the user picked something else meanwhile
-    state.routes = res.routes; state.rain = res.rain; state.routeFrom = from;
+    state.routes = res.routes; state.rain = res.rain; state.area = res.area || []; state.routeFrom = from;
     state.sel = "safest";
     renderRoutes();
     drawRoutes(true);  // after the sheet is drawn, so the route is fitted into the map left above it
@@ -361,6 +361,9 @@ function renderRoutes() {
       <div class="compare"><table><thead><tr><th>#</th><th>Score</th><th>Time</th><th>Lit</th><th>Open</th><th>Unrated</th></tr></thead><tbody>
       ${r.compared.map((c) => `<tr class="${c.rank === r.rank ? "this" : ""}"><td>${c.rank}</td><td><b class="${c.confidence_level === "none" ? "" : scoreClass(c.score)}">${c.confidence_level === "none" ? "–" : c.score}</b></td><td>${c.minutes} min</td><td>${c.stats.lit_pct ?? "–"}%</td><td>${c.stats.open_now ?? 0}</td><td>${c.unrated_pct}%</td></tr>`).join("")}
       </tbody></table></div></details>` : ""}
+    ${(state.area || []).map((a) => `<details class="why"><summary>Past crime in ${esc(a.district)} · ${a.year}</summary>
+      <p style="margin:0 0 8px">Police recorded <b>${a.assault}</b> cases of assault on women (IPC 354) and <b>${a.insult}</b> of insulting a woman's modesty (IPC 509) across the whole district in ${a.year}${a.previous ? `, against ${a.previous.assault} and ${a.previous.insult} in ${a.previous.year}` : ""}.</p>
+      <p class="muted" style="margin:0 0 12px">Background only, it doesn't change the score: it covers the whole district, only counts cases reported to police, and says nothing about a single street tonight. Source: ${esc(a.source)}.</p></details>`).join("")}
     <details class="why"><summary>Directions · ${r.steps.length - 1} ${r.steps.length === 2 ? "step" : "steps"}</summary><ol class="steps-list">${r.steps.map((st) =>
       `<li><span class="turn">${turnIcon(st.turn)}</span>${esc(st.text)}<small>${st.dist ? fmtDist(st.dist) : ""}</small></li>`).join("")}</ol></details>
     <details class="why"><summary>Why this score?</summary><div class="bars">${factors}</div>

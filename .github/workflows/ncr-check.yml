@@ -26,17 +26,13 @@ jobs:
       - run: python -u import_osm.py
       - run: python -u check_ncr.py
   crime:
-    # one-off: print NCRB district crime-against-women rows for Delhi NCR from the India Data Portal mirror
+    # NCRB district crime-against-women figures and OSM district outlines, as the server uses them
     if: contains(github.event.head_commit.message, '[crime-fetch]')
     runs-on: ubuntu-latest
     steps:
-      - run: |
-          set -x
-          curl -sS "https://ckandev.indiadataportal.com/api/3/action/resource_show?id=c8d3ea7e-4855-45f3-9c26-557419e93b6a" -o res.json || true
-          head -c 3000 res.json; echo
-          URL=$(python3 -c "import json;print(json.load(open('res.json'))['result']['url'])") || true
-          curl -sSL "$URL" -o crime.csv || true
-          curl -sS "https://ckandev.indiadataportal.com/api/3/action/package_show?id=crime-statistics" | python3 -c "import json,sys;d=json.load(sys.stdin)['result'];print(d.get('license_title'),d.get('license_url'));print(d.get('notes','')[:800]);[print(r['id'],r['name'],r['url']) for r in d['resources']]" || true
-          head -3 crime.csv
-          wc -l crime.csv
-          grep -iE "delhi|gautam|ghaziabad|gurugram|gurgaon|faridabad|noida" crime.csv | grep -E ",(2021|2022|2023)," | head -60
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -u crime.py
+      - run: python -c "import crime; d=crime.load(); print([a['district'] for a in crime.around(d, [(28.4741, 77.4998), (28.6315, 77.2167), (28.4595, 77.0266)])])"

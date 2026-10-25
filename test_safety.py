@@ -524,5 +524,27 @@ class ReportSenderTest(unittest.TestCase):
         self.assertIsNone(db.add(28.0, 77.0, "deserted", "phone-a", seen))  # 10 an hour per phone
 
 
+class CrimeContextTest(unittest.TestCase):
+    HEADER = ("id,year,state_name,state_code,district_name,district_code,registration_circles,murder_with_rape_gang_rape,dowry_deaths,abetment_to_suicide_of_women,miscarriage,acid_attack,attempt_to_acid_attack,cruelty_by_husband_or_his_relatives,kidnapping_and_abduction,kidnapping_abduction_in_order_to_murder,kidnapping_for_ransom,kidnp_and_abductn_of_women_above_18_for_marrg,kidnp_and_abductn_of_girls_below_18_for_marrg,procuration_of_minor_girls,importation_of_girls_from_foreign,kidnapping_and_abduction_of_women_others,human_trafficking,selling_of_minor_girls,buying_of_minor_girls,rape_women_above_18,rape_girls_below_18,attempt_to_commit_rape_above_18,attempt_to_commit_rape_girls_below_18,assault_on_womenabove_18,assault_on_women_below_18,insult_to_the_modesty_of_women_above_18,insult_to_the_modesty_of_women_below_18,dowry_prohibition,procuring_inducing_children_for_the_sake_of_prostitution,detaining_a_prsn_in_premises_where_prost_is_carried,prostitution_in_or_in_the_vicinity_of_public_places,seducing_or_soliciting_for_purpose_of_prostitution,other_sections_under_itp_act,protection_of_women_from_domestic_violence,publshng_or_transmitting_of_sexually_explicit_mtrl,other_women_centric_cyber_crimes,child_rape,sexual_assault_of_children,child_sexual_harassment,use_of_child_for_pornography,offences_of_pocso_act,pocso_act_unnatural_offences,indecent_representation_of_women")
+    ROWS = [  # real rows from the NCRB table (India Data Portal), the last one repeated as the second table would
+        "5313,2022,Uttar Pradesh,09,Gautam Buddha Nagar,144,Gautambudh Nagar,0,32,0,0,1,0,293,181,9,,209,0,0,0,0,0,0,0,29,29,2,0,79,0,2,0,0,0.0,0.0,0.0,0.0,0,0,0.0,0,53,20,1,0,0,0,0",
+        "5077,2022,Delhi,07,South East,670,South-East,0,10,3,0,0,1,354,341,0,,0,0,0,0,6,0,0,0,121,4,0,0,205,0,56,0,7,3.0,0.0,0.0,0.0,0,0,36.0,0,90,46,1,0,0,0,0",
+        "5246,2021,Haryana,06,Gurugram,062,Irrigation Andpower,0,0,0,0,0,0,0,0,0,,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.0,0.0,0.0,0.0,0,0,0.0,0,0,0,0,0,0,0,0",
+        "5077,2022,Delhi,07,South East,670,South-East,0,10,3,0,0,1,354,341,0,,0,0,0,0,6,0,0,0,121,4,0,0,205,0,56,0,7,3.0,0.0,0.0,0.0,0,0,36.0,0,90,46,1,0,0,0,0",
+    ]
+
+    def test_counts_and_lookup(self):
+        import csv, io, crime
+        got = crime.counts(csv.DictReader(io.StringIO("\n".join([self.HEADER] + self.ROWS))))
+        self.assertEqual(got[crime.key("Gautam Buddha Nagar")]["2022"], {"assault": 79, "insult": 2})
+        self.assertEqual(got[crime.key("South East Delhi")]["2022"], {"assault": 205, "insult": 56})  # counted once
+        square = {"type": "Polygon", "coordinates": [[[77.4, 28.4], [77.6, 28.4], [77.6, 28.6], [77.4, 28.6], [77.4, 28.4]]]}
+        data = {"source": "test", "districts": [{"name": "Gautam Buddha Nagar", "shape": square, "years": got["gautambuddhanagar"]}]}
+        area = crime.around(data, [(28.4741, 77.4998)])
+        self.assertEqual((area[0]["district"], area[0]["year"], area[0]["assault"], area[0]["previous"]), ("Gautam Buddha Nagar", 2022, 79, None))
+        self.assertEqual(crime.around(data, [(28.63, 77.22)]), [])
+        self.assertEqual(crime.around(None, [(28.47, 77.5)]), [])
+
+
 if __name__ == "__main__":
     unittest.main()

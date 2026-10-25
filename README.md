@@ -65,6 +65,11 @@ and open the https link on the phone. Then use "Add to Home Screen".
 - `data/incidents.csv` (`lat,lon,type,when`) holds incident history, for example a campus security log. Types:
   `assault, robbery, harassment, stalking, snatching, theft, other`.
 - Live rain from Open-Meteo (no key).
+- **Past crime, as background** (`python crime.py`, once a year): NCRB's district tables of crimes against women
+  (India Data Portal mirror) and the district outlines from OpenStreetMap, saved to `data/crime/districts.json`.
+  The route card then shows the district's police-recorded cases of assault on women (IPC 354) and insulting a
+  woman's modesty (IPC 509) for the latest year. It never changes a score: the figures are yearly, district-wide,
+  only count reported cases and say nothing about one street tonight. In Delhi they are per Delhi Police district.
 
 ## How the score works
 
@@ -126,7 +131,7 @@ No rating is 100% accurate. Scores compare routes and mean *safer*, never *safe*
 - `safety.py` has the street graph, sun position, opening-hours parser and routing.
 - `tiles.py` fetches map tiles on demand (Overpass, Overture, Mapillary, NASA night lights) and caches them.
 - `import_osm.py` imports OpenStreetMap for a whole region and builds the offline search index. `gtfs.py` reads bus
-  and metro timetables. `reports.py` keeps the app's reports.
+  and metro timetables. `reports.py` keeps the app's reports. `crime.py` downloads and looks up the district crime figures.
 - `server.py` is the web server and JSON API: `/api/route`, `/api/heat`, `/api/explain`, `/api/search`, `/api/havens`, `/api/report`, `/api/trip`.
 - `static/index.html` is the website.
 - `static/app/` is the app (`index.html`, `app.css`, `app.js`).
