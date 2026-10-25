@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SafeRoute</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root { --bg: #fff; --fg: #1d1d1f; --muted: #6b6b70; --card: #f4f4f6; --safe: #1a9e5c; --mid: #d98a00; --risk: #d63a3a; --accent: #6b3fd4; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #151517; --fg: #f2f2f5; --muted: #a0a0a8; --card: #232327; } }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font: 15px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+  #map { position: absolute; inset: 0; }
+  .panel { position: absolute; z-index: 1000; left: 12px; right: 12px; background: var(--bg); border-radius: 14px; box-shadow: 0 4px 20px #0003; padding: 12px; }
+  #top { top: 12px; max-width: 460px; }
+  #sheet { bottom: 12px; max-width: 460px; max-height: 45vh; overflow-y: auto; display: none; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .hint { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
+  button, input { font: inherit; border-radius: 10px; border: 1px solid #8884; padding: 8px 12px; background: var(--card); color: var(--fg); min-height: 40px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border: 0; }
+  button.on { outline: 2px solid var(--accent); }
+  input[type=datetime-local] { flex: 1; min-width: 0; }
+  .card { background: var(--card); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer; border-left: 6px solid; }
+  .card.sel { outline: 2px solid var(--accent); }
+  .card h3 { margin: 0 0 4px; font-size: 16px; display: flex; justify-content: space-between; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .chip { background: var(--bg); border-radius: 99px; padding: 2px 8px; font-size: 12px; }
+  .warn { color: var(--mid); font-size: 13px; }
+  #sos { position: absolute; z-index: 1000; right: 16px; bottom: calc(45vh + 28px); width: 64px; height: 64px; border-radius: 50%; background: var(--risk); color: #fff; border: 0; font-weight: 700; font-size: 17px; box-shadow: 0 4px 16px #0005; }
+  #sosbox { display: none; margin-top: 8px; }
+  #sosbox a { display: inline-block; margin: 4px 6px 0 0; padding: 8px 12px; border-radius: 10px; background: var(--risk); color: #fff; text-decoration: none; }
+  #reportbar { display: none; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div id="map" role="application" aria-label="Map. Tap to set start and destination."></div>
+
+<div id="top" class="panel">
+  <div class="row">
+    <button id="locate" aria-label="Start from my location">📍 My location</button>
+    <input id="when" type="datetime-local" aria-label="Departure time">
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button id="go" class="primary">Find safest route</button>
+    <button id="heatBtn" aria-pressed="false">Safety map</button>
+    <button id="reportBtn" aria-pressed="false">Report</button>
+    <button id="share">Share trip</button>
+  </div>
+  <div id="reportbar" class="row">
+    <span class="hint">Pick a type, then tap the spot:</span>
+    <button data-type="broken_light">💡 Broken light</button>
+    <button data-type="felt_unsafe">👀 Felt unsafe</button>
+    <button data-type="harassment">🚫 Harassment</button>
+    <button data-type="felt_safe">✅ Felt safe</button>
+  </div>
+  <p id="msg" class="hint" aria-live="polite">Tap the map to set your start, then tap again for your destination.</p>
+  <div id="sosbox">
+    <strong>Emergency</strong><br>
+    <a href="tel:112">📞 Call 112</a><a id="smsLink" href="#">✉️ SMS my contact</a>
+    <button id="setContact">Set trusted contact</button>
+  </div>
+</div>
+
+<button id="sos" aria-label="SOS emergency options">SOS</button>
+<div id="sheet" class="panel" aria-live="polite"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const COLORS = { safest: "var(--safe)", balanced: "var(--mid)", fastest: "var(--risk)" };
+const HEX = { safest: "#1a9e5c", balanced: "#d98a00", fastest: "#d63a3a" };
+const LABEL = { safest: "Safest", balanced: "Balanced", fastest: "Fastest" };
+const map = L.map("map", { zoomControl: false, preferCanvas: true });
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+
+let start = null, end = null, routes = [], routeLayers = L.layerGroup().addTo(map), heatLayer = null, reportType = null, here = null;
+const pins = L.layerGroup().addTo(map);
+
+const pad = n => String(n).padStart(2, "0");
+const d = new Date();
+$("when").value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const msg = t => $("msg").textContent = t;
+const store = { get: k => { try { return localStorage.getItem(k); } catch { return null; } },
+                set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+
+fetch("/api/area").then(r => r.json()).then(({ bounds: [s, w, n, e] }) => map.fitBounds([[s, w], [n, e]]));
+
+function drawPins() {
+  pins.clearLayers();
+  if (start) L.circleMarker(start, { radius: 8, color: "#fff", weight: 3, fillColor: "#1a9e5c", fillOpacity: 1 }).addTo(pins).bindTooltip("Start");
+  if (end) L.circleMarker(end, { radius: 8, color: "#fff", weight: 3, fillColor: "#6b3fd4", fillOpacity: 1 }).addTo(pins).bindTooltip("Destination");
+}
+
+map.on("click", async ev => {
+  const p = [ev.latlng.lat, ev.latlng.lng];
+  if (reportType) return sendReport(p);
+  if (!start || (start && end)) { start = p; end = null; routeLayers.clearLayers(); $("sheet").style.display = "none"; msg("Now tap your destination."); }
+  else { end = p; findRoutes(); }
+  drawPins();
+});
+
+$("locate").onclick = () => navigator.geolocation.getCurrentPosition(
+  pos => { here = start = [pos.coords.latitude, pos.coords.longitude]; end = null; drawPins(); map.panTo(start); msg("Start set to your location. Tap your destination."); },
+  () => msg("Couldn't get your location. Tap the map to set your start instead."),
+  { enableHighAccuracy: true, timeout: 10000 });
+
+$("go").onclick = () => start && end ? findRoutes() : msg("Set a start and destination first.");
+$("when").onchange = () => { if (start && end) findRoutes(); if (heatLayer) loadHeat(); };
+
+async function findRoutes() {
+  msg("Scoring routes…");
+  const q = new URLSearchParams({ from: start.join(","), to: end.join(","), at: $("when").value });
+  const res = await fetch("/api/route?" + q).then(r => r.json()).catch(() => ({ error: "Server not reachable" }));
+  if (res.error) return msg(res.error);
+  routes = res;
+  msg("Tap a card to see that route.");
+  showRoutes("safest");
+}
+
+function showRoutes(sel) {
+  routeLayers.clearLayers();
+  // draw the selected route last so it sits on top
+  [...routes].sort((a, b) => (a.kind === sel) - (b.kind === sel)).forEach(r => {
+    L.polyline(r.coords, { color: HEX[r.kind], weight: r.kind === sel ? 7 : 4, opacity: r.kind === sel ? 0.95 : 0.45 }).addTo(routeLayers);
+    if (r.kind === sel && r.weakest && r.weakest.score < 40)
+      L.polyline(r.weakest.coords, { color: "#000", weight: 10, opacity: 0.5, dashArray: "4 8" }).addTo(routeLayers)
+        .bindTooltip(`Weakest stretch (score ${r.weakest.score})`);
+  });
+  const fastest = routes.find(r => r.kind === "fastest");
+  $("sheet").innerHTML = routes.map(r => {
+    const extra = r.minutes - fastest.minutes;
+    return `<div class="card ${r.kind === sel ? "sel" : ""}" style="border-color:${COLORS[r.kind]}" data-kind="${r.kind}" tabindex="0" role="button">
+      <h3><span>${LABEL[r.kind]} · ${r.score}</span><span>${r.minutes} min${extra > 0 ? ` (+${extra})` : ""}</span></h3>
+      ${r.low_data ? `<div class="warn">Low data here, so treat this score as a rough guess</div>` : ""}
+      <div class="chips">${r.reasons.map(t => `<span class="chip">${t}</span>`).join("")}</div>
+      ${r.weakest && r.weakest.score < 40 ? `<div class="hint">Weakest stretch: ${r.weakest.highway} (score ${r.weakest.score}), shown dashed on the map</div>` : ""}
+    </div>`;
+  }).join("") + `<p class="hint">Scores mean "safer than the alternatives", not "safe". Stay alert.</p>`;
+  $("sheet").style.display = "block";
+  $("sheet").querySelectorAll(".card").forEach(c => c.onclick = c.onkeydown = e => { if (!e.key || e.key === "Enter") showRoutes(c.dataset.kind); });
+}
+
+async function loadHeat() {
+  const segs = await fetch("/api/heat?" + new URLSearchParams({ at: $("when").value })).then(r => r.json());
+  if (heatLayer) heatLayer.remove();
+  heatLayer = L.layerGroup(segs.map(([a, b, c, d, s]) =>
+    L.polyline([[a, b], [c, d]], { color: s >= 60 ? HEX.safest : s >= 35 ? HEX.balanced : HEX.fastest, weight: 3, opacity: 0.7, interactive: false }))).addTo(map);
+}
+$("heatBtn").onclick = () => {
+  const on = !heatLayer;
+  $("heatBtn").classList.toggle("on", on); $("heatBtn").setAttribute("aria-pressed", on);
+  if (on) loadHeat(); else { heatLayer.remove(); heatLayer = null; }
+};
+
+$("reportBtn").onclick = () => {
+  const open = $("reportbar").style.display !== "flex";
+  $("reportbar").style.display = open ? "flex" : "none";
+  $("reportBtn").setAttribute("aria-pressed", open);
+  if (!open) reportType = null;
+};
+document.querySelectorAll("#reportbar button").forEach(b => b.onclick = () => {
+  reportType = b.dataset.type;
+  document.querySelectorAll("#reportbar button").forEach(x => x.classList.toggle("on", x === b));
+  msg("Tap the spot on the map to report it.");
+});
+async function sendReport(p) {
+  const r = await fetch("/api/report", { method: "POST", body: JSON.stringify({ lat: p[0], lon: p[1], type: reportType }) }).then(r => r.json());
+  msg(r.ok ? "Thanks, your report is anonymous and already counts in the scores." : r.error);
+  reportType = null; $("reportbar").style.display = "none"; $("reportBtn").setAttribute("aria-pressed", false);
+  if (r.ok && start && end) findRoutes();
+  if (r.ok && heatLayer) loadHeat();
+}
+
+const mapsLink = p => `https://maps.google.com/?q=${p[0].toFixed(6)},${p[1].toFixed(6)}`;
+function withLocation(cb) {
+  navigator.geolocation.getCurrentPosition(pos => cb([pos.coords.latitude, pos.coords.longitude]), () => cb(here || start), { enableHighAccuracy: true, timeout: 5000 });
+}
+$("sos").onclick = () => {
+  $("sosbox").style.display = "block";
+  withLocation(p => {
+    const phone = store.get("contact") || "";
+    $("smsLink").href = `sms:${phone}?&body=${encodeURIComponent("SOS! I need help. My location: " + (p ? mapsLink(p) : "unknown"))}`;
+  });
+};
+$("setContact").onclick = () => {
+  const v = prompt("Trusted contact's phone number", store.get("contact") || "");
+  if (v !== null) { store.set("contact", v.trim()); $("sos").click(); }
+};
+$("share").onclick = () => withLocation(p => {
+  const r = routes.find(x => x.kind === "safest");
+  const text = `I'm walking ${r ? `the safest route (about ${r.minutes} min)` : "home"}. I'm here: ${p ? mapsLink(p) : "unknown"}` +
+    (end ? `. Heading to ${mapsLink(end)}` : "");
+  if (navigator.share) navigator.share({ text }).catch(() => {});
+  else navigator.clipboard.writeText(text).then(() => msg("Trip details copied, paste them to a friend."));
+});
+</script>
+</body>
+</html>
