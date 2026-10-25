@@ -163,8 +163,6 @@ def classify(tags):
         return classify_overture(tags["overture"])
     if tags.get("building") == "guardhouse" or a == "security_booth":
         return "guard"
-    if tags.get("building"):
-        return "building"  # counted per grid cell, not kept as a place
     if tags.get("highway") == "street_lamp":
         return "lamp"
     if tags.get("highway") in ("crossing", "traffic_signals"):
@@ -185,6 +183,8 @@ def classify(tags):
         return "haven"
     if shop or tags.get("office") or a in PLACE_AMENITIES:
         return "place"
+    if tags.get("building"):
+        return "building"  # counted per grid cell, not kept as a place; a shop mapped as a building stays a shop
     return None
 
 
@@ -236,7 +236,7 @@ class Area:
                 if "nightlight" in tags:
                     self.night_cells[(int(pt[0] // NIGHT_CELL), int(pt[1] // NIGHT_CELL))] = float(tags["nightlight"])
                 elif kind == "building":  # imported OSM outlines come pre-counted per cell
-                    cells = self.osm_building_cells if "building_count" in tags else self.building_cells
+                    cells = self.building_cells if str(el["id"]).startswith("ovb") else self.osm_building_cells
                     cells[self._cell(pt)] += int(tags.get("building_count", 1))
                 elif kind:
                     self.grid[self._cell(pt)].append(len(self.pois))

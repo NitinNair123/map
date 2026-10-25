@@ -359,6 +359,10 @@ class ImportTest(unittest.TestCase):
         overture = node("ovb1", (28.0004, 77.0005), building="yes")
         area = Area({"elements": fixture()["elements"] + [counted, overture]})
         self.assertEqual(sum(area.building_cells.values()), 1)  # Overture includes OSM, so never both
+        shop = node(7, (28.0004, 77.0006), building="yes", shop="bakery")
+        area = Area({"elements": fixture()["elements"] + [counted, shop]})
+        self.assertEqual(sum(area.building_cells.values()), 25)  # a shop mapped as a building is a shop
+        self.assertEqual(classify(shop["tags"]), "place")
 
 
     @unittest.skipUnless(__import__("importlib.util").util.find_spec("osmium"), "pip install osmium")
