@@ -15,6 +15,7 @@ const COLOR = { good: "#12b76a", ok: "#f79009", bad: "#f04438", none: "#98a2b3" 
 const CONF = { high: "High confidence", medium: "Medium confidence", low: "Low confidence", none: "Not rated" };
 const MIN_CONF = 0.35; // below this a street has too little data to rate
 const LABEL = { safest: "Safest", balanced: "Balanced", fastest: "Fastest" };
+const isMain = (r) => r.kind in LABEL;  // the other scanned routes ("#4"...) are drawn only when picked from the table
 const MODE = { walk: { verb: "walking", noun: "walk", start: "Start walking", icon: "walk" },
   bike: { verb: "riding", noun: "ride", start: "Start riding", icon: "bike" }, car: { verb: "driving", noun: "drive", start: "Start driving", icon: "car" } };
 // kinds of places along a route: map pin letter, colour and filter chip name
@@ -307,7 +308,7 @@ let routeSeq = 0;
 
 function drawRoutes(fit) {
   routeLayer.clearLayers(); havenLayer.clearLayers();
-  const order = [...state.routes].filter((r) => !r.same_as).sort((a, b) => (a.kind === state.sel) - (b.kind === state.sel));
+  const order = state.routes.filter((r) => !r.same_as && (isMain(r) || r.kind === state.sel)).sort((a, b) => (a.kind === state.sel) - (b.kind === state.sel));
   for (const r of order) {
     const sel = r.kind === state.sel || (state.routes.find((x) => x.kind === state.sel)?.same_as === r.kind);
     const c = r.confidence_level === "none" ? COLOR.none : COLOR[scoreClass(r.score)];
@@ -323,7 +324,7 @@ function drawRoutes(fit) {
     }
   }
   if (fit) {
-    const all = state.routes.flatMap((r) => r.coords);
+    const all = state.routes.filter(isMain).flatMap((r) => r.coords);
     const desk = innerWidth >= 900; // keep the route clear of the search card and the sheet
     const top = $(".topbar").getBoundingClientRect().bottom + 16, sheet = $("#sheet").getBoundingClientRect().height + 16;
     if (all.length) map.fitBounds(all, { paddingTopLeft: desk ? [460, 40] : [24, top], paddingBottomRight: desk ? [40, 40] : [90, sheet] });
@@ -356,7 +357,7 @@ function stripRow(x, r) {
     `<span class="p" style="left:${p.frac * 100}%;background:${p.open === true ? "var(--safe)" : p.open === false ? "#475467" : "#c0c5d0"}"></span>`).join("");
   const n = (x.strip?.gaps || []).length;
   return `<div class="strip-row ${x.kind === r.kind || r.same_as === x.kind ? "this" : ""}" data-kind="${x.kind}">
-    <small><span><b>${LABEL[x.kind]}</b> · ${x.minutes} min</span><span>${n ? `${n} long empty ${n === 1 ? "stretch" : "stretches"}` : "No long empty stretches"}</span></small>
+    <small><span><b>${LABEL[x.kind] || `Route ${x.kind}`}</b> · ${x.minutes} min</span><span>${n ? `${n} long empty ${n === 1 ? "stretch" : "stretches"}` : "No long empty stretches"}</span></small>
     <div class="strip" aria-hidden="true">${gaps}${dark}${dots}${ends}</div></div>`;
 }
 
@@ -391,7 +392,7 @@ function gauge(score) {
 function renderRoutes() {
   const r = state.routes.find((x) => x.kind === state.sel);
   const fastest = state.routes.find((x) => x.kind === "fastest");
-  const tabs = state.routes.map((x) => {
+  const tabs = state.routes.filter(isMain).map((x) => {
     const extra = x.minutes - fastest.minutes;
     return `<button class="tab" role="tab" aria-selected="${x.kind === state.sel}" data-kind="${x.kind}">
       <b>${LABEL[x.kind]}</b><span class="num ${x.confidence_level === "none" ? "" : scoreClass(x.score)}">${x.confidence_level === "none" ? "–" : x.score}</span>
@@ -436,15 +437,15 @@ function renderRoutes() {
       <button class="btn" id="shareRouteBtn" aria-label="Share this trip">${icon("share")}</button>
     </div>
     ${groupChips(r)}
-    <div class="strips">${state.routes.filter((x) => !x.same_as).map((x) => stripRow(x, r)).join("")}
+    <div class="strips">${state.routes.filter((x) => !x.same_as && isMain(x)).map((x) => stripRow(x, r)).join("")}
       <div class="strip-key"><span><i style="background:var(--risk)"></i>300 m or more with nothing open</span><span><i style="background:#6941c6"></i>unlit</span><span><i style="background:var(--safe);width:8px;height:8px;border-radius:50%"></i>open</span><span><i style="background:#c0c5d0;width:8px;height:8px;border-radius:50%"></i>hours unknown</span></div></div>
     ${notes.map(([kind, n]) => `<div class="note ${kind}">${icon(kind === "info" ? "shield" : "alert")}<span>${esc(n)}</span></div>`).join("")}
     ${lookTable(r)}
     ${r.compared && r.compared.length > 1 ? `<details class="why"><summary>${r.rank === 1 ? "Why this is the safest" : `Why this ranks #${r.rank}`} · ${r.checked} ways scanned</summary>
       <ul class="why-list">${(r.why || []).map((t) => `<li class="${t.startsWith("But:") ? "warn" : ""}">${esc(t)}</li>`).join("")}</ul>
       <div class="compare"><table><thead><tr><th>#</th><th>Score</th><th>Time</th><th>Lit</th><th>Open</th><th>Unrated</th></tr></thead><tbody>
-      ${r.compared.map((c) => `<tr class="${c.rank === r.rank ? "this" : ""}"><td>${c.rank}</td><td><b class="${c.confidence_level === "none" ? "" : scoreClass(c.score)}">${c.confidence_level === "none" ? "–" : c.score}</b></td><td>${c.minutes} min</td><td>${c.stats.lit_pct || c.stats.dark_pct ? `${c.stats.lit_pct}%` : "–"}</td><td>${c.stats.open_now ?? 0}</td><td>${c.unrated_pct}%</td></tr>`).join("")}
-      </tbody></table></div></details>` : ""}
+      ${r.compared.map((c) => `<tr class="${c.rank === r.rank ? "this" : ""}" data-kind="${state.routes.find((x) => x.rank === c.rank && !x.same_as)?.kind || ""}"><td>${c.rank}</td><td><b class="${c.confidence_level === "none" ? "" : scoreClass(c.score)}">${c.confidence_level === "none" ? "–" : c.score}</b></td><td>${c.minutes} min</td><td>${c.stats.lit_pct || c.stats.dark_pct ? `${c.stats.lit_pct}%` : "–"}</td><td>${c.stats.open_now ?? 0}</td><td>${c.unrated_pct}%</td></tr>`).join("")}
+      </tbody></table><p class="muted" style="margin:6px 0 0">Tap a row to see that route on the map.</p></div></details>` : ""}
     ${(state.area || []).map((a) => `<details class="why"><summary>Past crime in ${esc(a.district)} · ${a.year}</summary>
       <p style="margin:0 0 8px">Police recorded <b>${a.assault}</b> cases of assault on women (IPC 354, BNS 74-78) and <b>${a.insult}</b> of insulting a woman's modesty (IPC 509, BNS 79) across the whole district in ${a.year}${a.previous ? `, against ${a.previous.assault} and ${a.previous.insult} in ${a.previous.year}` : ""}.</p>
       ${a.year >= 2024 ? `<p class="muted" style="margin:0 0 8px">NCRB warns that ${a.year} isn't directly comparable with earlier years: the new criminal law (BNS) replaced the IPC on 1 July 2024.</p>` : ""}
@@ -454,7 +455,7 @@ function renderRoutes() {
     <details class="why"><summary>Why this score?</summary><div class="bars">${factors}</div>
       <p class="muted" style="margin:0 0 8px">Data used: ${r.sources.map(esc).join(", ") || "none"}.</p>
       <p class="muted" style="margin:0 0 12px">Scores compare routes. They mean <b>safer</b>, never guaranteed safe. Trust your instincts.</p></details>`, true);
-  document.querySelectorAll(".tab, .strip-row").forEach((t) => (t.onclick = () => { if (state.trip) return; state.sel = t.dataset.kind; drawRoutes(); renderRoutes(); }));
+  document.querySelectorAll(".tab, .strip-row, .compare tr[data-kind]").forEach((t) => (t.onclick = () => { if (state.trip || !t.dataset.kind) return; state.sel = t.dataset.kind; drawRoutes(); renderRoutes(); }));
   document.querySelectorAll("[data-group]").forEach((b) => (b.onclick = () => {
     const g = b.dataset.group;
     if (state.groups.has(g)) state.groups.delete(g); else state.groups.add(g);

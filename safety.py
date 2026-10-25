@@ -571,7 +571,8 @@ class Area:
         return [p for p, _, _ in kept]
 
     def routes(self, start, end, when, rain=False, mode="walk", max_extra_min=None):
-        """Every candidate route is scored; returns the safest, a balanced one (at most 25% longer) and the fastest.
+        """Every candidate route is scored; returns the safest, a balanced one (at most 25% longer), the fastest,
+        then every other scanned route by rank (kind "#4" and so on).
         Each street is rated for the moment the trip reaches it, so a shop that shuts before you get there doesn't count."""
         rated = self.ratings(when, rain, mode)
         credits = [rating.credit(s, c) for s, c in rated]
@@ -590,12 +591,14 @@ class Area:
                      "minutes": r["minutes"], "length_m": r["length_m"], "stats": r["stats"], "factors": r["factors"]}
                     for i, r in enumerate(ranked)]
         out = []
-        for kind, r in (("safest", safest), ("fastest", fastest), ("balanced", balanced)):  # a repeat points at safest or fastest
+        picks = [("safest", safest), ("fastest", fastest), ("balanced", balanced)]  # a repeat points at safest or fastest
+        picks += [(f"#{i + 1}", r) for i, r in enumerate(ranked) if all(r is not p for _, p in picks)]  # the rest, to look at on request
+        for kind, r in picks:
             out.append({**r, "kind": kind, "mode": mode, "checked": len(scored), "rank": ranked.index(r) + 1, "compared": compared,
                         "max_extra_min": max_extra_min, "why": why_ahead(r, [x for x in ranked if x is not r], fastest),
                         "headline": headline(r, fastest),
                         "same_as": next((o["kind"] for o in out if o["coords"] == r["coords"]), None)})
-        return [out[0], out[2], out[1]]
+        return [out[0], out[2], out[1], *out[3:]]
 
     def _summary(self, kind, path, when, fastest_len, dst, rain=False, mode="walk", passing=None):
         length = sum(self.edges[ei]["length"] for _, ei in path)

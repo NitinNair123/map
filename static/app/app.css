@@ -256,4 +256,5 @@ body.navigating .topbar, body.navigating .legend { display: none; }
 .compare th { text-align: left; font-weight: 600; color: var(--ink-3); padding: 4px 6px; }
 .compare td { padding: 6px; border-top: 1px solid var(--line); }
 .compare tr.this td { background: var(--brand-soft); }
+.compare tr[data-kind] { cursor: pointer; }
 .compare .good { color: var(--safe); } .compare .ok { color: var(--caution); } .compare .bad { color: var(--risk); }

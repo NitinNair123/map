@@ -82,6 +82,10 @@ class RouteTest(unittest.TestCase):
             grid.append(way(200 + i, [10 * j + i for j in range(5)], [(28.0 + 0.001 * j, 77.0 + 0.001 * i) for j in range(5)], highway="residential"))
         routes = Area({"elements": grid}).routes((28.0, 77.0), (28.004, 77.004), NIGHT)
         self.assertGreaterEqual(routes[0]["checked"], 3)
+        others = routes[3:]  # every scanned route comes back, so the table can show any of them on the map
+        self.assertEqual(len(routes) - sum(r["same_as"] is not None for r in routes[:3]), routes[0]["checked"])
+        self.assertEqual([r["rank"] for r in others], sorted(r["rank"] for r in others))
+        self.assertTrue(all(r["kind"] == f"#{r['rank']}" for r in others))
 
     def test_shops_closed_lowers_score(self):
         self.assertLess(self.kinds(LATE)["safest"]["score"], self.kinds(NIGHT)["safest"]["score"])
