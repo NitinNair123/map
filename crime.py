@@ -65,7 +65,14 @@ def fetch():
         raise SystemExit("couldn't download the NCRB tables")
     by_district = counts(rows)
     q = f'[out:json][timeout:60];rel["boundary"="administrative"]["admin_level"="5"]({",".join(map(str, BOX))});out tags;'
-    rels = json.loads(get(MIRRORS[0], urllib.parse.urlencode({"data": q}).encode()))["elements"]
+    for url in MIRRORS:  # a busy mirror answers 502 or 504
+        try:
+            rels = json.loads(get(url, urllib.parse.urlencode({"data": q}).encode()))["elements"]
+            break
+        except (OSError, ValueError) as err:
+            print(f"{url}: {err}", flush=True)
+    else:
+        raise SystemExit("no Overpass mirror answered, try again later")
     ids = [f"R{e['id']}" for e in rels if key(e["tags"].get("name", "")) in by_district]
     print("no NCRB rows for:", sorted(e["tags"].get("name", "?") for e in rels if f"R{e['id']}" not in ids), flush=True)
     districts = []
