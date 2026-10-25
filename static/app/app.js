@@ -265,8 +265,8 @@ async function maybeRoute() {
     if (seq !== routeSeq) return; // the user picked something else meanwhile
     state.routes = res.routes; state.rain = res.rain; state.routeFrom = from;
     state.sel = "safest";
-    drawRoutes(true);
     renderRoutes();
+    drawRoutes(true);  // after the sheet is drawn, so the route is fitted into the map left above it
   } catch (err) {
     if (seq !== routeSeq) return;
     renderSheet(`<div class="note">${icon("alert")}<span>${esc(err.message)}</span></div><button class="btn btn-block" id="retryRoute">Try again</button>`);
@@ -289,13 +289,16 @@ function drawRoutes(fit) {
         L.polyline(r.weakest.coords, { color: "#16131f", weight: 7, opacity: 0.8, dashArray: "2 10", lineCap: "round" }).addTo(routeLayer)
           .bindTooltip(`Weakest stretch: ${esc(r.weakest.name)}`);
       r.segments.forEach(([a, b, c, d]) => L.polyline([[a, b], [c, d]], { color: COLOR.none, weight: 7, dashArray: "6 8", interactive: false }).addTo(routeLayer));
+      (r.places || []).filter((pl) => pl.open !== true).forEach((pl) => L.circleMarker(pl.pt, { radius: 4, color: "#fff", weight: 1.5, fillColor: pl.open === false ? "#475467" : "#98a2b3", fillOpacity: 1 })
+        .addTo(havenLayer).bindTooltip(`${esc(pl.name)}: ${pl.open === false ? "closed now" : "hours not published"}`));
       r.havens.forEach((h) => L.marker(h.pt, { icon: divIcon("haven-dot", 14), keyboard: false }).addTo(havenLayer).bindTooltip(`Open now: ${esc(h.name)}`));
     }
   }
   if (fit) {
     const all = state.routes.flatMap((r) => r.coords);
     const desk = innerWidth >= 900; // keep the route clear of the search card and the sheet
-    if (all.length) map.fitBounds(all, { paddingTopLeft: desk ? [460, 40] : [20, 190], paddingBottomRight: desk ? [40, 40] : [20, innerHeight * 0.45] });
+    const top = $(".topbar").getBoundingClientRect().bottom + 16, sheet = $("#sheet").getBoundingClientRect().height + 16;
+    if (all.length) map.fitBounds(all, { paddingTopLeft: desk ? [460, 40] : [24, top], paddingBottomRight: desk ? [40, 40] : [90, sheet] });
   }
 }
 
@@ -319,13 +322,15 @@ function renderRoutes() {
     v === null ? `<div class="bar"><span>${esc(k)}</span><span class="track"></span><span class="muted">No data</span></div>`
       : `<div class="bar"><span>${esc(k)}<small class="muted"> · ${v.measured}% measured</small></span><span class="track"><span class="fill" style="display:block;width:${v.score}%;background:${COLOR[scoreClass(v.score)]}"></span></span><span>${v.score}</span></div>`).join("");
   const notes = [];
-  if (r.checked > 1) notes.push(`We scored ${r.checked} different ways there. This one ranks #${r.rank} for safety.`);
-  else if (r.checked === 1) notes.push("This is the only sensible way there on the map, so all three options are the same.");
-  if (r.same_as) notes.push(`This is the same way as the ${LABEL[r.same_as].toLowerCase()} route.`);
-  if (r.confidence_level === "none") notes.push("There isn't enough real data on these streets to rate this route yet. Grey dashes mark the unrated parts. Reports and the street survey fill this in.");
-  else if (r.unrated_pct >= 10) notes.push(`${r.unrated_pct}% of this route is too thinly mapped to rate. It's shown in grey dashes, and the score covers only the rest.`);
-  if (state.rain) notes.push("It's raining, so streets may be emptier than usual.");
-  if (r.weakest && r.weakest.score < 45) notes.push(`Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because of ${r.weakest.why.toLowerCase()}. It's dashed on the map.`);
+  if (r.confidence_level === "none") notes.push(["", "There isn't enough real data on these streets to rate this route yet. Grey dashes mark the unrated parts. Reports and the street survey fill this in."]);
+  else if (r.unrated_pct >= 10) notes.push(["", `${r.unrated_pct}% of this route is too thinly mapped to rate. It's shown in grey dashes, and the score covers only the rest.`]);
+  if (state.rain) notes.push(["", "It's raining, so streets may be emptier than usual."]);
+  if (r.weakest && r.weakest.score < 45) notes.push(["", `Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because of ${r.weakest.why.toLowerCase()}. It's dashed on the map.`]);
+  const unknown = (r.places || []).filter((pl) => pl.open === null).length;
+  if (unknown) notes.push(["info", `Grey dots on the map are ${unknown} shops and places with no published hours, so we can't say if they're open. Green dots are confirmed open. Tap "Report" and "Shops open now" to fix that for everyone.`]);
+  if (r.checked > 1) notes.push(["info", `We scored ${r.checked} different ways there. This one ranks #${r.rank} for safety.`]);
+  else if (r.checked === 1) notes.push(["info", "This is the only sensible way there on the map, so all three options are the same."]);
+  if (r.same_as) notes.push(["info", `This is the same way as the ${LABEL[r.same_as].toLowerCase()} route.`]);
   const dusk = r.daylight > 0 && r.daylight < 1;
   renderSheet(`
     <div class="tabs" role="tablist" aria-label="Route options">${tabs}</div>
@@ -346,23 +351,41 @@ function renderRoutes() {
       ${r.warnings.map((t) => `<li class="warn">${esc(t)}</li>`).join("")}
       <li class="info">${r.daylight >= 1 ? "Daylight" : dusk ? "Dusk" : "After dark"}</li>
     </ul>
-    ${notes.map((n) => `<div class="note">${icon("alert")}<span>${esc(n)}</span></div>`).join("")}
+    <div class="actions">
+      <button class="btn btn-primary" id="startBtn">${icon("walk")}Start walking</button>
+      <button class="btn" id="shareRouteBtn" aria-label="Share this trip">${icon("share")}</button>
+    </div>
+    ${notes.map(([kind, n]) => `<div class="note ${kind}">${icon(kind === "info" ? "shield" : "alert")}<span>${esc(n)}</span></div>`).join("")}
     <details class="why"><summary>Directions · ${r.steps.length - 1} ${r.steps.length === 2 ? "step" : "steps"}</summary><ol class="steps-list">${r.steps.map((st) =>
       `<li><span class="turn">${turnIcon(st.turn)}</span>${esc(st.text)}<small>${st.dist ? fmtDist(st.dist) : ""}</small></li>`).join("")}</ol></details>
     <details class="why"><summary>Why this score?</summary><div class="bars">${factors}</div>
       <p class="muted" style="margin:0 0 8px">Data used: ${r.sources.map(esc).join(", ") || "none"}.</p>
-      <p class="muted" style="margin:0 0 12px">Scores compare routes. They mean <b>safer</b>, never guaranteed safe. Trust your instincts.</p></details>
-    <div class="actions">
-      <button class="btn btn-primary" id="startBtn">${icon("walk")}Start walking</button>
-      <button class="btn" id="shareRouteBtn" aria-label="Share this trip">${icon("share")}</button>
-    </div>`);
+      <p class="muted" style="margin:0 0 12px">Scores compare routes. They mean <b>safer</b>, never guaranteed safe. Trust your instincts.</p></details>`, true);
   document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => { state.sel = t.dataset.kind; drawRoutes(); renderRoutes(); }));
   $("#startBtn").onclick = startTrip;
   $("#shareRouteBtn").onclick = () => startTrip({ shareOnly: true });
 }
 
 // ---------- sheet ----------
-function renderSheet(html) { $("#sheetBody").innerHTML = html; }
+function renderSheet(html, keepSize) { $("#sheetBody").innerHTML = html; if (!keepSize) setSheet("half"); }
+// The sheet has three heights: peek (just the top), half (default) and full. Drag or tap the handle to change it.
+function setSheet(size) {
+  const s = $("#sheet");
+  s.classList.toggle("peek", size === "peek"); s.classList.toggle("full", size === "full");
+  if (size !== "full") s.scrollTop = 0;
+}
+{
+  const sizes = ["peek", "half", "full"];
+  const now = () => $("#sheet").classList.contains("full") ? 2 : $("#sheet").classList.contains("peek") ? 0 : 1;
+  let startY = null;
+  $("#grabber").addEventListener("pointerdown", (e) => { startY = e.clientY; e.target.setPointerCapture?.(e.pointerId); });
+  $("#grabber").addEventListener("pointerup", (e) => {
+    if (startY === null) return;
+    const dy = e.clientY - startY, i = now();
+    startY = null;
+    setSheet(sizes[Math.abs(dy) < 10 ? (i === 2 ? 1 : i + 1) : Math.max(0, Math.min(2, i + (dy < 0 ? 1 : -1)))]);
+  });
+}
 // keep the SOS button floating just above the sheet whatever its height
 new ResizeObserver(([e]) => document.documentElement.style.setProperty("--sheet-h", e.target.offsetHeight + "px")).observe($("#sheet"));
 async function renderIdle() {
@@ -753,10 +776,12 @@ const REPORTS = [
 $("#reportBtn").onclick = () => {
   openDrawer(`
     <h2 id="drawerTitle">Report something</h2>
-    <p>Reports are anonymous and change scores for everyone straight away. Each person counts once per street for each kind of report. "Lit", "shops open" and "people around" are real checks of the street, so they count as measured data for this time of day.</p>
+    <p>Anonymous, and it updates scores for everyone straight away. You count once per street for each kind of report.</p>
     <div class="report-grid">${REPORTS.map(([k, e, l]) => `<button data-type="${k}" aria-pressed="false"><span>${e}</span>${l}</button>`).join("")}</div>
-    <button class="btn btn-primary btn-block" id="reportHere" disabled>${icon("locate")}At my location</button>
-    <button class="btn btn-block" id="reportMap" disabled>${icon("flag")}Pick the spot on the map</button>`);
+    <div class="sticky-actions">
+      <button class="btn btn-primary btn-block" id="reportHere" disabled>${icon("locate")}At my location</button>
+      <button class="btn btn-block" id="reportMap" disabled>${icon("flag")}Pick the spot on the map</button>
+    </div>`);
   let type = null;
   document.querySelectorAll(".report-grid button").forEach((b) => (b.onclick = () => {
     type = b.dataset.type;
@@ -817,7 +842,7 @@ $("#heatBtn").onclick = () => {
 function openDrawer(html) {
   $("#drawerBody").innerHTML = html;
   $("#drawer").hidden = false;
-  $("#drawer").querySelector("input, button:not(.close)")?.focus();
+  if (matchMedia("(pointer: fine)").matches) $("#drawer").querySelector("input, button:not(.close)")?.focus();  // on phones focus pops the keyboard
 }
 function closeDrawer() { $("#drawer").hidden = true; }
 $("#drawer").addEventListener("click", (e) => { if (e.target.id === "drawer" || e.target.closest("[data-close]")) closeDrawer(); });

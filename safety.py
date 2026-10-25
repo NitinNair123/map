@@ -497,7 +497,7 @@ class Area:
                 "daylight": round(light, 2)}
         if not path:
             return {**base, "minutes": 0, "score": 100, "confidence": 1.0, "confidence_level": "high", "unrated_pct": 0,
-                    "reasons": [], "warnings": [], "factors": {}, "sources": [], "weakest": None, "havens": [], "turns": 0,
+                    "reasons": [], "warnings": [], "factors": {}, "sources": [], "weakest": None, "havens": [], "places": [], "turns": 0,
                     "steps": [], "segments": []}
         now = time.time()
         rated_len = sum(self.edges[ei]["length"] for _, ei in path if rated[ei][1] >= rating.MIN_CONFIDENCE) or 0.0
@@ -557,6 +557,9 @@ class Area:
         reasons = [f"{len(mapped)} shops and places along the way", f"{len(places)} confirmed open now"]
         if unknown_hours:
             reasons.append(f"{len(unknown_hours)} with no published hours")
+        main = sum(self.edges[ei]["length"] for _, ei in path if self.edges[ei]["highway"] in rating.MAIN_ROADS)
+        if main >= 0.1 * length:
+            reasons.append(f"{round(100 * main / length)}% on main roads")
         if light < 1:
             reasons.append(f"{round(100 * lit_len / length)}% lit, {round(100 * dark_len / length)}% unlit")
             if no_light >= 1:
@@ -604,6 +607,9 @@ class Area:
                          for _, ei in path if rated[ei][1] < rating.MIN_CONFIDENCE],
             "weakest": weakest,
             "havens": [{"name": self.pois[i]["name"], "pt": self.pois[i]["pt"]} for i in list(havens)[:30]],
+            # every shop and place along the way; open is None when it publishes no hours
+            "places": [{"name": self.pois[i]["name"], "pt": self.pois[i]["pt"], "open": self.is_place_open(self.pois[i], when)}
+                       for i in sorted(mapped)[:300]],
         }
 
     def _steps(self, path, coords):

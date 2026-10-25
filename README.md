@@ -70,13 +70,13 @@ and open the https link on the phone. Then use "Add to Home Screen".
 
 The rating lives in `rating.py`. Every street segment gets five factors. Each factor uses only measured data,
 and each piece of evidence has a quality: 1.0 for someone checking the street, 0.9 for a timetable, 0.8 for
-mapped tags, hours, buildings and police, 0.7 for lamps, 0.5 for "nothing mapped here" and 0.3 for satellite
-night lights. Survey and report data older than 180 days counts for less.
+mapped tags, hours, buildings and police, 0.7 for lamps, 0.5 for "nothing mapped here", 0.35 for being a main road
+and 0.3 for satellite night lights. Survey and report data older than 180 days counts for less.
 
 | Factor | Day | Dark | Evidence, best first |
 |---|---|---|---|
 | Lighting | 0 | 30 | survey and reports, OSM `lit` tag, lamps (OSM, Mapillary), NASA night lights |
-| People and open places | 30 | 30 | survey and reports at this hour, published opening hours, buses and trains due this hour, nothing mapped nearby |
+| People and open places | 30 | 30 | survey and reports at this hour, published opening hours, buses and trains due this hour, nothing mapped nearby, main road (weak: traffic passes, but that alone doesn't make a street safe) |
 | Buildings and surroundings | 20 | 15 | building footprints around the street; parks, building sites, rail lines and scrub next to it |
 | Police and CCTV | 10 | 10 | police station within 400/800 m, cameras within 50 m, guard posts, emergency phones |
 | Footpath and ways out | 40 | 15 | "no footpath" reports, road type, footpaths, rough or unpaved surface, four lanes or 50 km/h without a footpath (crossings help), accident blackspots, underpasses, foot overbridges at night, dead ends, long stretches without side streets |

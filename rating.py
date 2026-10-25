@@ -29,6 +29,7 @@ QUALITY = {
     "road": 0.8,          # road type, footpath, dead ends from the map
     "lamps": 0.7,         # street lamps mapped or seen in Mapillary photos
     "nothing_mapped": 0.5,  # no shop or service of any kind mapped within 60 m
+    "main_road": 0.35,    # a main road usually has traffic passing, but that alone doesn't make it safe
     "nightlight": 0.3,    # NASA satellite brightness, 2016, about 500 m per pixel
 }
 HIGH, MEDIUM, MIN_CONFIDENCE = 0.7, 0.5, 0.35
@@ -43,6 +44,7 @@ ROAD_SCORE = {
     "residential": 0.7, "living_street": 0.75, "pedestrian": 0.85, "unclassified": 0.55,
     "service": 0.4, "footway": 0.45, "cycleway": 0.4, "path": 0.3, "track": 0.1, "steps": 0.25,
 }
+MAIN_ROADS = {"trunk", "primary", "secondary", "tertiary", "trunk_link", "primary_link", "secondary_link", "tertiary_link"}
 VEHICLE_ROADS = {"trunk", "primary", "secondary", "tertiary", "primary_link", "secondary_link", "tertiary_link", "unclassified", "residential"}
 # Land next to the road: (score in daylight, score in the dark)
 SURROUNDINGS = {
@@ -133,6 +135,8 @@ def factors(area, e, when, light, now=None):
         activity.append((min(1, sum(served) / 6), QUALITY["gtfs"], "Bus and metro timetables"))
     if not places and not activity:
         activity.append((0.0, QUALITY["nothing_mapped"], "No shops or services mapped nearby"))
+    if e["highway"] in MAIN_ROADS:
+        activity.append((0.6, QUALITY["main_road"], "Main road (OpenStreetMap)"))
     out["activity"] = combine(activity)
 
     frontage = []

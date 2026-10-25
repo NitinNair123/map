@@ -190,11 +190,13 @@ class TileTest(unittest.TestCase):
 
 class NoGuessingTest(unittest.TestCase):
     def test_unknown_lighting_and_hours_are_left_out(self):
-        els = [way(1, [1, 2], [A, B], highway="primary"), node(5, (28.0001, 77.0015), shop="bakery")]
+        els = [way(1, [1, 2], [A, B], highway="residential"), node(5, (28.0001, 77.0015), shop="bakery")]
         area = Area({"elements": els})
         feats = rating.factors(area, area.edges[0], NIGHT, 0)
         self.assertIsNone(feats["lighting"])  # no lit tag and no lamps: unknown, not guessed
         self.assertIsNone(feats["activity"])  # a shop with no published hours: unknown, not assumed open
+        main = Area({"elements": [way(1, [1, 2], [A, B], highway="primary"), els[1]]})
+        self.assertEqual(rating.factors(main, main.edges[0], NIGHT, 0)["activity"]["sources"], ["Main road (OpenStreetMap)"])
         r = area.routes(A, B, NIGHT)[0]
         self.assertIsNone(r["factors"]["Lighting"])
         self.assertEqual(r["confidence_level"], "none")  # only the street map is known: not rated
@@ -399,6 +401,11 @@ class CollectionTest(unittest.TestCase):
         self.assertLess(self.walk(maxspeed="60 km/h"), plain)
         self.assertGreater(self.walk(lanes="4", sidewalk="both"), self.walk(lanes="4"))
         self.assertLess(self.walk(surface="dirt"), plain)
+
+    def test_main_road_helps_a_little(self):
+        at = lambda hw: rating.factors(a := Area({"elements": [way(1, [1, 2], [A, B], highway=hw)]}), a.edges[0], LATE, 0)["activity"]
+        self.assertGreater(at("primary")["value"], at("residential")["value"])
+        self.assertLess(at("primary")["value"], 0.5)  # a main road with nothing open is still not a busy street
 
     def test_guards_and_emergency_phones(self):
         els = [way(1, [1, 2], [A, B], highway="residential")]
