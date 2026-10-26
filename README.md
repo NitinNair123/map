@@ -55,7 +55,7 @@ night using the real sun position for your area, so dusk counts as dusk.
 
 | Factor | Day | Dark | What it uses |
 |---|---|---|---|
-| Lighting | 5 | 25 | `lit=*` tags, street lamps within 20 m (OSM and Mapillary), broken-light reports |
+| Lighting | 5 | 25 | "Lights working" / "Light not working" reports made after dark (they beat map data), then `lit=*` tags, then street lamps within 20 m (OSM, and Mapillary objects seen in a photo in the last 5 years) |
 | Open places | 25 | 25 | shops, cafes, offices, schools, temples, clinics, pharmacies, petrol pumps **open at that time** (OSM `opening_hours`) |
 | Police & CCTV | 10 | 12 | police station within 400/800 m, cameras within 50 m |
 | Footpath & road | 25 | 13 | road type, sidewalks, underpasses (bad), foot overbridges (bad at night) |
@@ -68,6 +68,8 @@ On top of that:
 
 - Bars and liquor shops subtract points after dark.
 - Community reports (felt unsafe, harassment, felt safe, broken light) count most when recent and halve every 30 days.
+  Light reports only count when made after dark, halve every 60 days, and decide a street's lighting only while
+  their net vote is at least half a fresh report, so working and broken reports cancel out.
 - Incidents lose up to 35 points. They weigh by severity, halve every 180 days, and count more at the same time of day.
 - Live rain from Open-Meteo (free, no key) subtracts 5 points when you're leaving now.
 

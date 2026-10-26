@@ -741,13 +741,13 @@ $("#fakeCallBtn").onclick = () => { $("#sosCancel").click(); fakeCall(); };
 
 // ---------- reports ----------
 const REPORTS = [
-  ["broken_light", "💡", "Broken light"], ["felt_unsafe", "👀", "Felt unsafe"],
+  ["lights_on", "💡", "Lights working"], ["broken_light", "🌑", "Light not working"], ["felt_unsafe", "👀", "Felt unsafe"],
   ["harassment", "🚫", "Harassment"], ["felt_safe", "✅", "Felt safe"],
 ];
 $("#reportBtn").onclick = () => {
   openDrawer(`
     <h2 id="drawerTitle">Report something</h2>
-    <p>Reports are anonymous and change scores for everyone straight away. They fade after a few weeks.</p>
+    <p>Reports are anonymous and change scores for everyone straight away. They fade after a few weeks. Light reports only count after dark.</p>
     <div class="report-grid">${REPORTS.map(([k, e, l]) => `<button data-type="${k}" aria-pressed="false"><span>${e}</span>${l}</button>`).join("")}</div>
     <button class="btn btn-primary btn-block" id="reportHere" disabled>${icon("locate")}At my location</button>
     <button class="btn btn-block" id="reportMap" disabled>${icon("flag")}Pick the spot on the map</button>`);

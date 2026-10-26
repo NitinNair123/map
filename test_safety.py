@@ -185,6 +185,29 @@ class NoGuessingTest(unittest.TestCase):
         self.assertTrue(r["low_data"])
         self.assertIn("No lighting data for 100%", r["reasons"])
 
+class LightReportTest(unittest.TestCase):
+    def lighting(self, *reports):
+        area = Area({"elements": [way(1, [1, 2], [A, B], highway="primary", lit="yes")]})
+        for r in reports:
+            area.add_report({"lat": 28.0, "lon": 77.0015, "ts": r[1].timestamp(), "type": r[0]})
+        return area.factors(area.edges[0], NIGHT, 0)[0]["lighting"]
+
+    def test_reports_after_dark_override_map_and_fade(self):
+        recent = datetime.now(IST).replace(hour=23)
+        if recent > datetime.now(IST):
+            recent -= timedelta(days=1)
+        self.assertEqual(self.lighting(("broken_light", recent)), 0.0)
+        self.assertEqual(self.lighting(("broken_light", recent), ("lights_on", recent)), 1.0)  # a tie falls back to lit=yes
+        self.assertEqual(self.lighting(("broken_light", recent - timedelta(days=90))), 1.0)  # an old report fades out
+        self.assertEqual(self.lighting(("broken_light", recent.replace(hour=13))), 1.0)  # nobody can see it in daylight
+
+    def test_old_mapillary_objects_dropped(self):
+        from tiles import seen_years_ago
+        self.assertAlmostEqual(seen_years_ago((time.time() - 2 * 365.25 * 86400) * 1000), 2, places=2)
+        self.assertGreater(seen_years_ago("2016-05-01T10:00:00Z"), 5)
+        self.assertIsNone(seen_years_ago(None))
+
+
 class OpenDataTest(unittest.TestCase):
     def test_overture_categories(self):
         self.assertEqual(classify({"overture": "pharmacy_and_drug_store"}), "haven")
