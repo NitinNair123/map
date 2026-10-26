@@ -231,6 +231,37 @@ class OpenDataTest(unittest.TestCase):
         self.assertEqual(len(later.edges), len(Area(fixture()).edges))  # OSM ways lend tags, not duplicate streets
         self.assertTrue(later.pois)
         self.assertEqual([e["lit"] for e in later.edges if e["highway"] == "footway"], ["no"])
+        surroundings = lambda area: area.factors(area.edges[1], NIGHT, 0)[0]["surroundings"]
+        self.assertIsNone(surroundings(first))  # parks and wasteland not loaded yet: unknown, not safe
+        self.assertIsNotNone(surroundings(later))
+
+    def test_overpass_answers_when_overture_is_down(self):
+        def roads(*a):
+            raise OSError("S3 unreachable")
+        store = TileStore(tempfile.mkdtemp(), fetch=lambda *a: fixture(), roads=roads)
+        area = store.for_trip(A, B)
+        self.assertEqual(len(area.edges), len(Area(fixture()).edges))
+        self.assertTrue(area.pois)
+        self.assertFalse(store.areas)  # not cached, so Overture is tried again next trip
+
+    def test_buildings_not_loaded_here_are_unknown(self):
+        els = fixture()["elements"] + [node("b1", (28.0004, 77.0005), building="yes")]
+        area = Area({"elements": els}, unloaded={"overlooked": [(27, 76, 29, 78)]})
+        self.assertIsNone(area.factors(area.edges[1], NIGHT, 0)[0]["overlooked"])
+
+    def test_area_built_during_background_write_is_not_cached(self):
+        import tiles
+        store = TileStore(tempfile.mkdtemp(), fetch=lambda *a: fixture())
+        real = tiles.Area
+        def racing(*a):
+            store.version += 1  # a background fetch lands while the area is being built
+            return real(*a)
+        tiles.Area = racing
+        try:
+            store.for_trip(A, B)
+        finally:
+            tiles.Area = real
+        self.assertFalse(store.areas)
 
 
 if __name__ == "__main__":
