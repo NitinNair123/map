@@ -194,6 +194,7 @@ ul.promise svg { color: var(--safe); width: 20px; height: 20px; flex: none; }
   .topbar { left: 24px; top: 24px; width: 400px; }
   .sheet, .sheet.full, .sheet.peek { left: 24px; right: auto; bottom: 24px; width: 400px; border-radius: 24px; max-height: calc(100vh - 240px); overflow-y: auto; }
   .grabber { display: none; }
+  .sheet { padding-top: 20px; }  /* the hidden grabber was the only space above the content */
   .sos { right: 24px; bottom: 24px !important; }
   .legend { left: 440px; top: 24px; }
 }
