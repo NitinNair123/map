@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import secrets
+import socket
 import subprocess
 import sys
 import threading
@@ -192,6 +193,9 @@ def expire_trips():
 
 
 class Handler(SimpleHTTPRequestHandler):
+    # HTTP/1.1 ends each reply by its length rather than by closing the connection: filters such as AdGuard cut
+    # HTTP/1.0 replies on localhost short, which left the page loading forever
+    protocol_version = "HTTP/1.1"
     extensions_map = {**SimpleHTTPRequestHandler.extensions_map, ".webmanifest": "application/manifest+json", ".js": "text/javascript"}
 
     def __init__(self, *a, **kw):
@@ -213,6 +217,7 @@ class Handler(SimpleHTTPRequestHandler):
     def read_json(self):
         n = int(self.headers.get("Content-Length", 0))
         if n > 10_000:
+            self.close_connection = True  # the unread body would otherwise be taken for the next request
             raise ValueError("too large")
         body = json.loads(self.rfile.read(n) or b"{}")
         if not isinstance(body, dict):
@@ -222,9 +227,10 @@ class Handler(SimpleHTTPRequestHandler):
     def address(self):
         """The caller's address. Behind a tunnel every request comes from this machine, and the tunnel adds the real one last."""
         forwarded = self.headers.get("X-Forwarded-For")
-        if forwarded and self.client_address[0] in ("127.0.0.1", "::1"):
+        ip = self.client_address[0].removeprefix("::ffff:")  # IPv4 callers of the dual-stack socket look like ::ffff:1.2.3.4
+        if forwarded and ip in ("127.0.0.1", "::1"):
             return forwarded.split(",")[-1].strip()
-        return self.client_address[0]
+        return ip
 
     def when(self, q):
         return datetime.fromisoformat(q["at"][0]) if q.get("at", [""])[0] else datetime.now()
@@ -332,7 +338,26 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_json({"ok": True})
 
 
+class Server(ThreadingHTTPServer):
+    def handle_error(self, request, client_address):
+        if not isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+            super().handle_error(request, client_address)  # a browser dropping an idle connection is normal
+
+
+class DualStackServer(Server):
+    """Listens on IPv6 and IPv4 together, since browsers try localhost as ::1 first."""
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
+
+
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
     print(f"SafeRoute running, open http://localhost:{port}", flush=True)
-    ThreadingHTTPServer(("", port), Handler).serve_forever()
+    try:
+        server = DualStackServer(("::", port), Handler)
+    except OSError:  # no IPv6 on this machine
+        server = Server(("", port), Handler)
+    server.serve_forever()
