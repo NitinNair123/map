@@ -97,11 +97,11 @@
 <div id="sosOverlay" class="overlay sos-overlay" role="alertdialog" aria-modal="true" aria-labelledby="sosTitle" hidden>
   <div class="sos-inner">
     <div class="sos-count" id="sosCount">5</div>
-    <h2 id="sosTitle">Alerting your contacts</h2>
-    <p id="sosSub">Sending your live location in <b id="sosSecs">5</b> seconds. Tap cancel if you're OK.</p>
+    <h2 id="sosTitle">SOS message</h2>
+    <p id="sosSub">Your messages app opens in <b id="sosSecs">5</b> seconds with your location written in. Tap cancel if you're OK.</p>
     <div class="sos-actions">
       <a class="btn btn-block sos-call" href="tel:112"><svg><use href="#i-phone"/></svg>Call 112</a>
-      <button class="btn btn-block" id="sosAlertNow"><svg><use href="#i-share"/></svg>Alert contacts now</button>
+      <button class="btn btn-block" id="sosAlertNow"><svg><use href="#i-share"/></svg>Write the text now</button>
       <button class="btn btn-block" id="sirenBtn" aria-pressed="false"><svg><use href="#i-siren"/></svg>Loud siren</button>
       <button class="btn btn-block" id="fakeCallBtn"><svg><use href="#i-phone"/></svg>Fake incoming call</button>
     </div>
@@ -129,7 +129,7 @@
     <div class="modal-icon warn"><svg><use href="#i-alert"/></svg></div>
     <h2 id="checkTitle">Are you OK?</h2>
     <p id="checkWhy">You've left your route.</p>
-    <p class="muted">If you don't answer in <b id="checkSecs">60</b> s, we'll start SOS.</p>
+    <p class="muted">If you don't answer in <b id="checkSecs">60</b> s, SafeRoute gets an SOS text ready for you to send.</p>
     <button class="btn btn-primary btn-block" id="checkOk"><svg><use href="#i-check"/></svg>I'm OK</button>
     <button class="btn btn-danger btn-block" id="checkHelp">I need help</button>
   </div>

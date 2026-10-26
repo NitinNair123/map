@@ -110,6 +110,7 @@ low-data flag when the streets are poorly mapped.
 ## Before selling it
 
 - Set your contact email in `static/index.html` (search for `hello@example.com`).
-- Host it behind HTTPS. Live trips are kept in memory, so use a single server process or move them to Redis.
+- Host it behind HTTPS. The server only answers phones on your own network (and local tunnels); behind an
+  HTTPS proxy on a public server, start it with `SAFEROUTE_PUBLIC=1`. Live trips are kept in memory, so use a single server process or move them to Redis.
 - Add a privacy policy and terms page.
 - For app-store listings, wrap `/app/` with Capacitor.

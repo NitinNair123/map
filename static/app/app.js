@@ -382,8 +382,8 @@ async function renderIdle() {
 
 // ---------- live trip ----------
 const tripLink = (id) => `${location.origin}/t/?id=${id}`;
-async function createTrip(dest, eta) {
-  const t = await api("/api/trip", { dest, eta, name: store.get("myName", "") });
+async function createTrip(dest, eta, timeoutMs) {
+  const t = await api("/api/trip", { dest, eta, name: store.get("myName", "") }, timeoutMs);
   if (state.here) api(`/api/trip/${t.id}`, { key: t.key, lat: state.here[0], lon: state.here[1] }).catch(() => {});
   return t;
 }
@@ -526,6 +526,7 @@ function renderTrip() {
     <div class="nav-head"><div style="flex:1"><h3>${Math.max(1, Math.round(p.left / 1.3 / 60))} min · ${fmtDist(p.left)} left</h3>
       <p class="muted" style="margin:0">to ${esc(state.toLabel || "destination")}</p></div><span class="live">Sharing live</span></div>
     <div class="progress"><div style="width:${done}%"></div></div>
+    <p class="muted" style="margin:0">Keep SafeRoute open with the screen on. If the phone locks, your friends' map stops updating and check-ins pause.</p>
     ${ahead ? `<div class="haven"><span class="ico">${icon("store")}</span><div><b>${esc(ahead.name)}</b><div class="muted">Open now${ahead.d ? ` · ${fmtDist(ahead.d)}` : ""}. Step in if anything feels off.</div></div></div>` : ""}
     <div class="actions"><button class="btn btn-primary" id="safeBtn">${icon("check")}I've arrived safely</button>
       <button class="btn" id="tripShare" aria-label="Share live link again">${icon("share")}</button></div>
@@ -612,7 +613,7 @@ sosBtn.addEventListener("pointerdown", (e) => {
   holdTimer = setTimeout(() => { sosBtn.classList.remove("holding"); openSOS(); }, 1500);
 });
 ["pointerup", "pointerleave", "pointercancel"].forEach((ev) => sosBtn.addEventListener(ev, () => {
-  if (holdTimer && sosBtn.classList.contains("holding")) toast("Press and hold SOS to call for help");
+  if (holdTimer && sosBtn.classList.contains("holding")) toast("Press and hold SOS to text your contacts");
   clearTimeout(holdTimer); holdTimer = null; sosBtn.classList.remove("holding");
 }));
 sosBtn.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSOS(); } });
@@ -642,17 +643,22 @@ async function openSOS(now = false) {
   }
 }
 async function alertContacts() {
-  $("#sosTitle").textContent = "Help is a tap away";
-  $("#sosSub").textContent = "Your contacts get your live location. Call 112 if you're in danger.";
   const contacts = store.get("contacts", []);
+  $("#sosTitle").textContent = "Getting your message ready";
+  $("#sosSub").textContent = "Finding your location. If you're in danger, call 112 now.";
   const pt = await currentPosition(5000);
   let link = "";
   try {
-    if (!state.trip) { const t = await createTrip(pt || state.to, 0); state.sosTrip = t; link = tripLink(t.id); }
+    // short timeout: on a weak signal the text must not wait for the live link
+    if (!state.trip) { const t = await createTrip(pt || state.to, 0, 4000); state.sosTrip = t; link = tripLink(t.id); }
     else link = tripLink(state.trip.id);
   } catch {}
   const maps = pt ? `https://maps.google.com/?q=${pt[0].toFixed(6)},${pt[1].toFixed(6)}` : "";
   const body = `SOS from ${store.get("myName", "me") || "me"}: I need help. ${link ? "Live location: " + link : ""} ${maps}`.trim();
+  // a web page can't send a text or call by itself: it opens the messages app or share sheet, and the user presses Send
+  $("#sosTitle").textContent = contacts.length ? "Press Send in your messages app" : "Choose who to send it to";
+  $("#sosSub").textContent = `${contacts.length ? "Your text is written, but it only goes out when you press Send." : "Send it from the share menu, or paste it into a chat if it was copied."} ${
+    link ? "The link shows where you are while SafeRoute stays open on this screen." : pt ? "It holds your current position only, there's no live link." : "We couldn't find your location, so tell them where you are."} If you're in danger, call 112.`;
   if (contacts.length) location.href = smsLink(contacts, body);
   else shareText(body, link);
   // keep the SOS trip's dot moving while the screen is open
@@ -669,8 +675,8 @@ $("#sosCancel").onclick = () => {
   clearInterval(sosTimer); clearInterval(state.sosPing); stopSiren();
   if (state.sosTrip) { api(`/api/trip/${state.sosTrip.id}`, { key: state.sosTrip.key, ended: true }).catch(() => {}); state.sosTrip = null; }
   $("#sosOverlay").hidden = true;
-  $("#sosTitle").textContent = "Alerting your contacts";
-  $("#sosSub").innerHTML = 'Sending your live location in <b id="sosSecs">5</b> seconds. Tap cancel if you\'re OK.';
+  $("#sosTitle").textContent = "SOS message";
+  $("#sosSub").innerHTML = 'Your messages app opens in <b id="sosSecs">5</b> seconds with your location written in. Tap cancel if you\'re OK.';
 };
 
 // ---------- sound: siren, beeps, ringtone ----------
@@ -806,7 +812,7 @@ function contactsHtml() {
   const list = store.get("contacts", []);
   return (list.length ? list.map((c, i) => `<div class="contact"><span class="avatar-s">${esc(c.name[0]?.toUpperCase() || "?")}</span><div><b>${esc(c.name)}</b><small>${esc(c.phone)}</small></div>
     <button class="icon-btn" data-del="${i}" aria-label="Remove ${esc(c.name)}" style="box-shadow:none">${icon("trash")}</button></div>`).join("")
-    : `<p class="muted">No contacts yet. SOS and check-ins alert the people you add here.</p>`) +
+    : `<p class="muted">No contacts yet. SOS writes a text with your location to the people you add here, and you press Send.</p>`) +
     `<form class="form" id="contactForm"><input name="name" placeholder="Name" required maxlength="40" aria-label="Contact name">
      <input name="phone" type="tel" placeholder="Phone" required pattern="[\\d\\s\\+\\-\\(\\)]{6,}" aria-label="Contact phone">
      <button class="btn btn-primary" type="submit">${icon("user")}Add contact</button></form>`;
@@ -839,7 +845,7 @@ function openSettings() {
     <div class="row"><span>Fake call</span><button class="btn" id="fakeIn10">Ring me in 10 s</button></div>
     <div class="row"><label for="theme">Appearance</label>${sel("theme", store.get("theme", "system"), [["system", "Automatic"], ["light", "Light"], ["dark", "Dark"]])}</div>
     <div class="row"><span>Your data</span><button class="btn" id="wipe">Delete everything</button></div>
-    <p class="muted">Your contacts and settings stay on this phone. Trip locations are deleted when a trip ends. We never sell location data.</p>`);
+    <p class="muted">Your contacts and settings stay on this phone. Trip locations are deleted from the server when a trip ends, and 12 hours after it started at the latest. We never sell location data.</p>`);
   const rerender = () => { $("#contactsBox").innerHTML = contactsHtml(); bindContacts(rerender); };
   bindContacts(rerender);
   $("#myName").onchange = (e) => store.set("myName", e.target.value.trim());
