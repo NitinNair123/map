@@ -2,6 +2,7 @@
 import csv
 import importlib.util
 import json
+import math
 import os
 import secrets
 import socket
@@ -127,9 +128,9 @@ threading.Thread(target=reimport_daily, daemon=True).start()
 
 def latlon(s):
     lat, lon = (float(v) for v in s.split(",")) if isinstance(s, str) else (float(s[0]), float(s[1]))
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+    if not (-90 <= lat <= 90 and math.isfinite(lon)):
         raise ValueError("bad coordinates")
-    return lat, lon
+    return lat, lon if -180 <= lon <= 180 else (lon + 180) % 360 - 180  # a map panned round the world sends 77.4 as -642.6
 
 
 def is_raining(pt, when):

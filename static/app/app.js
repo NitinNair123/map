@@ -86,7 +86,7 @@ const state = {
 };
 
 // ---------- map ----------
-const map = L.map("map", { zoomControl: false, attributionControl: true, preferCanvas: true });
+const map = L.map("map", { zoomControl: false, attributionControl: true, preferCanvas: true, worldCopyJump: true });
 // Vector map from OpenFreeMap (free, no key) drawn by MapLibre; the plain OpenStreetMap tiles if WebGL or the style can't load
 let baseLayer = null;
 function rasterBase() {
@@ -120,7 +120,7 @@ const divIcon = (cls, size = 22) => L.divIcon({ className: "", html: `<div class
 const saved = store.get("view", null), lastView = saved && saved.z >= 9 ? saved : null;
 if (lastView) map.setView(lastView.c, lastView.z); else map.setView([28.57, 77.32], 11);
 map.on("moveend", () => {
-  const c = map.getCenter();
+  const c = map.getCenter().wrap();  // a map dragged round the globe reports longitudes past ±180
   store.set("view", { c: [c.lat, c.lng], z: map.getZoom() });
   if (state.heatOn) loadHeatSoon();
 });
@@ -196,7 +196,7 @@ async function showResults(q) {
   if (q.trim().length >= 2) {
     await new Promise((r) => setTimeout(r, 250)); // wait for typing to pause before searching
     if (seq !== searchSeq) return;
-    const c = map.getCenter();
+    const c = map.getCenter().wrap();
     found = await api(`/api/search?q=${encodeURIComponent(q)}&near=${c.lat},${c.lng}`).catch(() => []);
   }
   if (seq !== searchSeq) return;
@@ -239,7 +239,8 @@ $("#swapBtn").onclick = () => {
 
 let pickMode = null, reportType = null;
 map.on("click", (e) => {
-  const pt = [e.latlng.lat, e.latlng.lng];
+  const { lat, lng } = e.latlng.wrap();
+  const pt = [lat, lng];
   if (reportType) return sendReport(pt);
   if (state.trip) return;
   if (state.heatOn && !pickMode) return explainStreet(pt);

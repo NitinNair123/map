@@ -1,5 +1,5 @@
 // App shell cache so SafeRoute opens instantly, and the SOS screen still works with a weak signal.
-const CACHE = "saferoute-v12";
+const CACHE = "saferoute-v13";
 const SHELL = ["/", "/app/", "/app/app.js", "/app/app.css", "/theme.css", "/manifest.webmanifest", "/icons/icon.svg", "/icons/icon-192.png",
   "/vendor/leaflet/leaflet.css", "/vendor/leaflet/leaflet.js",
   "/vendor/maplibre/maplibre-gl.css", "/vendor/maplibre/maplibre-gl.js", "/vendor/maplibre/leaflet-maplibre-gl.js"];
