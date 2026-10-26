@@ -106,6 +106,7 @@ function setBaseMap() {
   map.whenReady(() => {  // the MapLibre map exists once Leaflet has a view
     const gl = layer.getMaplibreMap?.();
     gl?.on("error", () => { if (baseLayer === layer && !gl.isStyleLoaded()) rasterBase(); });
+    setTimeout(() => { if (gl && baseLayer === layer && !gl.isStyleLoaded()) rasterBase(); }, 8000);  // a hanging style server sends no error
   });
 }
 setBaseMap();

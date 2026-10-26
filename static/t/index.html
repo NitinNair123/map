@@ -7,7 +7,7 @@
 <meta name="robots" content="noindex">
 <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
 <link rel="stylesheet" href="/theme.css">
 <style>
   html, body { height: 100%; overflow: hidden; }
@@ -37,7 +37,7 @@
     <a class="btn" id="mapsLink" href="#" target="_blank" rel="noopener">Open in Maps</a>
   </div>
 </section>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/vendor/leaflet/leaflet.js"></script>
 <script>
 const id = new URLSearchParams(location.search).get("id");
 const $ = (s) => document.querySelector(s);
