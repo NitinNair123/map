@@ -118,7 +118,7 @@ const divIcon = (cls, size = 22) => L.divIcon({ className: "", html: `<div class
 // open where the user last looked, else on Delhi NCR (the area with street data) until we know where they are;
 // a zoomed-out saved view (the old whole-country default) is ignored
 const saved = store.get("view", null), lastView = saved && saved.z >= 9 ? saved : null;
-if (lastView) map.setView(lastView.c, lastView.z); else map.setView([28.57, 77.32], 11);
+if (lastView) map.setView(L.latLng(lastView.c).wrap(), lastView.z); else map.setView([28.57, 77.32], 11);
 map.on("moveend", () => {
   const c = map.getCenter().wrap();  // a map dragged round the globe reports longitudes past ±180
   store.set("view", { c: [c.lat, c.lng], z: map.getZoom() });
