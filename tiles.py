@@ -1,4 +1,5 @@
 """Fetch OpenStreetMap data on demand in fixed tiles, cache them on disk, and build scored areas for any trip."""
+import bisect
 import json
 import math
 import os
@@ -69,18 +70,37 @@ def mapillary(s, w, n, e):
 
 
 _datasets, _datasets_lock = {}, threading.Lock()
-OVERTURE = "overturemaps-us-west-2/release/2026-10-21.0"  # shortcut: pinned release, bump monthly from stac.overturemaps.org
+OVERTURE_BUCKET = "overturemaps-us-west-2/release/"
+OVERTURE_PINNED = "2026-10-21.0"  # used only if listing the bucket fails
+_release = []
+
+
+def overture_release(s3):
+    """The newest Overture release, read once per run; old releases are deleted from the bucket after a few months."""
+    import pyarrow.fs as fs
+    with _datasets_lock:
+        if not _release:
+            try:
+                names = [i.base_name for i in s3.get_file_info(fs.FileSelector(OVERTURE_BUCKET)) if i.type == fs.FileType.Directory]
+                _release.append(max(names, default=OVERTURE_PINNED))
+            except OSError as err:
+                print(f"overture release list failed ({err}), using {OVERTURE_PINNED}", flush=True)
+                _release.append(OVERTURE_PINNED)
+        return _release[0]
 
 
 def _overture(theme, s, w, n, e, columns, kind=None, where=None):
     import pyarrow.compute as pc  # optional dependency: pip install pyarrow
     import pyarrow.dataset as ds
     import pyarrow.fs as fs
-    path = f"{OVERTURE}/theme={theme}/type={kind or theme[:-1]}/"
+    s3 = fs.S3FileSystem(anonymous=True, region="us-west-2")
+    path = f"{OVERTURE_BUCKET}{overture_release(s3)}/theme={theme}/type={kind or theme[:-1]}/"
     with _datasets_lock:  # reuse the dataset: it keeps each file's metadata, so later queries skip hundreds of reads
-        if path not in _datasets:
-            _datasets[path] = ds.dataset(path, format="parquet", filesystem=fs.S3FileSystem(anonymous=True, region="us-west-2"))
-        data = _datasets[path]
+        data = _datasets.get(path)
+    if data is None:  # listing takes seconds, so other themes don't wait on the lock meanwhile
+        data = ds.dataset(path, format="parquet", filesystem=s3)
+        with _datasets_lock:
+            data = _datasets.setdefault(path, data)
     started = time.time()
     b = lambda k: pc.field("bbox", k)
     f = (b("xmax") >= w) & (b("xmin") <= e) & (b("ymax") >= s) & (b("ymin") <= n)
@@ -96,7 +116,7 @@ def warm_overture():
     for fetch in (overture_roads, overture_places, overture_buildings):
         try:
             fetch(0, 0, 0.0001, 0.0001)
-        except OSError as err:
+        except (OSError, ValueError) as err:
             print(f"overture warm-up failed ({err})", flush=True)
 
 
@@ -114,9 +134,19 @@ def overture_roads(s, w, n, e):
         for a, b in zip(pts, pts[1:]):
             along.append(along[-1] + dist(a, b))
         ids = [f"{r['id']}:{k}" for k in range(len(pts))]
+        taken = set()
         for c in r["connectors"] or []:  # connectors are the shared junction points between segments
-            k = min(range(len(pts)), key=lambda k: abs(along[k] / (along[-1] or 1) - c["at"]))
+            d = c["at"] * along[-1]
+            k = min(range(len(pts)), key=lambda k: abs(along[k] - d))
+            if k in taken or abs(along[k] - d) > 2:  # no free point there: add one, so two junctions never merge
+                k = min(max(bisect.bisect(along, d), 1), len(pts) - 1)
+                f = (d - along[k - 1]) / ((along[k] - along[k - 1]) or 1)
+                pts.insert(k, tuple(p + f * (q - p) for p, q in zip(pts[k - 1], pts[k])))
+                along.insert(k, d)
+                ids.insert(k, None)
+                taken = {t + (t >= k) for t in taken}
             ids[k] = c["connector_id"]
+            taken.add(k)
         cls, sub = r["class"], r["subclass"]
         tags = {"highway": "road" if cls == "unknown" else f"{cls}_link" if sub == "link" else cls, "overture_road": "yes"}
         if sub in ("sidewalk", "crosswalk"):
@@ -278,7 +308,7 @@ class TileStore:
         jobs += [(c, name) for name in self.extras if name not in self.background for c in self._missing(key, name)]
         roads = bool(self.roads)
         try:
-            with ThreadPoolExecutor(3) as ex:  # Overpass rate-limits per IP, so few parallel requests
+            with ThreadPoolExecutor(3 if roads else 2) as ex:  # Overpass allows about 2 requests at once per IP
                 list(ex.map(lambda job: self._fetch_chunk(*job), jobs))
         except (OSError, ValueError, KeyError) as err:
             if not roads:

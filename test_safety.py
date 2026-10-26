@@ -192,6 +192,26 @@ class OpenDataTest(unittest.TestCase):
         self.assertEqual(classify({"overture": "barber"}), "place")
         self.assertEqual(classify({"overture": "train_station"}), "transit")
         self.assertEqual(classify({"overture": "gas_station"}), "haven")
+        self.assertEqual(classify({"overture": "fire_station"}), "haven")
+        self.assertEqual(classify({"overture": "ev_charging_station"}), "place")
+        self.assertEqual(classify({"overture": "animal_hospital"}), "place")
+        self.assertEqual(classify({"overture": "sports_bar"}), "nightlife")
+
+    def test_two_junctions_near_one_point_both_kept(self):
+        import struct
+        import tiles
+        pts = [(77.0, 28.0), (77.001, 28.0), (77.002, 28.0)]
+        wkb = struct.pack("<BII", 1, 2, len(pts)) + b"".join(struct.pack("<dd", *p) for p in pts)
+        row = {"id": "s1", "geometry": wkb, "class": "residential", "subclass": None, "names": None, "road_flags": None,
+               "sources": None, "connectors": [{"connector_id": "c0", "at": 0}, {"connector_id": "c1", "at": 0.5},
+                                               {"connector_id": "c2", "at": 0.501}, {"connector_id": "c3", "at": 1}]}
+        real = tiles._overture
+        tiles._overture = lambda *a, **k: [row]
+        try:
+            nodes = tiles.overture_roads(0, 0, 1, 1)["elements"][0]["nodes"]
+        finally:
+            tiles._overture = real
+        self.assertEqual(nodes, ["c0", "c1", "c2", "c3"])  # the 4th junction gets its own point instead of replacing one
 
     def test_buildings_overlook_street(self):
         els = fixture()["elements"] + [node(f"b{k}", (28.0004, 77.0005 + k * 0.0001), building="yes") for k in range(20)]

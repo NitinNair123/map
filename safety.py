@@ -167,7 +167,9 @@ PLACE_AMENITIES = {"restaurant", "cafe", "fast_food", "atm", "bank", "marketplac
                    "dentist", "post_office", "library", "events_venue", "coworking_space", "bureau_de_change"}
 
 
-OVERTURE_NIGHTLIFE = {"bar", "pub", "night_club", "liquor_store", "beer_bar", "cocktail_bar", "wine_bar", "lounge", "hookah_bar"}
+OVERTURE_NIGHTLIFE = {"bar", "pub", "night_club", "liquor_store", "beer_bar", "cocktail_bar", "wine_bar", "lounge", "hookah_bar",
+                      "sports_bar", "dive_bar", "gay_bar", "karaoke"}
+NOT_TRANSIT = ("gas", "fire", "charging", "radio", "television", "power")
 
 
 def classify_overture(cat):
@@ -175,9 +177,11 @@ def classify_overture(cat):
         return "police"
     if cat in OVERTURE_NIGHTLIFE:
         return "nightlife"
-    if "station" in cat and "gas" not in cat or cat in ("bus_stop", "taxi_stand", "transportation"):
+    if "station" in cat and not any(w in cat for w in NOT_TRANSIT) or cat in ("bus_stop", "taxi_stand", "transportation"):
         return "transit"
-    if any(w in cat for w in ("hospital", "pharmacy", "clinic", "emergency", "gas_station", "hotel")):
+    if "animal" in cat or "veterinar" in cat:
+        return "place"
+    if any(w in cat for w in ("hospital", "pharmacy", "clinic", "emergency", "gas_station", "fire_station", "hotel")):
         return "haven"
     return "place"
 
