@@ -3,6 +3,7 @@ import csv
 import importlib.util
 import ipaddress
 import json
+import math
 import os
 import secrets
 import sys
@@ -10,13 +11,14 @@ import threading
 import time
 import traceback
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from safety import REPORT_TYPES, dist
-from tiles import TileStore, TooFar, mapillary, overture_buildings, overture_places, overture_roads, warm_overture
+from tiles import TileStore, TooFar, mapillary, overture_buildings, overture_places, overture_roads, tiles_near, warm_overture
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 REPORTS_PATH = os.path.join(DATA_DIR, "reports.json")
@@ -56,11 +58,14 @@ os.makedirs(DATA_DIR, exist_ok=True)
 TOKEN_PATH = os.path.join(DATA_DIR, "mapillary_token.txt")  # data/ is gitignored, so the token never reaches git
 if not os.environ.get("MAPILLARY_TOKEN") and os.path.exists(TOKEN_PATH):
     os.environ["MAPILLARY_TOKEN"] = open(TOKEN_PATH).read().strip()
+GEOAPIFY_PATH = os.path.join(DATA_DIR, "geoapify_key.txt")  # gitignored too
+GEOAPIFY_KEY = os.environ.get("GEOAPIFY_KEY") or (open(GEOAPIFY_PATH).read().strip() if os.path.exists(GEOAPIFY_PATH) else "")
 EXTRAS = {"mapillary": mapillary} if os.environ.get("MAPILLARY_TOKEN") else {}
 if importlib.util.find_spec("pyarrow"):
     EXTRAS.update(places=overture_places, buildings=overture_buildings)
     threading.Thread(target=warm_overture, daemon=True).start()
 print("Overture streets, places and buildings:", "on" if "places" in EXTRAS else "off (pip install pyarrow), using slower Overpass for streets", flush=True)
+print("Geoapify place search:", "on" if GEOAPIFY_KEY else "off (no key), using Photon only", flush=True)
 print("Mapillary lights and cameras:", "on" if os.environ.get("MAPILLARY_TOKEN") else "off (no token)", flush=True)
 store = TileStore(os.path.join(DATA_DIR, "tiles"),
                   reports=json.load(open(REPORTS_PATH)) if os.path.exists(REPORTS_PATH) else [],
@@ -91,15 +96,14 @@ def is_raining(pt, when):
     return w["rain"]
 
 
-def geocode(q, near):
-    """Place search anywhere via Photon (OpenStreetMap-based, free), biased towards where the map is."""
-    key = (q.lower(), near and (round(near[0], 1), round(near[1], 1)))
-    if key in geocode_cache:
-        return geocode_cache[key]
-    params = {"q": q, "limit": 8}
-    if near:
-        params.update(lat=near[0], lon=near[1])
-    with urlopen(Request("https://photon.komoot.io/api/?" + urlencode(params), headers={"User-Agent": "SafeRoute/1.0"}), timeout=6) as r:
+# words people type for a kind of place, as the OpenStreetMap tag Photon can search around the user for
+CATEGORIES = {"metro": "railway:station", "station": "railway:station", "hospital": "amenity:hospital", "atm": "amenity:atm",
+              "pharmacy": "amenity:pharmacy", "chemist": "amenity:pharmacy", "police": "amenity:police", "petrol": "amenity:fuel",
+              "bus stop": "highway:bus_stop", "toilet": "amenity:toilets", "bank": "amenity:bank", "hotel": "tourism:hotel"}
+
+
+def photon_get(path, params):
+    with urlopen(Request(f"https://photon.komoot.io/{path}?" + urlencode(params), headers={"User-Agent": "SafeRoute/1.0"}), timeout=6) as r:
         features = json.load(r)["features"]
     out = []
     for f in features:
@@ -107,11 +111,100 @@ def geocode(q, near):
         name = p.get("name") or " ".join(x for x in (p.get("housenumber"), p.get("street")) if x) or p.get("city")
         where = ", ".join(x for x in (p.get("street") if p.get("name") else None, p.get("district") or p.get("locality"), p.get("city"), p.get("state")) if x)
         if name:
-            out.append({"name": name, "pt": [lat, lon], "kind": where or p.get("osm_value", "place").replace("_", " ")})
-    geocode_cache[key] = out
-    if len(geocode_cache) > 1000:
-        geocode_cache.popitem(last=False)
+            out.append({"name": name, "pt": [lat, lon], "kind": where or p.get("osm_value", "place").replace("_", " "),
+                        "tag": f"{p.get('osm_key')}:{p.get('osm_value')}", "big": p.get("type") in ("city", "county", "state", "country")})
     return out
+
+
+def photon(q, near):
+    """Photon (OpenStreetMap, free, no key). A low location_bias_scale ranks nearby places above famous far ones."""
+    params = {"q": q, "limit": 10, "lang": "en"}
+    if near:
+        params.update(lat=near[0], lon=near[1], zoom=14, location_bias_scale=0.1)
+    out = photon_get("api/", params)
+    tag = CATEGORIES.get(q.lower().rstrip("s"))
+    if tag and near:  # "metro" means stations near me, whose names don't contain "metro"
+        try:
+            hits = photon_get("reverse", {"lat": near[0], "lon": near[1], "radius": 5, "limit": 10, "osm_tag": tag, "lang": "en"})
+            out += [dict(r, cat=True) for r in hits if r["tag"] == tag]  # the tag check drops anything the filter let through
+        except (OSError, ValueError, KeyError) as err:  # keep the name matches
+            print(f"search: photon nearby {tag} failed ({type(err).__name__})", flush=True)
+    return out
+
+
+def geoapify(q, near):
+    """Geoapify autocomplete (OSM plus OpenAddresses and Who's On First; free tier 3000 requests a day, needs a key)."""
+    params = {"text": q, "limit": 8, "format": "json", "lang": "en", "apiKey": GEOAPIFY_KEY}
+    if near:
+        params["bias"] = f"proximity:{near[1]},{near[0]}"
+    with urlopen(Request("https://api.geoapify.com/v1/geocode/autocomplete?" + urlencode(params), headers={"User-Agent": "SafeRoute/1.0"}), timeout=6) as r:
+        results = json.load(r)["results"]
+    out = [{"name": p.get("name") or p.get("address_line1") or p["formatted"], "pt": [p["lat"], p["lon"]],
+            "kind": p.get("address_line2") or p.get("result_type", "place")} for p in results]
+    # it matches names only and its bias is weak: "hospital" from Greater Noida returns towns in Uganda, so keep it local
+    return [r for r in out if not near or dist(near, r["pt"]) < 100000]
+
+
+def nearby_places(q, near, radius_m=5000):
+    """Overture businesses already downloaded for trips near the user, by name or category ("atm", "pizza", "hospital")."""
+    words = q.lower().split()
+    out = []
+    for t in tiles_near(near, near, radius_m):
+        path = store._path(t, "places")
+        if not os.path.exists(path):
+            continue
+        with open(path) as f:
+            for el in json.load(f)["elements"]:
+                name, kind = el["tags"].get("name", ""), el["tags"]["overture"]
+                have = name.lower().split() + kind.split("_")
+                if name and all(any(h.startswith(w) for h in have) for w in words):
+                    out.append({"name": name, "pt": [el["lat"], el["lon"]], "kind": kind,
+                                "cat": all(any(k.startswith(w) for k in kind.split("_")) for w in words)})
+    return out
+
+
+def geocode(q, near):
+    """Place search anywhere, from every free source at once, with places near the user first."""
+    key = (q.lower(), near and (round(near[0], 2), round(near[1], 2)))
+    if key in geocode_cache:
+        return geocode_cache[key]
+    sources = [photon] + ([geoapify] if GEOAPIFY_KEY else [])
+    with ThreadPoolExecutor(len(sources)) as ex:
+        jobs = [ex.submit(fetch, q, near) for fetch in sources]
+    found, ok = [], False
+    for fetch, job in zip(sources, jobs):
+        try:
+            found += job.result()
+            ok = True
+        except (OSError, ValueError, KeyError) as err:  # one source down must not empty the list
+            print(f"search: {fetch.__name__} failed ({type(err).__name__})", flush=True)
+    if near:
+        found += nearby_places(q, near)
+    out = rank(q, near, found)
+    if ok:  # don't remember an answer made while the internet was down
+        geocode_cache[key] = out
+        if len(geocode_cache) > 1000:
+            geocode_cache.popitem(last=False)
+    return out
+
+
+def rank(q, near, found, limit=8):
+    """Merge sources: drop repeats (same name within 200 m), then rank by how well the name matches and how near it is."""
+    q = q.lower()
+    out = []
+    for r in found:
+        if near:
+            r["km"] = round(dist(near, r["pt"]) / 1000, 1)
+        if not any(r["name"].lower() == o["name"].lower() and dist(r["pt"], o["pt"]) < 200 for o in out):
+            out.append(r)
+    match = lambda r: 0 if r.get("cat") or r["name"].lower().startswith(q) else 1 if any(w.startswith(q.split()[0]) for w in r["name"].lower().split()) else 2
+    # each 10x further away costs as much as a worse name match, so a "Hospital" town 5000 km off loses to Sharda Hospital 3 km away
+    out.sort(key=lambda r: match(r) + math.log10(r.get("km", 0) + 1))
+    # a city or state Photon ranks first ("mumbai") stays even when nearby shops with that word fill the list
+    top = found[0] if found and found[0].get("big") else None
+    if top and top in out and top not in out[:limit]:
+        return out[:limit - 1] + [top]
+    return out[:limit]
 
 
 def expire_trips():
