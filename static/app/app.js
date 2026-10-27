@@ -260,7 +260,7 @@ async function maybeRoute() {
     const q = new URLSearchParams({ from: from.join(","), to: state.to.join(","), at: whenParam() });
     const res = await api("/api/route?" + q);
     if (seq !== routeSeq) return; // the user picked something else meanwhile
-    state.routes = res.routes; state.rain = res.rain; state.routeFrom = from;
+    state.routes = res.routes; state.rain = res.rain; state.routeFrom = from; state.sources = res.sources || {};
     state.sel = "safest";
     drawRoutes(true);
     renderRoutes();
@@ -302,6 +302,7 @@ function gauge(score) {
     <div><span>${score}<small>SCORE</small></span></div></div>`;
 }
 
+const daysAgo = (ts) => { const d = Math.floor((Date.now() / 1000 - ts) / 86400); return d < 1 ? "today" : d === 1 ? "yesterday" : `${d} days ago`; };
 function renderRoutes() {
   const r = state.routes.find((x) => x.kind === state.sel);
   const fastest = state.routes.find((x) => x.kind === "fastest");
@@ -342,7 +343,8 @@ function renderRoutes() {
     <details class="why"><summary>Directions · ${r.steps.length - 1} ${r.steps.length === 2 ? "step" : "steps"}</summary><ol class="steps-list">${r.steps.map((st) =>
       `<li><span class="turn">${turnIcon(st.turn)}</span>${esc(st.text)}<small>${st.dist ? fmtDist(st.dist) : ""}</small></li>`).join("")}</ol></details>
     <details class="why"><summary>Why this score?</summary><div class="bars">${factors}</div>
-      <p class="muted" style="margin:0 0 12px">Scores compare routes. They mean <b>safer</b>, never guaranteed safe. Trust your instincts.</p></details>
+      <p class="muted" style="margin:0 0 12px">Scores compare routes. They mean <b>safer</b>, never guaranteed safe. Trust your instincts.</p>
+      <p class="muted" style="margin:0 0 12px">"No data" means nothing is mapped there, which is not the same as bad. Data used: ${Object.entries(state.sources).map(([k, ts]) => `${esc(k)} (downloaded ${daysAgo(ts)})`).join(", ") || "none"}.</p></details>
     <div class="actions">
       <button class="btn btn-primary" id="startBtn">${icon("walk")}Start walking</button>
       <button class="btn" id="shareRouteBtn" aria-label="Share this trip">${icon("share")}</button>

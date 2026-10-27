@@ -30,6 +30,17 @@ The browser tests drive the app on a phone-sized screen against `fixture_server.
 `npm install --no-save playwright leaflet@1.9.4 && npx playwright install chromium && node --test browser.test.cjs`.
 GitHub Actions runs both on every pull request (`.github/workflows/test.yml`).
 
+## Checking the scores against real audits
+
+The scores are only as good as their match with what people find on the street. To check them, walk a set of
+spots at night with a safety audit checklist (Safetipin's or Jagori's), without looking at SafeRoute first.
+Rate each spot from 1 (unsafe) to 5 (safe) and note whether the lights were on. Fill in `data/audits.csv` in the
+format of `audits_template.csv` (`lat,lon,when,safety,lit`), then run `python validate.py data/audits.csv`.
+It prints how closely the scores follow the auditors' ratings (Spearman rank correlation, from at least 30 spots)
+and how often the lighting matches. It also writes every spot with its score to `data/audits_scored.csv`.
+In the app, "No data" means nothing is mapped there, which is not the same as a bad score. "Why this score?" lists
+each data source and when it was downloaded.
+
 To install it on a phone, the site must be served over **HTTPS** (browsers require that for location and
 install). For a demo, run `npx localtunnel --port 8000` or `cloudflared tunnel --url http://localhost:8000`
 and open the https link on the phone. Then use "Add to Home Screen".

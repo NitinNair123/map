@@ -317,6 +317,7 @@ class Area:
             if p["kind"] != "police" and seg_dist(p["pt"], pa, pb) <= {"lamp": 20, "cctv": 50, "transit": 150}.get(p["kind"], 60):
                 near[p["kind"]].append(i)
         e["near"] = near
+        e["places_mapped"] = any(self.pois[i]["kind"] in ("place", "haven") for i, _ in self._near(mid, 500))
         e["unloaded"] = {f for f, boxes in self.unloaded.items() if any(s <= mid[0] <= n and w <= mid[1] <= x for s, w, n, x in boxes)}
         c = self._cell(mid)
         e["buildings_ha"] = sum(self.building_cells.get((c[0] + i, c[1] + j), 0) for i in (-1, 0, 1) for j in (-1, 0, 1)) / 9.8
@@ -428,7 +429,9 @@ class Area:
             lighting = e["lamp_level"]
         else:
             lighting = None
-        if open_places or not status:
+        if not status and not e["places_mapped"]:
+            activity = None  # no shop mapped anywhere near: an unmapped block, not proof the street is empty
+        elif open_places or not status:
             activity = min(1, len(open_places) / 3)
         else:
             activity = None if any(o is None for _, o in status) else 0.0  # places nearby, but no published hours
@@ -456,7 +459,7 @@ class Area:
             "path": max(0.0, min(1.0, path)),
             "surroundings": surroundings,
             "escape": escape,
-            "transit": 1.0 if near["transit"] else 0.0,
+            "transit": 1.0 if near["transit"] else None,  # bus stops are thinly mapped, so none mapped proves nothing
             # homes and shops overlooking the street; unknown until building footprints are loaded for this area
             "overlooked": min(1, e["buildings_ha"] / 20) if self.building_cells and "overlooked" not in e["unloaded"] else None,
         }, open_places

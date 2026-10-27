@@ -44,6 +44,7 @@ test("plan a route and start a trip on a phone screen", async () => {
   const { ctx, page, errors } = await phone();
   await routeToPharmacy(page);
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling");
+  assert.match(await page.textContent("#sheetBody"), /Data used: OpenStreetMap \(downloaded today\)/);
   await page.click("#startBtn");
   await page.waitForSelector("text=Sharing live");
   assert.ok(await page.isVisible("text=Keep SafeRoute open with the screen on"));
