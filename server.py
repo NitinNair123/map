@@ -3,6 +3,7 @@ import csv
 import importlib.util
 import ipaddress
 import json
+import math
 import os
 import secrets
 import sys
@@ -119,12 +120,14 @@ def geoapify(q, near):
         params["bias"] = f"proximity:{near[1]},{near[0]}"
     with urlopen(Request("https://api.geoapify.com/v1/geocode/autocomplete?" + urlencode(params), headers={"User-Agent": "SafeRoute/1.0"}), timeout=6) as r:
         results = json.load(r)["results"]
-    return [{"name": p.get("name") or p.get("address_line1") or p["formatted"], "pt": [p["lat"], p["lon"]],
-             "kind": p.get("address_line2") or p.get("result_type", "place")} for p in results]
+    out = [{"name": p.get("name") or p.get("address_line1") or p["formatted"], "pt": [p["lat"], p["lon"]],
+            "kind": p.get("address_line2") or p.get("result_type", "place")} for p in results]
+    # it matches names only and its bias is weak: "hospital" from Greater Noida returns towns in Uganda, so keep it local
+    return [r for r in out if not near or dist(near, r["pt"]) < 100000]
 
 
 def nearby_places(q, near, radius_m=5000):
-    """Overture businesses already downloaded for trips near the user: shops and offices OSM and Photon often lack."""
+    """Overture businesses already downloaded for trips near the user, by name or category ("atm", "pizza", "hospital")."""
     words = q.lower().split()
     out = []
     for t in tiles_near(near, near, radius_m):
@@ -133,10 +136,10 @@ def nearby_places(q, near, radius_m=5000):
             continue
         with open(path) as f:
             for el in json.load(f)["elements"]:
-                name = el["tags"].get("name", "")
-                have = name.lower().split()
+                name, kind = el["tags"].get("name", ""), el["tags"]["overture"]
+                have = name.lower().split() + kind.split("_")
                 if name and all(any(h.startswith(w) for h in have) for w in words):
-                    out.append({"name": name, "pt": [el["lat"], el["lon"]], "kind": el["tags"]["overture"]})
+                    out.append({"name": name, "pt": [el["lat"], el["lon"]], "kind": kind})
     return out
 
 
@@ -166,7 +169,7 @@ def geocode(q, near):
 
 
 def rank(q, near, found, limit=8):
-    """Merge sources: drop repeats (same name within 200 m), then names starting with what was typed, nearest first."""
+    """Merge sources: drop repeats (same name within 200 m), then rank by how well the name matches and how near it is."""
     q = q.lower()
     out = []
     for r in found:
@@ -174,8 +177,9 @@ def rank(q, near, found, limit=8):
             r["km"] = round(dist(near, r["pt"]) / 1000, 1)
         if not any(r["name"].lower() == o["name"].lower() and dist(r["pt"], o["pt"]) < 200 for o in out):
             out.append(r)
-    starts = lambda r: 0 if r["name"].lower().startswith(q) else 1 if any(w.startswith(q.split()[0]) for w in r["name"].lower().split()) else 2
-    out.sort(key=lambda r: (starts(r), r.get("km", 0)))
+    match = lambda r: 0 if r["name"].lower().startswith(q) else 1 if any(w.startswith(q.split()[0]) for w in r["name"].lower().split()) else 2
+    # each 10x further away costs as much as a worse name match, so a "Hospital" town 5000 km off loses to Sharda Hospital 3 km away
+    out.sort(key=lambda r: match(r) + math.log10(r.get("km", 0) + 1))
     return out[:limit]
 
 
