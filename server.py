@@ -96,12 +96,14 @@ def is_raining(pt, when):
     return w["rain"]
 
 
-def photon(q, near):
-    """Photon (OpenStreetMap, free, no key). A low location_bias_scale ranks nearby places above famous far ones."""
-    params = {"q": q, "limit": 10, "lang": "en"}
-    if near:
-        params.update(lat=near[0], lon=near[1], zoom=14, location_bias_scale=0.1)
-    with urlopen(Request("https://photon.komoot.io/api/?" + urlencode(params), headers={"User-Agent": "SafeRoute/1.0"}), timeout=6) as r:
+# words people type for a kind of place, as the OpenStreetMap tag Photon can search around the user for
+CATEGORIES = {"metro": "railway:station", "station": "railway:station", "hospital": "amenity:hospital", "atm": "amenity:atm",
+              "pharmacy": "amenity:pharmacy", "chemist": "amenity:pharmacy", "police": "amenity:police", "petrol": "amenity:fuel",
+              "bus stop": "highway:bus_stop", "toilet": "amenity:toilets", "bank": "amenity:bank", "hotel": "tourism:hotel"}
+
+
+def photon_get(path, params):
+    with urlopen(Request(f"https://photon.komoot.io/{path}?" + urlencode(params), headers={"User-Agent": "SafeRoute/1.0"}), timeout=6) as r:
         features = json.load(r)["features"]
     out = []
     for f in features:
@@ -109,7 +111,24 @@ def photon(q, near):
         name = p.get("name") or " ".join(x for x in (p.get("housenumber"), p.get("street")) if x) or p.get("city")
         where = ", ".join(x for x in (p.get("street") if p.get("name") else None, p.get("district") or p.get("locality"), p.get("city"), p.get("state")) if x)
         if name:
-            out.append({"name": name, "pt": [lat, lon], "kind": where or p.get("osm_value", "place").replace("_", " ")})
+            out.append({"name": name, "pt": [lat, lon], "kind": where or p.get("osm_value", "place").replace("_", " "),
+                        "tag": f"{p.get('osm_key')}:{p.get('osm_value')}", "big": p.get("type") in ("city", "county", "state", "country")})
+    return out
+
+
+def photon(q, near):
+    """Photon (OpenStreetMap, free, no key). A low location_bias_scale ranks nearby places above famous far ones."""
+    params = {"q": q, "limit": 10, "lang": "en"}
+    if near:
+        params.update(lat=near[0], lon=near[1], zoom=14, location_bias_scale=0.1)
+    out = photon_get("api/", params)
+    tag = CATEGORIES.get(q.lower().rstrip("s"))
+    if tag and near:  # "metro" means stations near me, whose names don't contain "metro"
+        try:
+            hits = photon_get("reverse", {"lat": near[0], "lon": near[1], "radius": 5, "limit": 10, "osm_tag": tag, "lang": "en"})
+            out += [dict(r, cat=True) for r in hits if r["tag"] == tag]  # the tag check drops anything the filter let through
+        except (OSError, ValueError, KeyError) as err:  # keep the name matches
+            print(f"search: photon nearby {tag} failed ({type(err).__name__})", flush=True)
     return out
 
 
@@ -139,7 +158,8 @@ def nearby_places(q, near, radius_m=5000):
                 name, kind = el["tags"].get("name", ""), el["tags"]["overture"]
                 have = name.lower().split() + kind.split("_")
                 if name and all(any(h.startswith(w) for h in have) for w in words):
-                    out.append({"name": name, "pt": [el["lat"], el["lon"]], "kind": kind})
+                    out.append({"name": name, "pt": [el["lat"], el["lon"]], "kind": kind,
+                                "cat": all(any(k.startswith(w) for k in kind.split("_")) for w in words)})
     return out
 
 
@@ -177,9 +197,13 @@ def rank(q, near, found, limit=8):
             r["km"] = round(dist(near, r["pt"]) / 1000, 1)
         if not any(r["name"].lower() == o["name"].lower() and dist(r["pt"], o["pt"]) < 200 for o in out):
             out.append(r)
-    match = lambda r: 0 if r["name"].lower().startswith(q) else 1 if any(w.startswith(q.split()[0]) for w in r["name"].lower().split()) else 2
+    match = lambda r: 0 if r.get("cat") or r["name"].lower().startswith(q) else 1 if any(w.startswith(q.split()[0]) for w in r["name"].lower().split()) else 2
     # each 10x further away costs as much as a worse name match, so a "Hospital" town 5000 km off loses to Sharda Hospital 3 km away
     out.sort(key=lambda r: match(r) + math.log10(r.get("km", 0) + 1))
+    # a city or state Photon ranks first ("mumbai") stays even when nearby shops with that word fill the list
+    top = found[0] if found and found[0].get("big") else None
+    if top and top in out and top not in out[:limit]:
+        return out[:limit - 1] + [top]
     return out[:limit]
 
 
