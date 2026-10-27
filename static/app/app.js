@@ -135,7 +135,7 @@ $("#locateBtn").onclick = async () => {
 // ---------- search ----------
 let searchSeq = 0, activeField = null;
 function bindSearch(input, which) {
-  input.addEventListener("focus", () => { activeField = which; showResults(input.value); });
+  input.addEventListener("focus", () => { activeField = which; startWatching(); showResults(input.value); });
   input.addEventListener("input", () => showResults(input.value));
   input.addEventListener("keydown", (e) => {
     const items = [...$("#results").children];
@@ -162,8 +162,8 @@ async function showResults(q) {
   if (q.trim().length >= 2) {
     await new Promise((r) => setTimeout(r, 250)); // wait for typing to pause before searching
     if (seq !== searchSeq) return;
-    const c = map.getCenter();
-    found = await api(`/api/search?q=${encodeURIComponent(q)}&near=${c.lat},${c.lng}`).catch(() => []);
+    const c = map.getCenter(), near = state.here || [c.lat, c.lng]; // suggest places around the user, like Google Maps
+    found = await api(`/api/search?q=${encodeURIComponent(q)}&near=${near.join(",")}`).catch(() => []);
   }
   if (seq !== searchSeq) return;
   const list = $("#results");
@@ -172,7 +172,7 @@ async function showResults(q) {
     const li = document.createElement("li");
     li.setAttribute("role", "option");
     li.setAttribute("aria-selected", i === 0 && found.length ? "true" : "false");
-    li.innerHTML = `<span class="ico">${icon(r.here ? "locate" : r.pick ? "flag" : r.kind === "street" ? "walk" : "store")}</span><span><b>${esc(r.name)}</b><small>${esc(cap(String(r.kind).replace(/_/g, " ")))}</small></span>`;
+    li.innerHTML = `<span class="ico">${icon(r.here ? "locate" : r.pick ? "flag" : r.kind === "street" ? "walk" : "store")}</span><span><b>${esc(r.name)}</b><small>${r.km != null ? `${r.km} km · ` : ""}${esc(cap(String(r.kind).replace(/_/g, " ")))}</small></span>`;
     li.onclick = () => choose(r);
     list.appendChild(li);
   });

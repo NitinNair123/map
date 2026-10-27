@@ -1,0 +1,42 @@
+import json
+import os
+import tempfile
+import unittest
+
+import server
+from tiles import TileStore
+
+HOME = (28.47, 77.49)
+
+
+class Search(unittest.TestCase):
+    def test_rank_puts_near_prefix_matches_first_and_drops_repeats(self):
+        found = [{"name": "Delhi", "pt": [28.61, 77.21], "kind": "city"},
+                 {"name": "New Delhi Cafe", "pt": [28.471, 77.49], "kind": "cafe"},
+                 {"name": "Delhi Public School", "pt": [28.48, 77.49], "kind": "school"},
+                 {"name": "delhi public school", "pt": [28.4801, 77.4901], "kind": "school"}]
+        out = server.rank("delhi", HOME, found)
+        self.assertEqual([r["name"] for r in out], ["Delhi Public School", "Delhi", "New Delhi Cafe"])
+        self.assertEqual(out[0]["km"], 1.1)
+
+    def test_overture_places_near_user_are_found_and_one_source_down_is_survived(self):
+        old = server.store, server.photon, server.GEOAPIFY_KEY
+        with tempfile.TemporaryDirectory() as d:
+            server.store = TileStore(d)
+            with open(server.store._path((2847, 7749), "places"), "w") as f:
+                json.dump({"elements": [{"lat": 28.475, "lon": 77.495, "tags": {"name": "Sharma Tea Stall", "overture": "cafe"}},
+                                        {"lat": 28.476, "lon": 77.495, "tags": {"name": "Gupta Sweets", "overture": "bakery"}}]}, f)
+
+            def down(q, near):
+                raise OSError("no network")
+            server.photon, server.GEOAPIFY_KEY = down, ""
+            try:
+                out = server.geocode("tea st", HOME)
+            finally:
+                server.store, server.photon, server.GEOAPIFY_KEY = old
+        self.assertEqual([(r["name"], r["kind"]) for r in out], [("Sharma Tea Stall", "cafe")])
+        self.assertNotIn(("tea st", (28.47, 77.49)), server.geocode_cache)  # offline answers aren't cached
+
+
+if __name__ == "__main__":
+    unittest.main()
