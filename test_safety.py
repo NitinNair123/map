@@ -1,5 +1,6 @@
 import os
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -260,14 +261,16 @@ class OpenDataTest(unittest.TestCase):
                     tags = {"highway": el["tags"]["highway"], "overture_road": "yes", "osm_way": el["id"]}
                     out.append({**el, "id": f"ovr{el['id']}", "tags": tags})
             return {"elements": out}
-        osm_calls = []
+        osm_calls, release = [], threading.Event()
         def osm(*a):
+            release.wait(5)  # hold the background fetch until the first area is checked, or the test races it
             osm_calls.append(a)
             return fixture()
         store = TileStore(tempfile.mkdtemp(), fetch=osm, roads=roads)
         first = store.for_trip(A, B)
         self.assertEqual(len(first.edges), len(Area(fixture()).edges))
         self.assertFalse(first.pois)  # OSM detail is still loading
+        release.set()
         store.pool.shutdown(wait=True)
         self.assertTrue(osm_calls)
         later = store.for_trip(A, B)
