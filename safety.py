@@ -53,8 +53,12 @@ SURROUNDINGS = {
 }
 
 # Score points a recent community report adds near it; halves every 30 days
-REPORT_TYPES = {"felt_unsafe": -25, "harassment": -40, "broken_light": 0, "felt_safe": 15}
+REPORT_TYPES = {"felt_unsafe": -25, "harassment": -40, "broken_light": 0, "lights_on": 0, "felt_safe": 15}
 REPORT_RADIUS_M = 50
+# What people saw on the street after dark: +1 lights working, -1 not working. Votes halve every 60 days, and a
+# street's net vote of at least half a fresh report overrides map data, so one old or lone report can't decide forever.
+LIGHT_VOTES = {"lights_on": 1, "broken_light": -1}
+LIGHT_VOTE_DAYS = 60
 
 # Imported incident history (police data, news): severity, halves every 180 days, counts most at the same time of day
 INCIDENT_SEVERITY = {"assault": 1.0, "robbery": 0.9, "harassment": 0.8, "stalking": 0.7, "snatching": 0.7,
@@ -391,6 +395,9 @@ class Area:
         self._cache.clear()
 
     def add_report(self, r):
+        if r["type"] in LIGHT_VOTES and "dark" not in r:
+            # nobody can tell whether a street light works in daylight, so only reports made after dark count
+            r["dark"] = daylight(r["lat"], r["lon"], datetime.fromtimestamp(r["ts"], timezone.utc)) < 0.5
         self.reports.append(r)
         self._attach(r, REPORT_RADIUS_M, "reports")
 
@@ -410,8 +417,11 @@ class Area:
         dark = 1 - light
         status = [(i, self.is_place_open(self.pois[i], when)) for i in near["place"] + near["haven"]]
         open_places = [i for i, o in status if o]
-        if any(r["type"] == "broken_light" for r in e["reports"]):
-            lighting = 0.0
+        now = time.time()
+        votes = sum(LIGHT_VOTES[r["type"]] * 0.5 ** ((now - r["ts"]) / 86400 / LIGHT_VOTE_DAYS)
+                    for r in e["reports"] if r.get("dark"))
+        if abs(votes) >= 0.5:
+            lighting = 1.0 if votes > 0 else 0.0
         elif e["lit"] in LIT_TAGS:
             lighting = LIT_TAGS[e["lit"]]
         elif near["lamp"]:

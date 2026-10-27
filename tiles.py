@@ -10,6 +10,7 @@ import urllib.parse
 import urllib.request
 from collections import Counter, OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 from safety import Area, dist, seg_dist
 
@@ -48,18 +49,28 @@ out center tags;
 
 # Objects Mapillary detects in street-level photos, as the OSM tags the scorer already understands
 MAPILLARY_KINDS = {"object--street-light": {"highway": "street_lamp"}, "object--cctv-camera": {"man_made": "surveillance"}}
+MAPILLARY_MAX_AGE_Y = 5  # objects not seen in any photo for 5 years may have been removed when the road was redone
+
+
+def seen_years_ago(v):
+    """Mapillary's last_seen_at, as milliseconds or an ISO date, in years before now; None when missing."""
+    if v in (None, ""):
+        return None
+    t = v / 1000 if isinstance(v, (int, float)) else datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+    return (time.time() - t) / (365.25 * 86400)
 
 
 def mapillary(s, w, n, e):
     """Street lights and CCTV cameras that Mapillary found in street-level photos of one tile."""
-    q = urllib.parse.urlencode({"access_token": os.environ["MAPILLARY_TOKEN"], "fields": "id,object_value,geometry",
+    q = urllib.parse.urlencode({"access_token": os.environ["MAPILLARY_TOKEN"], "fields": "id,object_value,geometry,last_seen_at",
                                 "bbox": f"{w},{s},{e},{n}", "object_values": ",".join(MAPILLARY_KINDS), "limit": 2000})
     url, out = f"https://graph.mapillary.com/map_features?{q}", []
     for _ in range(5):  # at most 10,000 objects per tile
         with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "SafeRoute/1.0"}), timeout=20) as r:
             page = json.load(r)
         for f in page.get("data", []):
-            if f.get("object_value") in MAPILLARY_KINDS:
+            age = seen_years_ago(f.get("last_seen_at"))
+            if f.get("object_value") in MAPILLARY_KINDS and (age is None or age <= MAPILLARY_MAX_AGE_Y):
                 lon, lat = f["geometry"]["coordinates"]
                 out.append({"type": "node", "id": f"mly{f['id']}", "lat": lat, "lon": lon,
                             "tags": {**MAPILLARY_KINDS[f["object_value"]], "source": "mapillary"}})

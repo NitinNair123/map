@@ -1,12 +1,14 @@
 """Website, app and JSON API. Usage: python server.py [port]"""
 import csv
 import importlib.util
+import ipaddress
 import json
 import os
 import secrets
 import sys
 import threading
 import time
+import traceback
 from collections import OrderedDict
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -20,12 +22,16 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 REPORTS_PATH = os.path.join(DATA_DIR, "reports.json")
 INCIDENTS_PATH = os.path.join(DATA_DIR, "incidents.csv")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-TRIP_TTL = 12 * 3600
+TRIP_TTL = 12 * 3600  # a live trip is wiped 12 hours after it started, whatever happens
+ENDED_TTL = 30 * 60  # an ended trip keeps only "ended" (no locations) so friends see it finished
 MAX_TRIPS = 2000
+# requests allowed per client in a window of seconds, so one script can't flood reports or fill the trip table
+LIMITS = {"report": (10, 3600), "trip": (10, 3600), "update": (120, 600), "read": (300, 600)}
+PUBLIC = os.environ.get("SAFEROUTE_PUBLIC") == "1"  # serve clients outside the home network directly (only behind HTTPS)
 lock = threading.Lock()
 # shortcut: live trips live in memory and vanish on restart, move to Redis when running more than one server
 trips = {}
-report_log = {}  # ip -> recent report times, to stop one person flooding an area
+hits = {}  # (limit name, client) -> recent request times, kept in memory only
 weather = {}  # rounded (lat, lon) -> {"rain", "checked"}
 geocode_cache = OrderedDict()
 
@@ -77,7 +83,7 @@ def is_raining(pt, when):
     if time.time() - w["checked"] > 900:
         w["checked"] = time.time()
         try:
-            q = urlencode({"latitude": pt[0], "longitude": pt[1], "current": "precipitation"})
+            q = urlencode({"latitude": round(pt[0], 1), "longitude": round(pt[1], 1), "current": "precipitation"})  # ~10 km, not the walker's spot
             with urlopen(f"https://api.open-meteo.com/v1/forecast?{q}", timeout=3) as r:
                 w["rain"] = json.load(r)["current"]["precipitation"] > 0.2
         except Exception:
@@ -110,11 +116,37 @@ def geocode(q, near):
 
 def expire_trips():
     now = time.time()
-    for k in [k for k, t in trips.items() if now - t["updated"] > TRIP_TTL]:
+    for k in [k for k, t in trips.items() if now - t["started"] > TRIP_TTL or t["ended"] and now - t["updated"] > ENDED_TTL]:
         del trips[k]
 
 
+def end_trip(t):
+    """Delete every location of a trip as soon as it ends; only the name and "ended" stay for the viewer."""
+    t.update(points=[], dest=None, eta=0, ended=True, updated=time.time())
+
+
+def allowed(kind, client):
+    """Sliding-window rate limit; drops clients whose window has emptied so the table can't grow forever."""
+    limit, window = LIMITS[kind]
+    now = time.time()
+    with lock:
+        for k in [k for k, v in hits.items() if now - v[-1] > window and k[0] == kind]:
+            del hits[k]
+        recent = [t for t in hits.get((kind, client), []) if now - t < window]
+        if len(recent) >= limit:
+            return False
+        hits[(kind, client)] = recent + [now]
+        return True
+
+
+def redact(path):
+    """Log lines keep the endpoint only: no coordinates, search text or trip ids."""
+    path = urlparse(path).path
+    return "/api/trip/<id>" if path.startswith("/api/trip/") else path
+
+
 class Handler(SimpleHTTPRequestHandler):
+    timeout = 30  # a client that stops sending can't hold a server thread for ever
     extensions_map = {**SimpleHTTPRequestHandler.extensions_map, ".webmanifest": "application/manifest+json", ".js": "text/javascript"}
 
     def __init__(self, *a, **kw):
@@ -123,7 +155,38 @@ class Handler(SimpleHTTPRequestHandler):
     def end_headers(self):
         if self.path.startswith("/api/"):
             self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")  # the viewer URL holds the trip id
+        self.send_header("X-Content-Type-Options", "nosniff")
         super().end_headers()
+
+    def log_request(self, code="-", size="-"):
+        self.log_message("%s %s %s", self.command, redact(self.path), code)
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write(f"{self.log_date_time_string()} {fmt % args}\n")  # no client address
+
+    def list_directory(self, path):
+        self.send_error(404)
+
+    def client(self):
+        """Who is asking: behind a local tunnel or proxy every request comes from 127.0.0.1, so use its header."""
+        ip = self.client_address[0]
+        if ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            fwd = self.headers.get("Cf-Connecting-IP") or self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+            return fwd or ip
+        return ip
+
+    def private_client(self):
+        a = ipaddress.ip_address(self.client_address[0].split("%")[0])
+        return (getattr(a, "ipv4_mapped", None) or a).is_private
+
+    def parse_request(self):
+        if not super().parse_request():
+            return False
+        if PUBLIC or self.private_client():
+            return True
+        self.send_error(403, "SafeRoute only answers this network. Put it behind HTTPS and set SAFEROUTE_PUBLIC=1 to open it up.")
+        return False
 
     def send_json(self, obj, code=200):
         body = json.dumps(obj).encode()
@@ -135,8 +198,8 @@ class Handler(SimpleHTTPRequestHandler):
 
     def read_json(self):
         n = int(self.headers.get("Content-Length", 0))
-        if n > 10_000:
-            raise ValueError("too large")
+        if not 0 <= n <= 10_000:
+            raise ValueError("bad length")
         body = json.loads(self.rfile.read(n) or b"{}")
         if not isinstance(body, dict):
             raise ValueError("expected an object")
@@ -148,12 +211,17 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
+        if u.path.startswith("/api/") and not allowed("read", self.client()):
+            return self.send_json({"error": "Too many requests, please wait a minute."}, 429)
         try:
             if u.path == "/api/search":
                 text = q.get("q", [""])[0].strip()[:80]
                 return self.send_json(geocode(text, latlon(q["near"][0]) if q.get("near") else None) if len(text) >= 2 else [])
             if u.path == "/api/heat":
                 s, w, n, e = (float(v) for v in q["bbox"][0].split(","))
+                latlon((s, w)), latlon((n, e))
+                if not (s < n and w < e):
+                    raise ValueError("bbox must be south,west,north,east")
                 if dist((s, w), (n, e)) > 6000:
                     return self.send_json({"error": "Zoom in to see the safety map"}, 400)
                 when, mid = self.when(q), ((s + n) / 2, (w + e) / 2)
@@ -168,6 +236,8 @@ class Handler(SimpleHTTPRequestHandler):
                 rain = is_raining(a, when)
                 return self.send_json({"routes": store.for_trip(a, b).routes(a, b, when, rain), "rain": rain})
             if u.path.startswith("/api/trip/"):
+                with lock:
+                    expire_trips()
                 t = trips.get(u.path.rsplit("/", 1)[1])
                 if not t:
                     return self.send_json({"error": "This trip has ended or the link is wrong."}, 404)
@@ -181,12 +251,22 @@ class Handler(SimpleHTTPRequestHandler):
         except (KeyError, ValueError) as e:
             msg = str(e) if "streets" in str(e) else f"bad request: {e}"
             return self.send_json({"error": msg}, 400)
+        except Exception:
+            return self.server_error()
         super().do_GET()
+
+    def server_error(self):
+        """A bug must still answer with JSON, or the app waits for its 90 s timeout."""
+        traceback.print_exc()
+        self.send_json({"error": "Something went wrong on our side, please try again."}, 500)
 
     def do_POST(self):
         path = urlparse(self.path).path
         try:
             body = self.read_json()
+            kind = "report" if path == "/api/report" else "trip" if path == "/api/trip" else "update"
+            if not allowed(kind, self.client()):
+                return self.send_json({"error": "Too many requests from this phone, please try again later."}, 429)
             if path == "/api/report":
                 return self.report(body)
             if path == "/api/trip":
@@ -195,6 +275,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.update_trip(path.rsplit("/", 1)[1], body)
         except (KeyError, ValueError, TypeError) as e:
             return self.send_json({"error": f"bad request: {e}"}, 400)
+        except Exception:
+            return self.server_error()
         self.send_json({"error": "not found"}, 404)
 
     def report(self, body):
@@ -202,11 +284,6 @@ class Handler(SimpleHTTPRequestHandler):
         latlon((r["lat"], r["lon"]))
         if r["type"] not in REPORT_TYPES:
             raise ValueError("unknown report type")
-        ip = self.client_address[0]
-        recent = [t for t in report_log.get(ip, []) if r["ts"] - t < 3600]
-        if len(recent) >= 10:
-            return self.send_json({"error": "Thanks! You've sent a lot of reports this hour, please try again later."}, 429)
-        report_log[ip] = recent + [r["ts"]]
         with lock:
             store.add_report(r)
             with open(REPORTS_PATH + ".tmp", "w") as f:
@@ -216,6 +293,9 @@ class Handler(SimpleHTTPRequestHandler):
 
     def start_trip(self, body):
         dest = latlon(body["dest"])
+        eta = float(body.get("eta", 0))
+        if not 0 <= eta <= 24 * 60:
+            raise ValueError("bad eta")
         with lock:
             expire_trips()
             if len(trips) >= MAX_TRIPS:
@@ -223,19 +303,20 @@ class Handler(SimpleHTTPRequestHandler):
             tid, key = secrets.token_urlsafe(9), secrets.token_urlsafe(18)
             now = time.time()
             trips[tid] = {"key": key, "name": str(body.get("name", ""))[:40], "dest": dest,
-                          "eta": float(body.get("eta", 0)), "points": [], "started": now, "updated": now, "ended": False}
+                          "eta": eta, "points": [], "started": now, "updated": now, "ended": False}
         self.send_json({"id": tid, "key": key})
 
     def update_trip(self, tid, body):
         t = trips.get(tid)
         # the viewer link only carries the id; only the walker holds the key that can move the dot
-        if not t or not secrets.compare_digest(str(body.get("key", "")), t["key"]):
+        if not t or t["ended"] or not secrets.compare_digest(str(body.get("key", "")), t["key"]):
             return self.send_json({"error": "unknown trip"}, 404)
         with lock:
-            if "lat" in body:
+            if body.get("ended"):
+                end_trip(t)
+            elif "lat" in body:
                 t["points"] = (t["points"] + [latlon((body["lat"], body["lon"])) + (time.time(),)])[-300:]
-            t["ended"] = bool(body.get("ended", t["ended"]))
-            t["updated"] = time.time()
+                t["updated"] = time.time()
         self.send_json({"ok": True})
 
 
