@@ -8,6 +8,7 @@ import secrets
 import sys
 import threading
 import time
+import traceback
 from collections import OrderedDict
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -218,6 +219,9 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json(geocode(text, latlon(q["near"][0]) if q.get("near") else None) if len(text) >= 2 else [])
             if u.path == "/api/heat":
                 s, w, n, e = (float(v) for v in q["bbox"][0].split(","))
+                latlon((s, w)), latlon((n, e))
+                if not (s < n and w < e):
+                    raise ValueError("bbox must be south,west,north,east")
                 if dist((s, w), (n, e)) > 6000:
                     return self.send_json({"error": "Zoom in to see the safety map"}, 400)
                 when, mid = self.when(q), ((s + n) / 2, (w + e) / 2)
@@ -247,7 +251,14 @@ class Handler(SimpleHTTPRequestHandler):
         except (KeyError, ValueError) as e:
             msg = str(e) if "streets" in str(e) else f"bad request: {e}"
             return self.send_json({"error": msg}, 400)
+        except Exception:
+            return self.server_error()
         super().do_GET()
+
+    def server_error(self):
+        """A bug must still answer with JSON, or the app waits for its 90 s timeout."""
+        traceback.print_exc()
+        self.send_json({"error": "Something went wrong on our side, please try again."}, 500)
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -264,6 +275,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.update_trip(path.rsplit("/", 1)[1], body)
         except (KeyError, ValueError, TypeError) as e:
             return self.send_json({"error": f"bad request: {e}"}, 400)
+        except Exception:
+            return self.server_error()
         self.send_json({"error": "not found"}, 404)
 
     def report(self, body):

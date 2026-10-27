@@ -25,7 +25,10 @@ and is used from the next trip. Without pyarrow, everything comes from Overpass,
 requests, and caches them in `data/tiles/` for 7 days. It tries three Overpass mirrors in turn, so one busy
 server doesn't break a trip. Place search uses Photon (komoot), and walks are capped at 10 km.
 
-Run the tests with `python -m unittest test_safety`.
+Run the tests with `python -m unittest test_safety test_server` (scoring, routing and every API endpoint, offline).
+The browser tests drive the app on a phone-sized screen against `fixture_server.py`:
+`npm install --no-save playwright leaflet@1.9.4 && npx playwright install chromium && node --test browser.test.cjs`.
+GitHub Actions runs both on every pull request (`.github/workflows/test.yml`).
 
 To install it on a phone, the site must be served over **HTTPS** (browsers require that for location and
 install). For a demo, run `npx localtunnel --port 8000` or `cloudflared tunnel --url http://localhost:8000`
