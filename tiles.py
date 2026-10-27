@@ -17,6 +17,8 @@ from safety import Area, dist, seg_dist
 TILE = 0.01  # degrees, about 1.1 km
 CHUNK = 3  # missing tiles are fetched in blocks of up to 3x3, one Overpass request each
 TILE_MAX_AGE = 7 * 86400
+SOURCE_LABELS = {"": "OpenStreetMap", "roads": "Overture streets", "places": "Overture places",
+                 "buildings": "Overture buildings", "mapillary": "Mapillary"}
 MAX_TRIP_M = 10000
 MIRRORS = [
     "https://overpass-api.de/api/interpreter",
@@ -351,6 +353,12 @@ class TileStore:
         n, e = (max(t[0] for t in key) + 1) * TILE, (max(t[1] for t in key) + 1) * TILE
         inside = lambda r: s <= r["lat"] <= n and w <= r["lon"] <= e
         area = Area({"elements": elements}, [r for r in self.reports if inside(r)], [i for i in self.incidents if inside(i)], unloaded)
+        # when each source was downloaded, oldest tile first, so the app can say how fresh the data behind a score is
+        area.sources = {}
+        for name in ["", *(["roads"] if roads else []), *self.extras]:
+            times = [os.path.getmtime(self._path(t, name)) for t in key if os.path.exists(self._path(t, name))]
+            if times:
+                area.sources[SOURCE_LABELS.get(name, name)] = round(min(times))
         with self.lock:
             if version != self.version or roads != bool(self.roads):  # newer data arrived while building, or Overture was down: rebuild next time
                 return area

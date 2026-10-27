@@ -186,6 +186,15 @@ class NoGuessingTest(unittest.TestCase):
         self.assertTrue(r["low_data"])
         self.assertIn("No lighting data for 100%", r["reasons"])
 
+    def test_nothing_mapped_nearby_is_unknown_not_bad(self):
+        bare = Area({"elements": [way(1, [1, 2], [A, B], highway="residential")]})
+        feats, _ = bare.factors(bare.edges[0], NIGHT, 0)
+        self.assertIsNone(feats["activity"])  # no shop mapped within 500 m: unmapped, not empty
+        self.assertIsNone(feats["transit"])
+        mapped = Area({"elements": [way(1, [1, 2], [A, B], highway="residential"),
+                                    node(5, (28.003, 77.0015), shop="bakery", opening_hours="Mo-Su 08:00-20:00")]})
+        self.assertEqual(mapped.factors(mapped.edges[0], NIGHT, 0)[0]["activity"], 0.0)  # shops mapped 330 m away, none here
+
 class LightReportTest(unittest.TestCase):
     def lighting(self, *reports):
         area = Area({"elements": [way(1, [1, 2], [A, B], highway="primary", lit="yes")]})
@@ -207,6 +216,23 @@ class LightReportTest(unittest.TestCase):
         self.assertAlmostEqual(seen_years_ago((time.time() - 2 * 365.25 * 86400) * 1000), 2, places=2)
         self.assertGreater(seen_years_ago("2016-05-01T10:00:00Z"), 5)
         self.assertIsNone(seen_years_ago(None))
+
+
+class AuditTest(unittest.TestCase):
+    def test_scores_compared_with_field_audits(self):
+        from validate import score_audits, spearman, summary
+        self.assertAlmostEqual(spearman([1, 2, 3, 4], [10, 20, 30, 40]), 1.0)
+        self.assertAlmostEqual(spearman([1, 2, 3, 4], [4, 3, 2, 1]), -1.0)
+        self.assertAlmostEqual(spearman([1, 1, 2], [5, 5, 9]), 1.0)  # ties share a rank
+        store = TileStore(tempfile.mkdtemp(), fetch=lambda *a: fixture())
+        rows = [{"lat": "28.0005", "lon": "77.0015", "when": NIGHT.isoformat(), "safety": "4", "lit": "yes"},  # lit market road
+                {"lat": "28.0", "lon": "77.0015", "when": NIGHT.isoformat(), "safety": "1", "lit": "no"},  # dark footway
+                {"lat": "28.0005", "lon": "77.0025", "when": NIGHT.isoformat(), "safety": "5", "lit": ""}]
+        scored = score_audits(rows, store)
+        self.assertEqual([r["model_lit"] for r in scored[:2]], ["yes", "no"])
+        s = summary(scored)
+        self.assertEqual((s["lighting_checked"], s["lighting_agree"], s["enough"]), (2, 2, False))
+        self.assertGreater(s["spearman"], 0)
 
 
 class OpenDataTest(unittest.TestCase):

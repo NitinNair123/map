@@ -234,7 +234,8 @@ class Handler(SimpleHTTPRequestHandler):
                 a, b = latlon(q["from"][0]), latlon(q["to"][0])
                 when = self.when(q)
                 rain = is_raining(a, when)
-                return self.send_json({"routes": store.for_trip(a, b).routes(a, b, when, rain), "rain": rain})
+                area = store.for_trip(a, b)
+                return self.send_json({"routes": area.routes(a, b, when, rain), "rain": rain, "sources": area.sources})
             if u.path.startswith("/api/trip/"):
                 with lock:
                     expire_trips()
