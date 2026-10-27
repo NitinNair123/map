@@ -192,6 +192,26 @@ class OpenDataTest(unittest.TestCase):
         self.assertEqual(classify({"overture": "barber"}), "place")
         self.assertEqual(classify({"overture": "train_station"}), "transit")
         self.assertEqual(classify({"overture": "gas_station"}), "haven")
+        self.assertEqual(classify({"overture": "fire_station"}), "haven")
+        self.assertEqual(classify({"overture": "ev_charging_station"}), "place")
+        self.assertEqual(classify({"overture": "animal_hospital"}), "place")
+        self.assertEqual(classify({"overture": "sports_bar"}), "nightlife")
+
+    def test_two_junctions_near_one_point_both_kept(self):
+        import struct
+        import tiles
+        pts = [(77.0, 28.0), (77.001, 28.0), (77.002, 28.0)]
+        wkb = struct.pack("<BII", 1, 2, len(pts)) + b"".join(struct.pack("<dd", *p) for p in pts)
+        row = {"id": "s1", "geometry": wkb, "class": "residential", "subclass": None, "names": None, "road_flags": None,
+               "sources": None, "connectors": [{"connector_id": "c0", "at": 0}, {"connector_id": "c1", "at": 0.5},
+                                               {"connector_id": "c2", "at": 0.501}, {"connector_id": "c3", "at": 1}]}
+        real = tiles._overture
+        tiles._overture = lambda *a, **k: [row]
+        try:
+            nodes = tiles.overture_roads(0, 0, 1, 1)["elements"][0]["nodes"]
+        finally:
+            tiles._overture = real
+        self.assertEqual(nodes, ["c0", "c1", "c2", "c3"])  # the 4th junction gets its own point instead of replacing one
 
     def test_buildings_overlook_street(self):
         els = fixture()["elements"] + [node(f"b{k}", (28.0004, 77.0005 + k * 0.0001), building="yes") for k in range(20)]
@@ -231,6 +251,37 @@ class OpenDataTest(unittest.TestCase):
         self.assertEqual(len(later.edges), len(Area(fixture()).edges))  # OSM ways lend tags, not duplicate streets
         self.assertTrue(later.pois)
         self.assertEqual([e["lit"] for e in later.edges if e["highway"] == "footway"], ["no"])
+        surroundings = lambda area: area.factors(area.edges[1], NIGHT, 0)[0]["surroundings"]
+        self.assertIsNone(surroundings(first))  # parks and wasteland not loaded yet: unknown, not safe
+        self.assertIsNotNone(surroundings(later))
+
+    def test_overpass_answers_when_overture_is_down(self):
+        def roads(*a):
+            raise OSError("S3 unreachable")
+        store = TileStore(tempfile.mkdtemp(), fetch=lambda *a: fixture(), roads=roads)
+        area = store.for_trip(A, B)
+        self.assertEqual(len(area.edges), len(Area(fixture()).edges))
+        self.assertTrue(area.pois)
+        self.assertFalse(store.areas)  # not cached, so Overture is tried again next trip
+
+    def test_buildings_not_loaded_here_are_unknown(self):
+        els = fixture()["elements"] + [node("b1", (28.0004, 77.0005), building="yes")]
+        area = Area({"elements": els}, unloaded={"overlooked": [(27, 76, 29, 78)]})
+        self.assertIsNone(area.factors(area.edges[1], NIGHT, 0)[0]["overlooked"])
+
+    def test_area_built_during_background_write_is_not_cached(self):
+        import tiles
+        store = TileStore(tempfile.mkdtemp(), fetch=lambda *a: fixture())
+        real = tiles.Area
+        def racing(*a):
+            store.version += 1  # a background fetch lands while the area is being built
+            return real(*a)
+        tiles.Area = racing
+        try:
+            store.for_trip(A, B)
+        finally:
+            tiles.Area = real
+        self.assertFalse(store.areas)
 
 
 if __name__ == "__main__":

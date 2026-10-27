@@ -167,7 +167,9 @@ PLACE_AMENITIES = {"restaurant", "cafe", "fast_food", "atm", "bank", "marketplac
                    "dentist", "post_office", "library", "events_venue", "coworking_space", "bureau_de_change"}
 
 
-OVERTURE_NIGHTLIFE = {"bar", "pub", "night_club", "liquor_store", "beer_bar", "cocktail_bar", "wine_bar", "lounge", "hookah_bar"}
+OVERTURE_NIGHTLIFE = {"bar", "pub", "night_club", "liquor_store", "beer_bar", "cocktail_bar", "wine_bar", "lounge", "hookah_bar",
+                      "sports_bar", "dive_bar", "gay_bar", "karaoke"}
+NOT_TRANSIT = ("gas", "fire", "charging", "radio", "television", "power")
 
 
 def classify_overture(cat):
@@ -175,9 +177,11 @@ def classify_overture(cat):
         return "police"
     if cat in OVERTURE_NIGHTLIFE:
         return "nightlife"
-    if "station" in cat and "gas" not in cat or cat in ("bus_stop", "taxi_stand", "transportation"):
+    if "station" in cat and not any(w in cat for w in NOT_TRANSIT) or cat in ("bus_stop", "taxi_stand", "transportation"):
         return "transit"
-    if any(w in cat for w in ("hospital", "pharmacy", "clinic", "emergency", "gas_station", "hotel")):
+    if "animal" in cat or "veterinar" in cat:
+        return "place"
+    if any(w in cat for w in ("hospital", "pharmacy", "clinic", "emergency", "gas_station", "fire_station", "hotel")):
         return "haven"
     return "place"
 
@@ -215,7 +219,8 @@ def surroundings_kind(tags):
 
 
 class Area:
-    def __init__(self, osm, reports=(), incidents=()):
+    def __init__(self, osm, reports=(), incidents=(), unloaded=None):
+        self.unloaded = unloaded or {}  # factor -> (s, w, n, e) boxes whose data hasn't loaded yet: unknown there, not zero
         self.nodes = {}
         self.adj = defaultdict(list)
         self.edges = []
@@ -308,6 +313,7 @@ class Area:
             if p["kind"] != "police" and seg_dist(p["pt"], pa, pb) <= {"lamp": 20, "cctv": 50, "transit": 150}.get(p["kind"], 60):
                 near[p["kind"]].append(i)
         e["near"] = near
+        e["unloaded"] = {f for f, boxes in self.unloaded.items() if any(s <= mid[0] <= n and w <= mid[1] <= x for s, w, n, x in boxes)}
         c = self._cell(mid)
         e["buildings_ha"] = sum(self.building_cells.get((c[0] + i, c[1] + j), 0) for i in (-1, 0, 1) for j in (-1, 0, 1)) / 9.8
         e["police_m"] = min((dist(mid, p) for p in self.police), default=math.inf)
@@ -425,6 +431,8 @@ class Area:
         elif e["overbridge"]:
             path = path * light + 0.25 * dark
         surroundings = min((SURROUNDINGS[k][0] * light + SURROUNDINGS[k][1] * dark for k in e["zones"]), default=1.0)
+        if "surroundings" in e["unloaded"]:
+            surroundings = None  # parks and wasteland come with the OSM detail, still loading here
         if e["dead_ends"] == 2:
             escape = 0.0
         elif e["dead_ends"] == 1:
@@ -440,7 +448,7 @@ class Area:
             "escape": escape,
             "transit": 1.0 if near["transit"] else 0.0,
             # homes and shops overlooking the street; unknown until building footprints are loaded for this area
-            "overlooked": min(1, e["buildings_ha"] / 20) if self.building_cells else None,
+            "overlooked": min(1, e["buildings_ha"] / 20) if self.building_cells and "overlooked" not in e["unloaded"] else None,
         }, open_places
 
     def edge_score(self, e, when, light, rain=False):

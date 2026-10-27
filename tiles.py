@@ -1,4 +1,5 @@
 """Fetch OpenStreetMap data on demand in fixed tiles, cache them on disk, and build scored areas for any trip."""
+import bisect
 import json
 import math
 import os
@@ -69,18 +70,37 @@ def mapillary(s, w, n, e):
 
 
 _datasets, _datasets_lock = {}, threading.Lock()
-OVERTURE = "overturemaps-us-west-2/release/2026-10-21.0"  # shortcut: pinned release, bump monthly from stac.overturemaps.org
+OVERTURE_BUCKET = "overturemaps-us-west-2/release/"
+OVERTURE_PINNED = "2026-10-21.0"  # used only if listing the bucket fails
+_release = []
+
+
+def overture_release(s3):
+    """The newest Overture release, read once per run; old releases are deleted from the bucket after a few months."""
+    import pyarrow.fs as fs
+    with _datasets_lock:
+        if not _release:
+            try:
+                names = [i.base_name for i in s3.get_file_info(fs.FileSelector(OVERTURE_BUCKET)) if i.type == fs.FileType.Directory]
+                _release.append(max(names, default=OVERTURE_PINNED))
+            except OSError as err:
+                print(f"overture release list failed ({err}), using {OVERTURE_PINNED}", flush=True)
+                _release.append(OVERTURE_PINNED)
+        return _release[0]
 
 
 def _overture(theme, s, w, n, e, columns, kind=None, where=None):
     import pyarrow.compute as pc  # optional dependency: pip install pyarrow
     import pyarrow.dataset as ds
     import pyarrow.fs as fs
-    path = f"{OVERTURE}/theme={theme}/type={kind or theme[:-1]}/"
+    s3 = fs.S3FileSystem(anonymous=True, region="us-west-2")
+    path = f"{OVERTURE_BUCKET}{overture_release(s3)}/theme={theme}/type={kind or theme[:-1]}/"
     with _datasets_lock:  # reuse the dataset: it keeps each file's metadata, so later queries skip hundreds of reads
-        if path not in _datasets:
-            _datasets[path] = ds.dataset(path, format="parquet", filesystem=fs.S3FileSystem(anonymous=True, region="us-west-2"))
-        data = _datasets[path]
+        data = _datasets.get(path)
+    if data is None:  # listing takes seconds, so other themes don't wait on the lock meanwhile
+        data = ds.dataset(path, format="parquet", filesystem=s3)
+        with _datasets_lock:
+            data = _datasets.setdefault(path, data)
     started = time.time()
     b = lambda k: pc.field("bbox", k)
     f = (b("xmax") >= w) & (b("xmin") <= e) & (b("ymax") >= s) & (b("ymin") <= n)
@@ -96,7 +116,7 @@ def warm_overture():
     for fetch in (overture_roads, overture_places, overture_buildings):
         try:
             fetch(0, 0, 0.0001, 0.0001)
-        except OSError as err:
+        except (OSError, ValueError) as err:
             print(f"overture warm-up failed ({err})", flush=True)
 
 
@@ -114,9 +134,19 @@ def overture_roads(s, w, n, e):
         for a, b in zip(pts, pts[1:]):
             along.append(along[-1] + dist(a, b))
         ids = [f"{r['id']}:{k}" for k in range(len(pts))]
+        taken = set()
         for c in r["connectors"] or []:  # connectors are the shared junction points between segments
-            k = min(range(len(pts)), key=lambda k: abs(along[k] / (along[-1] or 1) - c["at"]))
+            d = c["at"] * along[-1]
+            k = min(range(len(pts)), key=lambda k: abs(along[k] - d))
+            if k in taken or abs(along[k] - d) > 2:  # no free point there: add one, so two junctions never merge
+                k = min(max(bisect.bisect(along, d), 1), len(pts) - 1)
+                f = (d - along[k - 1]) / ((along[k] - along[k - 1]) or 1)
+                pts.insert(k, tuple(p + f * (q - p) for p, q in zip(pts[k - 1], pts[k])))
+                along.insert(k, d)
+                ids.insert(k, None)
+                taken = {t + (t >= k) for t in taken}
             ids[k] = c["connector_id"]
+            taken.add(k)
         cls, sub = r["class"], r["subclass"]
         tags = {"highway": "road" if cls == "unknown" else f"{cls}_link" if sub == "link" else cls, "overture_road": "yes"}
         if sub in ("sidewalk", "crosswalk"):
@@ -197,6 +227,7 @@ class TileStore:
         self.cache_size = cache_size
         self.locks = defaultdict(threading.Lock)
         self.lock = threading.Lock()
+        self.version = 0  # bumped by each background write, so an area built meanwhile isn't cached stale
         os.makedirs(folder, exist_ok=True)
 
     def _path(self, t, source=""):
@@ -206,7 +237,7 @@ class TileStore:
         p = self._path(t, source)
         return os.path.exists(p) and time.time() - os.path.getmtime(p) < TILE_MAX_AGE
 
-    def _fetch_chunk(self, tiles, source=""):
+    def _fetch_chunk(self, tiles, source="", required=False):
         """One request for a block of missing tiles from one source, split back into per-tile cache files."""
         with self.locks[(min(tiles), source)]:  # two trips needing the same block download it once
             tiles = [t for t in tiles if not self._fresh(t, source)]
@@ -218,7 +249,7 @@ class TileStore:
             try:
                 osm = fetch(*box)
             except (OSError, ValueError, KeyError) as err:
-                if source == self._main:
+                if required or source == self._main:
                     raise
                 print(f"{source} {box}: failed ({err})", flush=True)  # an optional source being down must not block trips
                 return
@@ -240,6 +271,7 @@ class TileStore:
                 os.replace(path + ".tmp", path)
         if source in self._background:
             with self.lock:  # rebuild cached areas so the next trip sees the new data
+                self.version += 1
                 for key in [k for k in self.areas if k & set(tiles)]:
                     del self.areas[key]
 
@@ -251,9 +283,9 @@ class TileStore:
     def _background(self):
         return self.background | ({""} if self.roads else set())
 
-    def tile(self, t):
+    def tile(self, t, roads=True):
         osm = {"elements": []}
-        for name in ["", "roads", *self.extras]:
+        for name in ["", *(["roads"] if roads else []), *self.extras]:
             if os.path.exists(self._path(t, name)):
                 with open(self._path(t, name)) as f:
                     osm["elements"] += json.load(f)["elements"]
@@ -274,12 +306,27 @@ class TileStore:
                 return self.areas[key]
         jobs = [(c, self._main) for c in self._missing(key, self._main)]
         jobs += [(c, name) for name in self.extras if name not in self.background for c in self._missing(key, name)]
-        with ThreadPoolExecutor(3) as ex:  # Overpass rate-limits per IP, so few parallel requests
-            list(ex.map(lambda job: self._fetch_chunk(*job), jobs))
+        roads = bool(self.roads)
+        try:
+            with ThreadPoolExecutor(3 if roads else 2) as ex:  # Overpass allows about 2 requests at once per IP
+                list(ex.map(lambda job: self._fetch_chunk(*job), jobs))
+        except (OSError, ValueError, KeyError) as err:
+            if not roads:
+                raise
+            # Overture is down: answer this trip from Overpass alone, never mixing the two street networks
+            print(f"overture streets failed ({err}), using Overpass", flush=True)
+            roads = False
+            with ThreadPoolExecutor(2) as ex:
+                list(ex.map(lambda c: self._fetch_chunk(c, "", required=True), self._missing(key, "")))
         for name in self._background:
             for c in self._missing(key, name):
                 self.pool.submit(self._fetch_chunk, c, name)
-        parts = [self.tile(t) for t in sorted(key)]
+        with self.lock:
+            version = self.version
+        box = lambda t: (t[0] * TILE, t[1] * TILE, (t[0] + 1) * TILE, (t[1] + 1) * TILE)
+        gaps = {"overlooked": "buildings" if "buildings" in self.extras else None, "surroundings": "" if roads else None}
+        unloaded = {f: [box(t) for t in key if not os.path.exists(self._path(t, src))] for f, src in gaps.items() if src is not None}
+        parts = [self.tile(t, roads) for t in sorted(key)]
         seen, elements = set(), []
         for osm in parts:
             for el in osm["elements"]:
@@ -292,8 +339,10 @@ class TileStore:
         s, w = min(t[0] for t in key) * TILE, min(t[1] for t in key) * TILE
         n, e = (max(t[0] for t in key) + 1) * TILE, (max(t[1] for t in key) + 1) * TILE
         inside = lambda r: s <= r["lat"] <= n and w <= r["lon"] <= e
-        area = Area({"elements": elements}, [r for r in self.reports if inside(r)], [i for i in self.incidents if inside(i)])
+        area = Area({"elements": elements}, [r for r in self.reports if inside(r)], [i for i in self.incidents if inside(i)], unloaded)
         with self.lock:
+            if version != self.version or roads != bool(self.roads):  # newer data arrived while building, or Overture was down: rebuild next time
+                return area
             self.areas[key] = area
             while len(self.areas) > self.cache_size:
                 self.areas.popitem(last=False)
