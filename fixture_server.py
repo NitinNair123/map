@@ -5,11 +5,12 @@ import tempfile
 from http.server import ThreadingHTTPServer
 
 import server
+from reports import Reports
 from test_safety import fixture
 from tiles import TileStore
 
 server.store = TileStore(tempfile.mkdtemp(), fetch=lambda *a: fixture())
 server.is_raining = lambda *a: False
 server.geocode = lambda q, near: [{"name": "City Pharmacy", "pt": [28.0007, 77.0025], "kind": "pharmacy"}]
-server.REPORTS_PATH = os.path.join(tempfile.mkdtemp(), "reports.json")
+server.REPORTS = Reports(os.path.join(tempfile.mkdtemp(), "reports.db"))
 ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), server.Handler).serve_forever()
