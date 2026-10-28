@@ -45,6 +45,7 @@ test("plan a route and start a trip on a phone screen", async () => {
   await page.click("#startBtn");
   await page.waitForSelector("text=Sharing live");
   assert.ok(await page.isVisible("text=Keep SafeRoute open with the screen on"));
+  assert.equal(await page.locator("[data-quick]").count(), 4, "busy / deserted / shops open / shut taps while walking");
   assert.deepEqual(errors, []);
   await ctx.close();
 });

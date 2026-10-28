@@ -6,6 +6,9 @@ measured becomes lost confidence, and a street below MIN_CONFIDENCE is shown as 
 import time
 from collections import defaultdict
 
+import buses
+import traffic
+
 # (full daylight, full dark) weight per factor; each column sums to 100. Twilight blends the two.
 # A stated design choice based on Safetipin's audit parameters, to be refitted once audited streets exist.
 WEIGHTS = {
@@ -29,6 +32,7 @@ LABELS = {"lighting": "Lighting", "activity": "People and open places", "frontag
 QUALITY = {
     "observed": 1.0,      # survey or app report on this street
     "gtfs": 0.9,          # timetable: buses or trains at this stop this hour
+    "live_bus": 0.9,      # buses that actually drove past in the last half hour
     "osm_tag": 0.8,       # lit=yes/no mapped on the street
     "hours": 0.8,         # published opening hours of places on the street
     "buildings": 0.8,     # building footprints and land use
@@ -36,6 +40,7 @@ QUALITY = {
     "road": 0.8,          # road type, footpath, dead ends from the map
     "lamps": 0.7,         # street lamps mapped or seen in Mapillary photos
     "nothing_mapped": 0.5,  # no shop or service of any kind mapped within 60 m
+    "traffic": 0.35,      # live slow traffic: many vehicles, which says little about people on foot
     "main_road": 0.35,    # a main road usually has traffic passing, but that alone doesn't make it safe
     "nightlight": 0.3,    # NASA satellite brightness, 2016, about 500 m per pixel
 }
@@ -149,6 +154,11 @@ def factors(area, e, when, light, now=None):
     served = [area.stops[i]["deps"][when.weekday()][when.hour] for i in e.get("stops", ())]
     if served:
         activity.append((min(1, sum(served) / 6), QUALITY["gtfs"], "Bus and metro timetables"))
+    passed = buses.LIVE.near(e["mid"], when, now)
+    if passed:  # no bus is no evidence: most streets aren't on a bus route
+        activity.append((min(1, len(passed) / 3), QUALITY["live_bus"], "Live buses (Delhi Open Transit Data)"))
+    if e["highway"] in MAIN_ROADS and traffic.LIVE.jammed(e["mid"], when, now):
+        activity.append((1.0, QUALITY["traffic"], "Live traffic (TomTom)"))
     if not places and not activity and e.get("places_mapped", True):  # with nothing mapped within 500 m the block is just unmapped
         activity.append((0.0, QUALITY["nothing_mapped"], "No shops or services mapped nearby"))
     if e["highway"] in MAIN_ROADS:

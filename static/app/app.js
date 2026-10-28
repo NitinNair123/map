@@ -664,10 +664,17 @@ function renderTrip() {
     <div class="progress"><div style="width:${done}%"></div></div>
     <p class="muted" style="margin:0">Keep SafeRoute open with the screen on. If the phone locks, your friends' map stops updating and check-ins pause.</p>
     ${ahead ? `<div class="haven"><span class="ico">${icon("store")}</span><div><b>${esc(ahead.name)}</b><div class="muted">Open now${ahead.d ? ` · ${fmtDist(ahead.d)}` : ""}. Step in if anything feels off.</div></div></div>` : ""}
+    <p class="muted" style="margin:0">How is it here right now? One tap, anonymous.</p>
+    <div class="report-grid quick">${REPORTS.filter(([k]) => QUICK.includes(k)).map(([k, e, l]) => `<button data-quick="${k}"><span>${e}</span>${l}</button>`).join("")}</div>
     <div class="actions"><button class="btn btn-primary" id="safeBtn">${icon("check")}I've arrived safely</button>
       <button class="btn" id="tripShare" aria-label="Share live link again">${icon("share")}</button></div>
     <div class="actions" style="grid-template-columns:1fr 1fr"><button class="btn btn-ghost" id="simBtn">${icon("walk")}${state.sim ? "Stop simulation" : "Simulate walk"}</button>
       <button class="btn btn-ghost" id="endTrip">End trip</button></div>`);
+  document.querySelectorAll("[data-quick]").forEach((b) => (b.onclick = () => {
+    if (!state.here) return toast("Waiting for your location");
+    reportType = b.dataset.quick;
+    sendReport(state.here);
+  }));
   $("#simBtn").onclick = simulateWalk;
   $("#safeBtn").onclick = () => endTrip(true);
   $("#endTrip").onclick = () => endTrip(false);
@@ -883,6 +890,7 @@ const REPORTS = [
   ["felt_unsafe", "👀", "Felt unsafe"], ["harassment", "🚫", "Harassment"], ["felt_safe", "✅", "Felt safe"],
   ["no_footpath", "🚧", "No footpath"], ["dogs", "🐕", "Stray dogs"], ["flooded", "🌊", "Flooded"],
 ];
+const QUICK = ["people_around", "deserted", "shops_open", "shops_closed"];  // the foot-traffic taps offered while navigating
 $("#reportBtn").onclick = () => {
   openDrawer(`
     <h2 id="drawerTitle">Report something</h2>

@@ -65,6 +65,15 @@ and open the https link on the phone. Then use "Add to Home Screen".
 - **Bus and metro timetables**: put any GTFS zip in `data/gtfs/`, for example Delhi's Open Transit Data
   (https://otd.delhi.gov.in, free registration) or the DMRC metro feed. The app then knows whether a stop is
   actually served at the hour you walk.
+- **Live buses** (the same free Open Transit Data key, in `data/otd_key.txt` or `OTD_KEY`): bus positions every
+  10 s. Each street counts the different buses that drove past in the last 30 minutes; parked buses don't count,
+  and a street with no bus is not marked empty (most aren't on a bus route). Counts start 30 minutes after the
+  server starts and only apply to trips leaving now.
+- **Live traffic** (free TomTom key from https://developer.tomtom.com, in `data/tomtom_key.txt` or `TOMTOM_KEY`):
+  up to 6 main roads near each route are looked up (cached 10 minutes, at most 2,000 calls a day). Slow, heavy
+  traffic counts as a weak sign the road isn't deserted; free-flowing traffic counts as nothing.
+- **Busy / empty taps**: while navigating, one tap reports "people around", "deserted", "shops open" or
+  "shops shut" at your spot. The route card shows how many people said so at this time of day.
 - **Street survey**: `data/survey.csv` with columns `lat,lon,type,when`, one row per thing you checked on a
   walk, e.g. `28.4741,77.4998,lights_on,2026-10-27T21:30`. Types: `lights_on, broken_light, lights_off,
   shops_open, shops_closed, people_around, deserted, felt_unsafe, harassment, felt_safe`. `survey_template.csv`
