@@ -24,6 +24,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: npm install --no-save playwright@1.63.0 leaflet@1.9.4
+      - run: npm install --no-save playwright@1.63.0
       - run: npx playwright install --with-deps chromium
       - run: node --test browser.test.cjs

@@ -1,5 +1,6 @@
 """Fetch OpenStreetMap data on demand in fixed tiles, cache them on disk, and build scored areas for any trip."""
 import bisect
+import csv
 import json
 import math
 import os
@@ -8,6 +9,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import zlib
 from collections import Counter, OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -19,6 +21,12 @@ CHUNK = 3  # missing tiles are fetched in blocks of up to 3x3, one Overpass requ
 TILE_MAX_AGE = 7 * 86400
 SOURCE_LABELS = {"": "OpenStreetMap", "roads": "Overture streets", "places": "Overture places",
                  "buildings": "Overture buildings", "mapillary": "Mapillary"}
+# Sources that change slowly are kept longer: the night-light image is from 2016, Overture and Mapillary refresh monthly
+SOURCE_MAX_AGE = {"nightlights": math.inf, "mapillary": 30 * 86400, "places": 30 * 86400, "buildings": 30 * 86400, "geoapify": 30 * 86400}
+LAYERS = {  # data/layers/<name>.csv (lat,lon[,name]) from official lists or RTI replies -> the map tags they stand for
+    "streetlights": {"highway": "street_lamp"}, "cctv": {"man_made": "surveillance"}, "police": {"amenity": "police"},
+    "hospitals": {"amenity": "hospital"}, "blackspots": {"hazard": "blackspot"}, "waterlogging": {"hazard": "waterlogging"},
+}
 MAX_TRIP_M = 10000
 MIRRORS = [
     "https://overpass-api.de/api/interpreter",
@@ -37,9 +45,11 @@ out body geom qt;
 );
 out tags geom;
 (
-  node["highway"~"^(street_lamp|bus_stop)$"]({bbox});
+  node["highway"~"^(street_lamp|bus_stop|crossing|traffic_signals)$"]({bbox});
   nwr["man_made"="surveillance"]({bbox});
-  nwr["amenity"~"^(police|bar|pub|nightclub|bus_station|taxi|hospital|clinic|pharmacy|fuel|restaurant|cafe|fast_food|atm|bank|marketplace|food_court|ice_cream|cinema|theatre|school|college|university|place_of_worship|community_centre|doctors|dentist|post_office|library|events_venue|coworking_space|bureau_de_change)$"]({bbox});
+  nwr["building"~"^guardhouse$"]({bbox});
+  nwr["emergency"~"^phone$"]({bbox});
+  nwr["amenity"~"^(police|fire_station|security_booth|bar|pub|nightclub|bus_station|taxi|hospital|clinic|pharmacy|fuel|restaurant|cafe|fast_food|atm|bank|marketplace|food_court|ice_cream|cinema|theatre|school|college|university|place_of_worship|community_centre|doctors|dentist|post_office|library|events_venue|coworking_space|bureau_de_change)$"]({bbox});
   nwr["office"]({bbox});
   nwr["shop"]({bbox});
   nwr["tourism"="hotel"]({bbox});
@@ -79,6 +89,110 @@ def mapillary(s, w, n, e):
         url = page.get("paging", {}).get("next")
         if not url:
             break
+    return {"elements": out}
+
+
+# Geoapify place categories -> the OSM tags the scorer already understands (for places that didn't come from OSM)
+GEOAPIFY_TAGS = {"healthcare.pharmacy": {"amenity": "pharmacy"}, "healthcare.hospital": {"amenity": "hospital"},
+                 "healthcare.clinic_or_praxis": {"amenity": "clinic"}, "service.vehicle.fuel": {"amenity": "fuel"},
+                 "service.police": {"amenity": "police"}, "catering.restaurant": {"amenity": "restaurant"},
+                 "catering.cafe": {"amenity": "cafe"}, "catering.fast_food": {"amenity": "fast_food"},
+                 "public_transport": {"highway": "bus_stop"}, "accommodation.hotel": {"tourism": "hotel"}}
+GEOAPIFY_CATEGORIES = "commercial,catering,healthcare,service.vehicle.fuel,service.police,public_transport,accommodation.hotel"
+
+
+def geoapify(s, w, n, e):
+    """Shops, food, pharmacies, hospitals, petrol pumps, police and transit from the Geoapify Places API (free key).
+    Places Geoapify took from OpenStreetMap keep their OSM id, so they merge with the OSM copy instead of counting twice."""
+    out = []
+    for offset in range(0, 2000, 500):
+        q = urllib.parse.urlencode({"categories": GEOAPIFY_CATEGORIES, "filter": f"rect:{w},{s},{e},{n}", "limit": 500,
+                                    "offset": offset, "apiKey": os.environ["GEOAPIFY_KEY"]})
+        with urllib.request.urlopen(urllib.request.Request(f"https://api.geoapify.com/v2/places?{q}", headers={"User-Agent": "SafeRoute/1.0"}),
+                                    timeout=20) as r:
+            features = json.load(r).get("features", [])
+        for f in features:
+            p = f["properties"]
+            raw = (p.get("datasource") or {}).get("raw") or {}
+            tags = {k: v for k, v in raw.items() if isinstance(v, str)}
+            if not ({"amenity", "shop", "highway", "railway", "tourism", "office"} & set(tags)):
+                cat = next((c for c in p.get("categories", []) if c in GEOAPIFY_TAGS or c.split(".")[0] in GEOAPIFY_TAGS), None)
+                shop = next((c.split(".")[-1] for c in p.get("categories", []) if c.startswith("commercial.")), None)
+                tags.update(GEOAPIFY_TAGS.get(cat) or GEOAPIFY_TAGS.get((cat or "").split(".")[0]) or ({"shop": shop} if shop else {}))
+            if not tags:
+                continue
+            tags.update(source="geoapify", **({"name": p["name"]} if p.get("name") else {}),
+                        **({"opening_hours": p["opening_hours"]} if p.get("opening_hours") else {}))
+            kind = {"n": "node", "w": "way"}.get(raw.get("osm_type"))
+            lat, lon = p["lat"], p["lon"]
+            if kind and raw.get("osm_id"):
+                el = {"type": kind, "id": int(raw["osm_id"]), "tags": tags}
+                el.update({"lat": lat, "lon": lon} if kind == "node" else {"center": {"lat": lat, "lon": lon}})
+            else:
+                el = {"type": "node", "id": f"gfy{p['place_id']}", "lat": lat, "lon": lon, "tags": tags}
+            out.append(el)
+        if len(features) < 500:
+            break
+    return {"elements": out}
+
+
+def png_pixels(data):
+    """Rows of (r, g, b) from an 8-bit PNG (grey, RGB, palette or RGBA), standard library only."""
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+    pos, chunks, palette = 8, [], None
+    while pos < len(data):
+        n, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + n]
+        if kind == b"IHDR":
+            w, h, depth, ctype = struct.unpack(">IIBB", body[:10])
+            if depth != 8 or body[12]:
+                raise ValueError("unsupported PNG")
+        elif kind == b"PLTE":
+            palette = [tuple(body[i:i + 3]) for i in range(0, n, 3)]
+        elif kind == b"IDAT":
+            chunks.append(body)
+        pos += 12 + n
+    bpp = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ctype]
+    raw, stride, prev, rows, i = zlib.decompress(b"".join(chunks)), w * bpp, bytearray(w * bpp), [], 0
+    for _ in range(h):
+        f, line = raw[i], bytearray(raw[i + 1:i + 1 + stride])
+        i += 1 + stride
+        for x in range(stride):  # undo the PNG row filter
+            a, b, c = (line[x - bpp] if x >= bpp else 0), prev[x], (prev[x - bpp] if x >= bpp else 0)
+            if f == 4:
+                p = a + b - c
+                pred = a if abs(p - a) <= abs(p - b) and abs(p - a) <= abs(p - c) else b if abs(p - b) <= abs(p - c) else c
+            else:
+                pred = (0, a, b, (a + b) // 2)[f]
+            line[x] = (line[x] + pred) & 255
+        prev = line
+        px = [tuple(line[k:k + bpp]) for k in range(0, stride, bpp)]
+        rows.append([palette[p[0]] if ctype == 3 else (p[0],) * 3 if ctype in (0, 4) else p[:3] for p in px])
+    return rows
+
+
+NIGHT_CELL = 0.005
+
+
+def nightlights(s, w, n, e):
+    """NASA Black Marble night-time brightness (VIIRS, 2016, about 500 m) as one point per pixel, 0 dark to 1 bright."""
+    s, w = math.floor(s / NIGHT_CELL) * NIGHT_CELL, math.floor(w / NIGHT_CELL) * NIGHT_CELL
+    rows_n, cols_n = math.ceil((n - s) / NIGHT_CELL - 1e-9), math.ceil((e - w) / NIGHT_CELL - 1e-9)
+    q = urllib.parse.urlencode({"SERVICE": "WMS", "REQUEST": "GetMap", "VERSION": "1.1.1", "LAYERS": "VIIRS_Black_Marble",
+                                "SRS": "EPSG:4326", "STYLES": "", "FORMAT": "image/png", "TIME": "2016-01-01",
+                                "BBOX": f"{w},{s},{w + cols_n * NIGHT_CELL},{s + rows_n * NIGHT_CELL}", "WIDTH": cols_n, "HEIGHT": rows_n})
+    with urllib.request.urlopen(urllib.request.Request(f"https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?{q}",
+                                                       headers={"User-Agent": "SafeRoute/1.0"}), timeout=20) as r:
+        rows = png_pixels(r.read())
+    out = []
+    for i, row in enumerate(rows):  # image rows run north to south
+        for j, (red, green, blue) in enumerate(row):
+            lum = 0.299 * red + 0.587 * green + 0.114 * blue
+            lat, lon = s + (rows_n - i - 0.5) * NIGHT_CELL, w + (j + 0.5) * NIGHT_CELL
+            # shortcut: the GIBS image is a picture, not radiance, and saturates over built-up areas; lit area vs dark, not street detail
+            out.append({"type": "node", "id": f"nl{lat:.4f}_{lon:.4f}", "lat": lat, "lon": lon,
+                        "tags": {"nightlight": f"{lum / 255:.2f}"}})
     return {"elements": out}
 
 
@@ -202,6 +316,26 @@ def overture_buildings(s, w, n, e):
                           "lon": (r["bbox"]["xmin"] + r["bbox"]["xmax"]) / 2, "tags": {"building": "yes"}} for r in rows]}
 
 
+def write_tiles(folder, elements, tiles, source=""):
+    """Split elements into per-tile cache files; ways crossing tile edges go in each tile (merging dedupes)."""
+    parts = {t: [] for t in tiles}
+    for el in elements:
+        pts = el.get("geometry") or [el.get("center") or el]
+        lats = [p["lat"] for p in pts if "lat" in p]
+        lons = [p["lon"] for p in pts if "lon" in p]
+        if not lats:
+            continue
+        for i in range(math.floor(min(lats) / TILE), math.floor(max(lats) / TILE) + 1):
+            for j in range(math.floor(min(lons) / TILE), math.floor(max(lons) / TILE) + 1):
+                if (i, j) in parts:
+                    parts[(i, j)].append(el)
+    for t, els in parts.items():
+        path = os.path.join(folder, f"{t[0]}_{t[1]}{'.' + source if source else ''}.json")
+        with open(path + ".tmp", "w") as f:
+            json.dump({"elements": els}, f)
+        os.replace(path + ".tmp", path)
+
+
 class TooFar(ValueError):
     pass
 
@@ -227,8 +361,11 @@ def overpass(s, w, n, e):
 
 
 class TileStore:
-    def __init__(self, folder, fetch=overpass, reports=None, incidents=(), cache_size=6, extras=None, background=(), roads=None):
+    def __init__(self, folder, fetch=overpass, reports=None, incidents=(), cache_size=6, extras=None, background=(), roads=None, stops=(),
+                 layers=None):
         self.folder = folder
+        self.layers = layers  # folder of official lists (see LAYERS), re-read whenever a file changes
+        self._layer_stamp, self._layer_elements = None, []
         self.fetch = fetch
         self.roads = roads  # a fast street source; when set, slow Overpass detail loads in the background instead
         self.extras = extras or {}  # name -> fetch(s, w, n, e) for extra sources, cached beside the OSM tile
@@ -236,19 +373,59 @@ class TileStore:
         self.pool = ThreadPoolExecutor(2)
         self.reports = reports if reports is not None else []
         self.incidents = list(incidents)
+        self.stops = list(stops)  # timetabled bus and metro stops
         self.areas = OrderedDict()
         self.cache_size = cache_size
         self.locks = defaultdict(threading.Lock)
         self.lock = threading.Lock()
         self.version = 0  # bumped by each background write, so an area built meanwhile isn't cached stale
         os.makedirs(folder, exist_ok=True)
+        self.load_extract()
+
+    def load_extract(self):
+        """Tiles written by import_osm.py: full OSM detail, kept until re-imported. Call again after a re-import."""
+        marker = os.path.join(self.folder, "extract.json")
+        self.extracted, self.imported = set(), None
+        if os.path.exists(marker):
+            with open(marker) as f:
+                info = json.load(f)
+            self.extracted, self.imported = {tuple(t) for t in info["tiles"]}, info.get("imported")
+        with self.lock:
+            self.areas.clear()
+
+    def layer_elements(self):
+        """Points from data/layers/*.csv as map objects; reloads when a file is added, changed or removed."""
+        files = sorted(f for f in os.listdir(self.layers) if f.endswith(".csv") and f[:-4] in LAYERS) \
+            if self.layers and os.path.isdir(self.layers) else []
+        stamp = [(f, os.path.getmtime(os.path.join(self.layers, f))) for f in files]
+        if stamp == self._layer_stamp:
+            return self._layer_elements
+        out = []
+        for f in files:
+            with open(os.path.join(self.layers, f), newline="", encoding="utf-8-sig") as fh:
+                for n, row in enumerate(csv.DictReader(fh), 2):
+                    try:
+                        lat, lon = float(row["lat"]), float(row["lon"])
+                    except (KeyError, TypeError, ValueError):
+                        print(f"layers/{f} line {n} skipped: needs lat and lon", flush=True)
+                        continue
+                    tags = {**LAYERS[f[:-4]], "layer": f"{f} (official list)", **({"name": row["name"]} if row.get("name") else {})}
+                    out.append({"type": "node", "id": f"{f}:{n}", "lat": lat, "lon": lon, "tags": tags})
+        if files or self._layer_stamp:
+            print(f"layers: {len(out)} points from {', '.join(files) or 'no files'}", flush=True)
+        with self.lock:
+            self._layer_stamp, self._layer_elements = stamp, out
+            self.areas.clear()  # rebuild areas so the new list is used
+        return out
 
     def _path(self, t, source=""):
         return os.path.join(self.folder, f"{t[0]}_{t[1]}{'.' + source if source else ''}.json")
 
     def _fresh(self, t, source=""):
+        if t in self.extracted and source == "":
+            return True
         p = self._path(t, source)
-        return os.path.exists(p) and time.time() - os.path.getmtime(p) < TILE_MAX_AGE
+        return os.path.exists(p) and time.time() - os.path.getmtime(p) < SOURCE_MAX_AGE.get(source, TILE_MAX_AGE)
 
     def _fetch_chunk(self, tiles, source="", required=False):
         """One request for a block of missing tiles from one source, split back into per-tile cache files."""
@@ -266,22 +443,7 @@ class TileStore:
                     raise
                 print(f"{source} {box}: failed ({err})", flush=True)  # an optional source being down must not block trips
                 return
-            parts = {t: [] for t in tiles}
-            for el in osm["elements"]:
-                pts = el.get("geometry") or [el.get("center") or el]
-                lats = [p["lat"] for p in pts if "lat" in p]
-                lons = [p["lon"] for p in pts if "lon" in p]
-                if not lats:
-                    continue
-                for i in range(math.floor(min(lats) / TILE), math.floor(max(lats) / TILE) + 1):
-                    for j in range(math.floor(min(lons) / TILE), math.floor(max(lons) / TILE) + 1):
-                        if (i, j) in parts:  # ways crossing tile edges go in each tile; merging dedupes
-                            parts[(i, j)].append(el)
-            for t, els in parts.items():
-                path = self._path(t, source)
-                with open(path + ".tmp", "w") as f:
-                    json.dump({"elements": els}, f)
-                os.replace(path + ".tmp", path)
+            write_tiles(self.folder, osm["elements"], tiles, source)
         if source in self._background:
             with self.lock:  # rebuild cached areas so the next trip sees the new data
                 self.version += 1
@@ -313,13 +475,16 @@ class TileStore:
 
     def area(self, tiles):
         key = frozenset(tiles)
+        layers = self.layer_elements()
         with self.lock:
             if key in self.areas:
                 self.areas.move_to_end(key)
                 return self.areas[key]
-        jobs = [(c, self._main) for c in self._missing(key, self._main)]
+        # imported OSM streets when the whole area is imported; otherwise one street source for every tile, so the network stays connected
+        main = "" if key <= self.extracted else self._main
+        jobs = [(c, main) for c in self._missing(key, main)]
         jobs += [(c, name) for name in self.extras if name not in self.background for c in self._missing(key, name)]
-        roads = bool(self.roads)
+        roads = main == "roads"
         try:
             with ThreadPoolExecutor(3 if roads else 2) as ex:  # Overpass allows about 2 requests at once per IP
                 list(ex.map(lambda job: self._fetch_chunk(*job), jobs))
@@ -331,14 +496,12 @@ class TileStore:
             roads = False
             with ThreadPoolExecutor(2) as ex:
                 list(ex.map(lambda c: self._fetch_chunk(c, "", required=True), self._missing(key, "")))
-        for name in self._background:
-            for c in self._missing(key, name):
-                self.pool.submit(self._fetch_chunk, c, name)
         with self.lock:
             version = self.version
         box = lambda t: (t[0] * TILE, t[1] * TILE, (t[0] + 1) * TILE, (t[1] + 1) * TILE)
         gaps = {"overlooked": "buildings" if "buildings" in self.extras else None, "surroundings": "" if roads else None}
-        unloaded = {f: [box(t) for t in key if not os.path.exists(self._path(t, src))] for f, src in gaps.items() if src is not None}
+        unloaded = {f: [box(t) for t in key if not (os.path.exists(self._path(t, src)) or src == "" and t in self.extracted)]
+                    for f, src in gaps.items() if src is not None}
         parts = [self.tile(t, roads) for t in sorted(key)]
         seen, elements = set(), []
         for osm in parts:
@@ -352,7 +515,9 @@ class TileStore:
         s, w = min(t[0] for t in key) * TILE, min(t[1] for t in key) * TILE
         n, e = (max(t[0] for t in key) + 1) * TILE, (max(t[1] for t in key) + 1) * TILE
         inside = lambda r: s <= r["lat"] <= n and w <= r["lon"] <= e
-        area = Area({"elements": elements}, [r for r in self.reports if inside(r)], [i for i in self.incidents if inside(i)], unloaded)
+        elements += [el for el in layers if inside(el)]
+        area = Area({"elements": elements}, [r for r in self.reports if inside(r)], [i for i in self.incidents if inside(i)],
+                    [st for st in self.stops if inside(st)], unloaded)
         # when each source was downloaded, oldest tile first, so the app can say how fresh the data behind a score is
         area.sources = {}
         for name in ["", *(["roads"] if roads else []), *self.extras]:
@@ -360,11 +525,15 @@ class TileStore:
             if times:
                 area.sources[SOURCE_LABELS.get(name, name)] = round(min(times))
         with self.lock:
-            if version != self.version or roads != bool(self.roads):  # newer data arrived while building, or Overture was down: rebuild next time
-                return area
-            self.areas[key] = area
-            while len(self.areas) > self.cache_size:
-                self.areas.popitem(last=False)
+            # newer data arrived while building, or Overture was down: don't cache, rebuild next time
+            if version == self.version and roads == bool(self.roads):
+                self.areas[key] = area
+                while len(self.areas) > self.cache_size:
+                    self.areas.popitem(last=False)
+        # slow sources start only now, so when they finish they can drop this cached area and the next trip rebuilds it
+        for name in self._background - {main}:
+            for c in self._missing(key, name):
+                self.pool.submit(self._fetch_chunk, c, name)
         return area
 
     def add_report(self, r):
@@ -379,7 +548,7 @@ class TileStore:
         """The area covering a walk from a to b, with room for safer detours."""
         d = dist(a, b)
         if d > MAX_TRIP_M:
-            raise TooFar(f"That's a {d / 1000:.0f} km walk. SafeRoute plans walks up to {MAX_TRIP_M // 1000} km.")
+            raise TooFar(f"That's {d / 1000:.0f} km in a straight line. SafeRoute plans trips up to {MAX_TRIP_M // 1000} km.")
         return self.area(tiles_near(a, b, max(400, 0.25 * d)))
 
     def around(self, pt, radius_m=500):

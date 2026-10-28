@@ -6,6 +6,8 @@ import json
 import math
 import os
 import secrets
+import socket
+import subprocess
 import sys
 import threading
 import time
@@ -17,40 +19,55 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from safety import REPORT_TYPES, dist
-from tiles import TileStore, TooFar, mapillary, overture_buildings, overture_places, overture_roads, tiles_near, warm_overture
+import crime
+import gtfs
+from import_osm import search as offline_search
+from rating import REPORT_TYPES
+from reports import Reports
+from safety import MODES, dist
+from tiles import (TileStore, TooFar, geoapify, mapillary, nightlights, overture_buildings, overture_places, overture_roads, tiles_near,
+                   warm_overture)
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-REPORTS_PATH = os.path.join(DATA_DIR, "reports.json")
+LAYERS_DIR = os.path.join(DATA_DIR, "layers")
+SEARCH_DB = os.path.join(DATA_DIR, "tiles", "search.db")
+REIMPORT_DAYS = 30
 INCIDENTS_PATH = os.path.join(DATA_DIR, "incidents.csv")
+SURVEY_PATH = os.path.join(DATA_DIR, "survey.csv")
+CRIME = crime.load()  # data/crime/districts.json from python crime.py, or None
+GTFS_DIR = os.path.join(DATA_DIR, "gtfs")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 TRIP_TTL = 12 * 3600  # a live trip is wiped 12 hours after it started, whatever happens
 ENDED_TTL = 30 * 60  # an ended trip keeps only "ended" (no locations) so friends see it finished
-MAX_TRIPS = 2000
-# requests allowed per client in a window of seconds, so one script can't flood reports or fill the trip table
-LIMITS = {"report": (10, 3600), "trip": (10, 3600), "update": (120, 600), "read": (300, 600)}
+MAX_TRIPS = 20000
+# requests allowed per network address in a window of seconds, so one script can't flood reports or fill the trip table.
+# One address can be many phones (mobile carriers share them), so reports are also limited per device in reports.py.
+LIMITS = {"report": (60, 3600), "trip": (60, 3600), "update": (120, 600), "read": (300, 600)}
 PUBLIC = os.environ.get("SAFEROUTE_PUBLIC") == "1"  # serve clients outside the home network directly (only behind HTTPS)
 lock = threading.Lock()
-# shortcut: live trips live in memory and vanish on restart, move to Redis when running more than one server
+# shortcut: live trips and limits live in memory and vanish on restart, move to Redis when running more than one server
 trips = {}
-hits = {}  # (limit name, client) -> recent request times, kept in memory only
+hits = {}  # (limit name, address) -> recent request times
 weather = {}  # rounded (lat, lon) -> {"rain", "checked"}
 geocode_cache = OrderedDict()
 
 
-def load_incidents():
-    """incidents.csv columns: lat,lon,type,when (ISO date-time), e.g. from police open data or news."""
-    if not os.path.exists(INCIDENTS_PATH):
+def load_csv(path, types=None, **extra):
+    """Rows of lat,lon,type,when (ISO date-time), e.g. incidents from police open data, or a street survey."""
+    if not os.path.exists(path):
         return []
     out = []
-    with open(INCIDENTS_PATH, newline="") as f:
+    with open(path, newline="", encoding="utf-8-sig") as f:
         for n, row in enumerate(csv.DictReader(f), 2):
             try:
                 when = datetime.fromisoformat(row["when"])
-                out.append({"lat": float(row["lat"]), "lon": float(row["lon"]), "type": row["type"].strip().lower(),
-                            "hour": when.hour, "ts": when.timestamp()})
-            except (KeyError, ValueError) as e:
-                print(f"incidents.csv line {n} skipped: {e}")
+                kind = row["type"].strip().lower()
+                if types and kind not in types:
+                    raise ValueError(f"unknown type {kind!r}")
+                out.append({"lat": float(row["lat"]), "lon": float(row["lon"]), "type": kind,
+                            "hour": when.hour, "weekday": when.weekday(), "ts": when.timestamp(), **extra})
+            except (KeyError, ValueError, TypeError, AttributeError) as e:  # a missing column reads as None
+                print(f"{os.path.basename(path)} line {n} skipped: {e}")
     return out
 
 
@@ -58,26 +75,59 @@ os.makedirs(DATA_DIR, exist_ok=True)
 TOKEN_PATH = os.path.join(DATA_DIR, "mapillary_token.txt")  # data/ is gitignored, so the token never reaches git
 if not os.environ.get("MAPILLARY_TOKEN") and os.path.exists(TOKEN_PATH):
     os.environ["MAPILLARY_TOKEN"] = open(TOKEN_PATH).read().strip()
-GEOAPIFY_PATH = os.path.join(DATA_DIR, "geoapify_key.txt")  # gitignored too
-GEOAPIFY_KEY = os.environ.get("GEOAPIFY_KEY") or (open(GEOAPIFY_PATH).read().strip() if os.path.exists(GEOAPIFY_PATH) else "")
-EXTRAS = {"mapillary": mapillary} if os.environ.get("MAPILLARY_TOKEN") else {}
+EXTRAS = {"nightlights": nightlights}
+if os.environ.get("MAPILLARY_TOKEN"):
+    EXTRAS["mapillary"] = mapillary
+GEOAPIFY_PATH = os.path.join(DATA_DIR, "geoapify_key.txt")  # free key from myprojects.geoapify.com; gitignored like the Mapillary token
+if not os.environ.get("GEOAPIFY_KEY") and os.path.exists(GEOAPIFY_PATH):
+    os.environ["GEOAPIFY_KEY"] = open(GEOAPIFY_PATH).read().strip()
+GEOAPIFY_KEY = os.environ.get("GEOAPIFY_KEY", "")
+if GEOAPIFY_KEY:
+    EXTRAS["geoapify"] = geoapify
 if importlib.util.find_spec("pyarrow"):
     EXTRAS.update(places=overture_places, buildings=overture_buildings)
     threading.Thread(target=warm_overture, daemon=True).start()
 print("Overture streets, places and buildings:", "on" if "places" in EXTRAS else "off (pip install pyarrow), using slower Overpass for streets", flush=True)
-print("Geoapify place search:", "on" if GEOAPIFY_KEY else "off (no key), using Photon only", flush=True)
 print("Mapillary lights and cameras:", "on" if os.environ.get("MAPILLARY_TOKEN") else "off (no token)", flush=True)
-store = TileStore(os.path.join(DATA_DIR, "tiles"),
-                  reports=json.load(open(REPORTS_PATH)) if os.path.exists(REPORTS_PATH) else [],
-                  incidents=load_incidents(),
-                  extras=EXTRAS, background={"buildings"}, roads=overture_roads if "places" in EXTRAS else None)
+print("Geoapify places:", "on" if os.environ.get("GEOAPIFY_KEY") else "off (no key in data/geoapify_key.txt)", flush=True)
+SURVEY = load_csv(SURVEY_PATH, REPORT_TYPES, source="Street survey")
+STOPS = gtfs.load(GTFS_DIR)
+print(f"Street survey: {len(SURVEY)} observations. Timetables: {len(STOPS)} stops (put GTFS zips in data/gtfs).", flush=True)
+REPORTS = Reports(os.path.join(DATA_DIR, "reports.db"))
+store = TileStore(os.path.join(DATA_DIR, "tiles"), reports=REPORTS.all() + SURVEY, incidents=load_csv(INCIDENTS_PATH),
+                  extras=EXTRAS, background={"buildings", "mapillary", "geoapify"}, roads=overture_roads if "places" in EXTRAS else None,
+                  stops=STOPS, layers=LAYERS_DIR)
+print("OpenStreetMap import:", f"{len(store.extracted)} tiles from {store.imported}" if store.extracted else "none yet (python import_osm.py makes OSM detail instant)", flush=True)
+
+
+def reimport():
+    """Re-run the OpenStreetMap import in the background when it is a month old, so new edits reach the app."""
+    if not store.imported or not importlib.util.find_spec("osmium"):
+        return
+    if (datetime.now() - datetime.fromisoformat(store.imported)).days < REIMPORT_DAYS:
+        return
+    print("OpenStreetMap import is a month old, refreshing it in the background", flush=True)
+    done = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "import_osm.py"), "--refresh"])
+    if done.returncode == 0:
+        store.load_extract()
+    else:
+        print("OpenStreetMap refresh failed; the old import stays in use", flush=True)
+
+
+def reimport_daily():
+    while True:
+        reimport()
+        time.sleep(86400)
+
+
+threading.Thread(target=reimport_daily, daemon=True).start()
 
 
 def latlon(s):
     lat, lon = (float(v) for v in s.split(",")) if isinstance(s, str) else (float(s[0]), float(s[1]))
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+    if not (-90 <= lat <= 90 and math.isfinite(lon)):
         raise ValueError("bad coordinates")
-    return lat, lon
+    return lat, lon if -180 <= lon <= 180 else (lon + 180) % 360 - 180  # a map panned round the world sends 77.4 as -642.6
 
 
 def is_raining(pt, when):
@@ -132,7 +182,7 @@ def photon(q, near):
     return out
 
 
-def geoapify(q, near):
+def geoapify_search(q, near):
     """Geoapify autocomplete (OSM plus OpenAddresses and Who's On First; free tier 3000 requests a day, needs a key)."""
     params = {"text": q, "limit": 8, "format": "json", "lang": "en", "apiKey": GEOAPIFY_KEY}
     if near:
@@ -164,11 +214,11 @@ def nearby_places(q, near, radius_m=5000):
 
 
 def geocode(q, near):
-    """Place search anywhere, from every free source at once, with places near the user first."""
+    """Place search anywhere, from the offline index and every free source at once, with places near the user first."""
     key = (q.lower(), near and (round(near[0], 2), round(near[1], 2)))
     if key in geocode_cache:
         return geocode_cache[key]
-    sources = [photon] + ([geoapify] if GEOAPIFY_KEY else [])
+    sources = [photon] + ([geoapify_search] if GEOAPIFY_KEY else [])
     with ThreadPoolExecutor(len(sources)) as ex:
         jobs = [ex.submit(fetch, q, near) for fetch in sources]
     found, ok = [], False
@@ -180,6 +230,9 @@ def geocode(q, near):
             print(f"search: {fetch.__name__} failed ({type(err).__name__})", flush=True)
     if near:
         found += nearby_places(q, near)
+    if os.path.exists(SEARCH_DB):  # the offline OpenStreetMap index answers even with no internet
+        found = offline_search(SEARCH_DB, q, near) + found
+        ok = True
     out = rank(q, near, found)
     if ok:  # don't remember an answer made while the internet was down
         geocode_cache[key] = out
@@ -239,6 +292,9 @@ def redact(path):
 
 
 class Handler(SimpleHTTPRequestHandler):
+    # HTTP/1.1 ends each reply by its length rather than by closing the connection: filters such as AdGuard cut
+    # HTTP/1.0 replies on localhost short, which left the page loading forever
+    protocol_version = "HTTP/1.1"
     timeout = 30  # a client that stops sending can't hold a server thread for ever
     extensions_map = {**SimpleHTTPRequestHandler.extensions_map, ".webmanifest": "application/manifest+json", ".js": "text/javascript"}
 
@@ -248,7 +304,9 @@ class Handler(SimpleHTTPRequestHandler):
     def end_headers(self):
         if self.path.startswith("/api/"):
             self.send_header("Cache-Control", "no-store")
-        self.send_header("Referrer-Policy", "no-referrer")  # the viewer URL holds the trip id
+        # other sites only ever see "localhost:8001", never a page address with a trip id; OpenStreetMap's tile
+        # servers refuse map pictures that come with no referrer at all
+        self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
         self.send_header("X-Content-Type-Options", "nosniff")
         super().end_headers()
 
@@ -260,14 +318,6 @@ class Handler(SimpleHTTPRequestHandler):
 
     def list_directory(self, path):
         self.send_error(404)
-
-    def client(self):
-        """Who is asking: behind a local tunnel or proxy every request comes from 127.0.0.1, so use its header."""
-        ip = self.client_address[0]
-        if ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
-            fwd = self.headers.get("Cf-Connecting-IP") or self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-            return fwd or ip
-        return ip
 
     def private_client(self):
         a = ipaddress.ip_address(self.client_address[0].split("%")[0])
@@ -292,11 +342,20 @@ class Handler(SimpleHTTPRequestHandler):
     def read_json(self):
         n = int(self.headers.get("Content-Length", 0))
         if not 0 <= n <= 10_000:
+            self.close_connection = True  # the unread body would otherwise be taken for the next request
             raise ValueError("bad length")
         body = json.loads(self.rfile.read(n) or b"{}")
         if not isinstance(body, dict):
             raise ValueError("expected an object")
         return body
+
+    def address(self):
+        """The caller's address. Behind a tunnel every request comes from this machine, and the tunnel adds the real one last."""
+        forwarded = self.headers.get("Cf-Connecting-IP") or self.headers.get("X-Forwarded-For", "").split(",")[-1].strip()
+        ip = self.client_address[0].removeprefix("::ffff:")  # IPv4 callers of the dual-stack socket look like ::ffff:1.2.3.4
+        if forwarded and ip in ("127.0.0.1", "::1"):
+            return forwarded
+        return ip
 
     def when(self, q):
         return datetime.fromisoformat(q["at"][0]) if q.get("at", [""])[0] else datetime.now()
@@ -304,7 +363,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
-        if u.path.startswith("/api/") and not allowed("read", self.client()):
+        if u.path.startswith("/api/") and not allowed("read", self.address()):
             return self.send_json({"error": "Too many requests, please wait a minute."}, 429)
         try:
             if u.path == "/api/search":
@@ -312,7 +371,7 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json(geocode(text, latlon(q["near"][0]) if q.get("near") else None) if len(text) >= 2 else [])
             if u.path == "/api/heat":
                 s, w, n, e = (float(v) for v in q["bbox"][0].split(","))
-                latlon((s, w)), latlon((n, e))
+                (s, w), (n, e) = latlon((s, w)), latlon((n, e))
                 if not (s < n and w < e):
                     raise ValueError("bbox must be south,west,north,east")
                 if dist((s, w), (n, e)) > 6000:
@@ -320,6 +379,10 @@ class Handler(SimpleHTTPRequestHandler):
                 when, mid = self.when(q), ((s + n) / 2, (w + e) / 2)
                 area = store.for_trip((s, w), (n, e))
                 return self.send_json(area.heat(when, is_raining(mid, when), (s, w, n, e)))
+            if u.path == "/api/explain":
+                pt = latlon(q["at_pt"][0])
+                when = self.when(q)
+                return self.send_json(store.around(pt, 300).explain(pt, when, is_raining(pt, when)))
             if u.path == "/api/havens":
                 pt = latlon(q["near"][0])
                 return self.send_json(store.around(pt).havens_near(pt, self.when(q)))
@@ -327,8 +390,13 @@ class Handler(SimpleHTTPRequestHandler):
                 a, b = latlon(q["from"][0]), latlon(q["to"][0])
                 when = self.when(q)
                 rain = is_raining(a, when)
+                mode = q.get("mode", ["walk"])[0]
+                if mode not in MODES:
+                    raise ValueError("mode must be walk, bike or car")
+                extra = int(q["extra"][0]) if q.get("extra", [""])[0] else None  # longest detour to consider, in minutes
                 area = store.for_trip(a, b)
-                return self.send_json({"routes": area.routes(a, b, when, rain), "rain": rain, "sources": area.sources})
+                return self.send_json({"routes": area.routes(a, b, when, rain, mode, extra), "rain": rain,
+                                       "area": crime.around(CRIME, [a, b]), "sources": area.sources})
             if u.path.startswith("/api/trip/"):
                 with lock:
                     expire_trips()
@@ -359,8 +427,8 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             body = self.read_json()
             kind = "report" if path == "/api/report" else "trip" if path == "/api/trip" else "update"
-            if not allowed(kind, self.client()):
-                return self.send_json({"error": "Too many requests from this phone, please try again later."}, 429)
+            if not allowed(kind, self.address()):
+                return self.send_json({"error": "Too many requests from this network, please try again later."}, 429)
             if path == "/api/report":
                 return self.report(body)
             if path == "/api/trip":
@@ -374,15 +442,18 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_json({"error": "not found"}, 404)
 
     def report(self, body):
-        r = {"lat": float(body["lat"]), "lon": float(body["lon"]), "type": body["type"], "ts": time.time()}
-        latlon((r["lat"], r["lon"]))
-        if r["type"] not in REPORT_TYPES:
+        lat, lon = latlon((body["lat"], body["lon"]))
+        if body["type"] not in REPORT_TYPES:
             raise ValueError("unknown report type")
-        with lock:
-            store.add_report(r)
-            with open(REPORTS_PATH + ".tmp", "w") as f:
-                json.dump(store.reports, f)
-            os.replace(REPORTS_PATH + ".tmp", REPORTS_PATH)  # never leave a half-written file
+        # the walker's own clock, so "deserted at 22:00" stays 22:00 on a server in another time zone
+        seen = datetime.fromisoformat(body["at"]) if body.get("at") else datetime.now()
+        if abs(seen.timestamp() - time.time()) > 3600:
+            raise ValueError("report time is not now")
+        address = self.address()
+        r = REPORTS.add(lat, lon, body["type"], str(body.get("device") or address)[:64], seen)
+        if not r:
+            return self.send_json({"error": "Thanks! You've sent a lot of reports this hour, please try again later."}, 429)
+        store.add_report(r)
         self.send_json({"ok": True})
 
     def start_trip(self, body):
@@ -414,7 +485,26 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_json({"ok": True})
 
 
+class Server(ThreadingHTTPServer):
+    def handle_error(self, request, client_address):
+        if not isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+            super().handle_error(request, client_address)  # a browser dropping an idle connection is normal
+
+
+class DualStackServer(Server):
+    """Listens on IPv6 and IPv4 together, since browsers try localhost as ::1 first."""
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
+
+
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
     print(f"SafeRoute running, open http://localhost:{port}", flush=True)
-    ThreadingHTTPServer(("", port), Handler).serve_forever()
+    try:
+        server = DualStackServer(("::", port), Handler)
+    except OSError:  # no IPv6 on this machine
+        server = Server(("", port), Handler)
+    server.serve_forever()

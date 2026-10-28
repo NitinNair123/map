@@ -10,6 +10,7 @@ from unittest import mock
 
 import server
 from test_safety import A, B, NIGHT, fixture
+from reports import Reports
 from tiles import TileStore
 
 
@@ -20,7 +21,7 @@ class ServerTest(unittest.TestCase):
         cls.patches = [mock.patch.object(server, "store", TileStore(tempfile.mkdtemp(), fetch=lambda *a: fixture())),
                        mock.patch.object(server, "is_raining", lambda *a: False),
                        mock.patch.object(server, "geocode", lambda q, near: [{"name": "City Pharmacy", "pt": [28.0007, 77.0025], "kind": "pharmacy"}]),
-                       mock.patch.object(server, "REPORTS_PATH", os.path.join(tempfile.mkdtemp(), "reports.json"))]
+                       mock.patch.object(server, "REPORTS", Reports(os.path.join(tempfile.mkdtemp(), "reports.db")))]
         for p in cls.patches:
             p.start()
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
@@ -55,7 +56,7 @@ class ServerTest(unittest.TestCase):
     def test_heat_havens_search(self):
         code, heat = self.call(f"/api/heat?bbox=27.999,76.999,28.001,77.004")
         self.assertEqual(code, 200)
-        self.assertTrue(heat and all(len(h) == 5 for h in heat))
+        self.assertTrue(heat and all(len(h) == 6 for h in heat))  # two ends, score, confidence
         code, havens = self.call(f"/api/havens?near={A[0]},{A[1]}&at={NIGHT.isoformat().replace('+', '%2B')}")
         self.assertEqual(code, 200)
         self.assertIn("City Pharmacy", [h["name"] for h in havens])  # open 24/7
@@ -76,7 +77,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.call("/api/trip", [1, 2])[0], 400)
 
     def test_far_walk_and_map_service_down(self):
-        self.assertIn("km walk", self.call("/api/route?from=28,77&to=28.5,77")[1]["error"])
+        self.assertIn("up to 10 km", self.call("/api/route?from=28,77&to=28.5,77")[1]["error"])
         def down(*a):
             raise ConnectionError("Map data servers are busy, please try again in a minute")
         with mock.patch.object(server, "store", TileStore(tempfile.mkdtemp(), fetch=down)):
@@ -95,8 +96,7 @@ class ServerTest(unittest.TestCase):
 
     def test_report_is_saved_and_limited(self):
         self.assertEqual(self.call("/api/report", {"lat": 28.0005, "lon": 77.0015, "type": "harassment"})[0], 200)
-        with open(server.REPORTS_PATH) as f:
-            self.assertEqual(json.load(f)[-1]["type"], "harassment")
+        self.assertEqual(server.REPORTS.all()[-1]["type"], "harassment")
         codes = [self.call("/api/report", {"lat": 28.0005, "lon": 77.0015, "type": "felt_safe"})[0] for _ in range(10)]
         self.assertEqual(codes[-1], 429)
 
@@ -121,8 +121,9 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.call(f"/api/trip/{t['id']}")[0], 404)
 
     def test_one_client_cannot_fill_the_trip_table(self):
-        codes = [self.call("/api/trip", {"dest": [28.6, 77.2]}, {"X-Forwarded-For": "1.2.3.4"})[0] for _ in range(11)]
-        self.assertEqual(codes, [200] * 10 + [429])
+        limit = server.LIMITS["trip"][0]
+        codes = [self.call("/api/trip", {"dest": [28.6, 77.2]}, {"X-Forwarded-For": "1.2.3.4"})[0] for _ in range(limit + 1)]
+        self.assertEqual(codes, [200] * limit + [429])
         # someone else behind the same tunnel still gets a trip
         self.assertEqual(self.call("/api/trip", {"dest": [28.6, 77.2]}, {"X-Forwarded-For": "5.6.7.8"})[0], 200)
 

@@ -16,6 +16,7 @@ import os
 import sys
 from datetime import datetime
 
+import rating
 from safety import seg_dist
 
 MIN_AUDITS = 30  # fewer than this and the correlation is mostly noise
@@ -53,9 +54,10 @@ def score_audits(rows, store):
         area = store.around(pt)
         light = area.light(when)
         e = min(area.edges, key=lambda e: seg_dist(pt, area.nodes[e["a"]], area.nodes[e["b"]]))
-        lighting = area.factors(e, when, light)[0]["lighting"]
-        out.append({**row, "street": e["name"] or e["highway"], "score": round(area.edge_score(e, when, light)),
-                    "model_lit": "" if lighting is None else "yes" if lighting >= 0.5 else "no"})
+        score, confidence, feats = rating.rate(area, e, when, light)
+        street = (feats["lighting"] or {}).get("street")  # this street's own lighting, not the area's satellite brightness
+        out.append({**row, "street": e["name"] or e["highway"], "score": round(score), "confidence": round(confidence, 2),
+                    "model_lit": "" if not street else "yes" if street["value"] >= 0.5 else "no"})
     return out
 
 

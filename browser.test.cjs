@@ -1,11 +1,9 @@
 // The app in a phone-sized Chromium against fixture_server.py.
-// Usage: npm install --no-save playwright leaflet@1.9.4 && npx playwright install chromium && node --test browser.test.cjs
+// Usage: npm install --no-save playwright && npx playwright install chromium && node --test browser.test.cjs
 const { spawn } = require("node:child_process");
 const { after, before, test } = require("node:test");
 const assert = require("node:assert/strict");
 const { chromium, devices } = require("playwright");
-const path = require("node:path");
-const LEAFLET = path.dirname(require.resolve("leaflet/package.json"));
 
 const PORT = 8765, BASE = `http://127.0.0.1:${PORT}`;
 const A = { latitude: 28.0, longitude: 77.0 };
@@ -24,9 +22,8 @@ after(async () => { await browser?.close(); srv?.kill(); });
 async function phone(contacts = []) {
   const ctx = await browser.newContext({ ...devices["Pixel 7"], geolocation: A, permissions: ["geolocation"] });
   await ctx.addInitScript((c) => { localStorage.setItem("sr.onboarded", "true"); localStorage.setItem("sr.contacts", JSON.stringify(c)); }, contacts);
-  // fully offline: Leaflet from the npm package, no fonts or map pictures
-  await ctx.route("https://unpkg.com/leaflet@1.9.4/**", (r) => r.fulfill({ path: path.join(LEAFLET, new URL(r.request().url()).pathname.split("leaflet@1.9.4/")[1]) }));
-  await ctx.route(/^https:\/\/(?!unpkg)/, (r) => r.abort());
+  // fully offline: Leaflet and MapLibre are served by the app itself; no fonts or map pictures
+  await ctx.route(/^https:\/\//, (r) => r.abort());
   const page = await ctx.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
@@ -44,7 +41,7 @@ test("plan a route and start a trip on a phone screen", async () => {
   const { ctx, page, errors } = await phone();
   await routeToPharmacy(page);
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling");
-  assert.match(await page.textContent("#sheetBody"), /Data used: OpenStreetMap \(downloaded today\)/);
+  assert.match(await page.textContent("#sheetBody"), /Downloaded: OpenStreetMap today/);
   await page.click("#startBtn");
   await page.waitForSelector("text=Sharing live");
   assert.ok(await page.isVisible("text=Keep SafeRoute open with the screen on"));
@@ -86,8 +83,12 @@ test("friend's viewer follows a live trip and shows when it ends", async () => {
   const t = await post("/api/trip", { dest: [28.0007, 77.0025], eta: 5, name: "Asha" });
   await post(`/api/trip/${t.id}`, { key: t.key, lat: 28.0, lon: 77.0 });
   const { ctx, page } = await phone();
+  const referers = [];
+  await ctx.route(/tile\.openstreetmap\.org/, (r) => { referers.push(r.request().headers().referer); r.abort(); });
   await page.goto(`${BASE}/t/?id=${t.id}`);
   await page.waitForSelector("text=Asha is walking");
+  // OpenStreetMap refuses map pictures without a referrer; it must get the site, never the page with the trip id
+  assert.ok(referers.length && referers.every((r) => r === BASE + "/"), JSON.stringify(referers.slice(0, 2)));
   await post(`/api/trip/${t.id}`, { key: t.key, ended: true });
   await page.reload();
   await page.waitForSelector("text=Asha ended the trip");

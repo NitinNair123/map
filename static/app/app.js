@@ -11,8 +11,17 @@ const store = {
 const icon = (id) => `<svg aria-hidden="true"><use href="#i-${id}"/></svg>`;
 const scoreClass = (s) => (s >= 65 ? "good" : s >= 40 ? "ok" : "bad");
 const scoreWord = (s) => (s >= 65 ? "Safer" : s >= 40 ? "Take care" : "Avoid if you can");
-const COLOR = { good: "#12b76a", ok: "#f79009", bad: "#f04438" };
+const COLOR = { good: "#12b76a", ok: "#f79009", bad: "#f04438", none: "#98a2b3" };
+const CONF = { high: "High confidence", medium: "Medium confidence", low: "Low confidence", none: "Not rated" };
+const MIN_CONF = 0.35; // below this a street has too little data to rate
 const LABEL = { safest: "Safest", balanced: "Balanced", fastest: "Fastest" };
+const isMain = (r) => r.kind in LABEL;  // the other scanned routes ("#4"...) are drawn only when picked from the table
+const MODE = { walk: { verb: "walking", noun: "walk", start: "Start walking", icon: "walk" },
+  bike: { verb: "riding", noun: "ride", start: "Start riding", icon: "bike" }, car: { verb: "driving", noun: "drive", start: "Start driving", icon: "car" } };
+// kinds of places along a route: map pin letter, colour and filter chip name
+const GROUP = { shop: ["S", "#d99a00", "Shops"], food: ["R", "#f97316", "Food"], pharmacy: ["+", "#e11d74", "Pharmacies"],
+  hospital: ["H", "#7c3aed", "Hospitals"], fuel: ["P", "#16a34a", "Petrol"], transit: ["B", "#2563eb", "Bus and metro"], cctv: ["C", "#0891b2", "Cameras"] };
+const groupOf = (g) => (GROUP[g] ? g : "shop");
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 const fmtDist = (m) => (m < 1000 ? `${Math.round(m / 10) * 10} m` : `${(m / 1000).toFixed(1)} km`);
 
@@ -62,7 +71,7 @@ function applyTheme() {
   document.documentElement.toggleAttribute("data-dark", dark);
 }
 applyTheme();
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { applyTheme(); setBaseMap(); });
 
 // ---------- state ----------
 const state = {
@@ -70,24 +79,48 @@ const state = {
   to: null, toLabel: "",
   when: null, // null means now
   here: null,
-  routes: [], sel: "safest", rain: false,
+  routes: [], sel: "safest", rain: false, area: [],
+  mode: store.get("mode", "walk"), groups: new Set(store.get("groups", Object.keys(GROUP))),
   trip: null,
   installPrompt: null,
 };
 
 // ---------- map ----------
-const map = L.map("map", { zoomControl: false, attributionControl: true, preferCanvas: true });
-L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+const map = L.map("map", { zoomControl: false, attributionControl: true, preferCanvas: true, worldCopyJump: true });
+// Vector map from OpenFreeMap (free, no key) drawn by MapLibre; the plain OpenStreetMap tiles if WebGL or the style can't load
+let baseLayer = null;
+function rasterBase() {
+  if (baseLayer) baseLayer.remove();
+  document.body.classList.remove("vector-map");
+  baseLayer = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+}
+function setBaseMap() {
+  const webgl = (() => { try { return !!document.createElement("canvas").getContext("webgl"); } catch { return false; } })();
+  if (!L.maplibreGL || !window.maplibregl || !webgl) return rasterBase();
+  if (baseLayer) baseLayer.remove();
+  // always the light map, like Google Maps: the dark style was too dark to read streets on a phone
+  baseLayer = L.maplibreGL({ style: "https://tiles.openfreemap.org/styles/liberty",
+    attribution: '<a href="https://openfreemap.org" target="_blank">OpenFreeMap</a> © <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>' }).addTo(map);
+  document.body.classList.add("vector-map");
+  const layer = baseLayer;
+  map.whenReady(() => {  // the MapLibre map exists once Leaflet has a view
+    const gl = layer.getMaplibreMap?.();
+    gl?.on("error", () => { if (baseLayer === layer && !gl.isStyleLoaded()) rasterBase(); });
+    setTimeout(() => { if (gl && baseLayer === layer && !gl.isStyleLoaded()) rasterBase(); }, 8000);  // a hanging style server sends no error
+  });
+}
+setBaseMap();
 const routeLayer = L.layerGroup().addTo(map);
 const havenLayer = L.layerGroup().addTo(map);
 let heatLayer = null, meMarker = null, fromMarker = null, toMarker = null;
 const divIcon = (cls, size = 22) => L.divIcon({ className: "", html: `<div class="${cls}"></div>`, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 
-// works anywhere: open where the user last looked, else the whole country until we know where they are
-const lastView = store.get("view", null);
-if (lastView) map.setView(lastView.c, lastView.z); else map.setView([20.6, 78.9], 5);
+// open where the user last looked, else on Delhi NCR (the area with street data) until we know where they are;
+// a zoomed-out saved view (the old whole-country default) is ignored
+const saved = store.get("view", null), lastView = saved && saved.z >= 9 ? saved : null;
+if (lastView) map.setView(L.latLng(lastView.c).wrap(), lastView.z); else map.setView([28.57, 77.32], 11);
 map.on("moveend", () => {
-  const c = map.getCenter();
+  const c = map.getCenter().wrap();  // a map dragged round the globe reports longitudes past ±180
   store.set("view", { c: [c.lat, c.lng], z: map.getZoom() });
   if (state.heatOn) loadHeatSoon();
 });
@@ -129,7 +162,8 @@ function onPosition(pos, simulated) {
 $("#locateBtn").onclick = async () => {
   startWatching();
   const p = await currentPosition();
-  if (p) map.setView(p, 17); else toast("Couldn't find you. Check location permission.");
+  if (p) map.setView(p, 17);
+  else toast(window.isSecureContext ? "Couldn't find you. Check location permission." : "Your browser only shares location over https. Type where you are starting from instead.");
 };
 
 // ---------- search ----------
@@ -162,7 +196,7 @@ async function showResults(q) {
   if (q.trim().length >= 2) {
     await new Promise((r) => setTimeout(r, 250)); // wait for typing to pause before searching
     if (seq !== searchSeq) return;
-    const c = map.getCenter(), near = state.here || [c.lat, c.lng]; // suggest places around the user, like Google Maps
+    const c = map.getCenter().wrap(), near = state.here || [c.lat, c.lng]; // suggest places around the user, like Google Maps
     found = await api(`/api/search?q=${encodeURIComponent(q)}&near=${near.join(",")}`).catch(() => []);
   }
   if (seq !== searchSeq) return;
@@ -205,9 +239,11 @@ $("#swapBtn").onclick = () => {
 
 let pickMode = null, reportType = null;
 map.on("click", (e) => {
-  const pt = [e.latlng.lat, e.latlng.lng];
+  const { lat, lng } = e.latlng.wrap();
+  const pt = [lat, lng];
   if (reportType) return sendReport(pt);
   if (state.trip) return;
+  if (state.heatOn && !pickMode) return explainStreet(pt);
   const which = pickMode || "to";
   pickMode = null;
   setPlace(which, pt, "Dropped pin");
@@ -257,13 +293,13 @@ async function maybeRoute() {
   renderSheet(`<div class="empty"><div class="badge">${icon("shield")}</div><div><h3>Checking every street…</h3><p class="muted" id="routeWait">Lighting, open shops, police, CCTV and reports for ${esc(timeLabel().toLowerCase())}.</p></div></div>`);
   const slow = setTimeout(() => { const w = $("#routeWait"); if (w) w.textContent = "First trip in this area: downloading and scoring its streets. This can take up to a minute."; }, 6000);
   try {
-    const q = new URLSearchParams({ from: from.join(","), to: state.to.join(","), at: whenParam() });
+    const q = new URLSearchParams({ from: from.join(","), to: state.to.join(","), at: whenParam(), mode: state.mode, extra: store.get("extra", "") });
     const res = await api("/api/route?" + q);
     if (seq !== routeSeq) return; // the user picked something else meanwhile
-    state.routes = res.routes; state.rain = res.rain; state.routeFrom = from; state.sources = res.sources || {};
+    state.routes = res.routes; state.rain = res.rain; state.area = res.area || []; state.routeFrom = from; state.sources = res.sources || {};
     state.sel = "safest";
-    drawRoutes(true);
     renderRoutes();
+    drawRoutes(true);  // after the sheet is drawn, so the route is fitted into the map left above it
   } catch (err) {
     if (seq !== routeSeq) return;
     renderSheet(`<div class="note">${icon("alert")}<span>${esc(err.message)}</span></div><button class="btn btn-block" id="retryRoute">Try again</button>`);
@@ -274,10 +310,10 @@ let routeSeq = 0;
 
 function drawRoutes(fit) {
   routeLayer.clearLayers(); havenLayer.clearLayers();
-  const order = [...state.routes].filter((r) => !r.same_as).sort((a, b) => (a.kind === state.sel) - (b.kind === state.sel));
+  const order = state.routes.filter((r) => !r.same_as && (isMain(r) || r.kind === state.sel)).sort((a, b) => (a.kind === state.sel) - (b.kind === state.sel));
   for (const r of order) {
     const sel = r.kind === state.sel || (state.routes.find((x) => x.kind === state.sel)?.same_as === r.kind);
-    const c = COLOR[scoreClass(r.score)];
+    const c = r.confidence_level === "none" ? COLOR.none : COLOR[scoreClass(r.score)];
     if (sel) L.polyline(r.coords, { color: "#fff", weight: 11, opacity: 0.9 }).addTo(routeLayer);
     const line = L.polyline(r.coords, { color: sel ? c : "#8f8aa0", weight: sel ? 7 : 5, opacity: sel ? 1 : 0.6 }).addTo(routeLayer);
     line.on("click", (e) => { L.DomEvent.stop(e); if (!state.trip) { state.sel = r.kind; drawRoutes(); renderRoutes(); } });
@@ -285,14 +321,67 @@ function drawRoutes(fit) {
       if (r.weakest && r.weakest.score < 45)
         L.polyline(r.weakest.coords, { color: "#16131f", weight: 7, opacity: 0.8, dashArray: "2 10", lineCap: "round" }).addTo(routeLayer)
           .bindTooltip(`Weakest stretch: ${esc(r.weakest.name)}`);
-      r.havens.forEach((h) => L.marker(h.pt, { icon: divIcon("haven-dot", 14), keyboard: false }).addTo(havenLayer).bindTooltip(`Open now: ${esc(h.name)}`));
+      r.segments.forEach(([a, b, c, d]) => L.polyline([[a, b], [c, d]], { color: COLOR.none, weight: 7, dashArray: "6 8", interactive: false }).addTo(routeLayer));
+      drawPlaces(r);
     }
   }
   if (fit) {
-    const all = state.routes.flatMap((r) => r.coords);
+    const all = state.routes.filter(isMain).flatMap((r) => r.coords);
     const desk = innerWidth >= 900; // keep the route clear of the search card and the sheet
-    if (all.length) map.fitBounds(all, { paddingTopLeft: desk ? [460, 40] : [20, 190], paddingBottomRight: desk ? [40, 40] : [20, innerHeight * 0.45] });
+    const top = $(".topbar").getBoundingClientRect().bottom + 16, sheet = $("#sheet").getBoundingClientRect().height + 16;
+    if (all.length) map.fitBounds(all, { paddingTopLeft: desk ? [460, 40] : [24, top], paddingBottomRight: desk ? [40, 40] : [90, sheet] });
   }
+}
+
+function drawPlaces(r) {
+  for (const pl of r.places || []) {
+    const g = groupOf(pl.group);
+    if (!state.groups.has(g)) continue;
+    const [letter, color, name] = GROUP[g];
+    const status = g === "cctv" ? "" : pl.open === true ? "open when you pass" : pl.open === false ? "closed when you pass" : "hours not published";
+    L.marker(pl.pt, { icon: L.divIcon({ className: "", html: `<div class="gpin ${g === "cctv" ? "" : pl.open === true ? "open" : pl.open === false ? "closed" : "unknown"}" style="background:${color}">${letter}</div>`, iconSize: [22, 22], iconAnchor: [11, 11] }), keyboard: false })
+      .addTo(havenLayer).bindTooltip(`${esc(pl.name)}${status ? `: ${status}` : ""} · ${pl.minutes} min into the ${MODE[r.mode || "walk"].noun}${pl.source && pl.source !== "OpenStreetMap" ? ` · ${esc(pl.source)}` : ""}`);
+  }
+}
+
+function groupChips(r) {
+  const n = {};
+  (r.places || []).forEach((pl) => { const g = groupOf(pl.group); n[g] = (n[g] || 0) + 1; });
+  return `<div class="groups" role="group" aria-label="Show on the map">${Object.entries(GROUP).filter(([g]) => n[g]).map(([g, [, color, name]]) =>
+    `<button data-group="${g}" aria-pressed="${state.groups.has(g)}"><i style="background:${color}"></i>${name} ${n[g]}</button>`).join("")}</div>`;
+}
+
+function stripRow(x, r) {
+  const ends = `<span class="end" style="left:0;background:var(--brand)"></span><span class="end" style="left:100%;background:var(--risk)"></span>`;
+  const gaps = (x.strip?.gaps || []).map(([a, b]) => `<span class="gap" style="left:${a * 100}%;width:${(b - a) * 100}%"></span>`).join("");
+  const dark = (x.strip?.dark || []).map(([a, b]) => `<span class="dark" style="left:${a * 100}%;width:${(b - a) * 100}%"></span>`).join("");
+  const dots = (x.places || []).filter((p) => p.group !== "cctv" && p.group !== "transit").map((p) =>
+    `<span class="p" style="left:${p.frac * 100}%;background:${p.open === true ? "var(--safe)" : p.open === false ? "#475467" : "#c0c5d0"}"></span>`).join("");
+  const n = (x.strip?.gaps || []).length;
+  return `<div class="strip-row ${x.kind === r.kind || r.same_as === x.kind ? "this" : ""}" data-kind="${x.kind}">
+    <small><span><b>${LABEL[x.kind] || `Route ${x.kind}`}</b> · ${x.minutes} min</span><span>${n ? `${n} long empty ${n === 1 ? "stretch" : "stretches"}` : "No long empty stretches"}</span></small>
+    <div class="strip" aria-hidden="true">${gaps}${dark}${dots}${ends}</div></div>`;
+}
+
+function lookTable(r) {
+  const g = r.look?.groups || {}, z = { found: 0, open: 0, no_hours: 0 };
+  const row = (label, k) => { const v = g[k] || z; return `<tr><td>${label}</td><td>${v.found ? `${v.found} found · ${v.open} open${v.no_hours ? `, ${v.no_hours} unknown` : ""}` : "None found"}</td></tr>`; };
+  const shops = ["shop", "food", "other"].reduce((a, k) => ({ found: a.found + (g[k]?.found || 0), open: a.open + (g[k]?.open || 0) }), z);
+  const help = ["pharmacy", "hospital", "fuel"].reduce((a, k) => a + (g[k]?.open || 0), 0);
+  const noHours = Object.values(g).reduce((a, v) => a + (v.no_hours || 0), 0);
+  const arrive = r.look?.arrive ? r.look.arrive.slice(11, 16) : "";
+  return `<details class="why"><summary>A closer look at this route</summary>
+    <table class="look"><tbody>
+    ${row("Medical stores and clinics", "pharmacy")}${row("Hospitals", "hospital")}${row("Petrol pumps", "fuel")}
+    <tr><td>Shops and food</td><td>${shops.found} found · ${shops.open} open</td></tr>
+    <tr><td>Bus and metro stops</td><td>${g.transit?.found || 0}</td></tr>
+    <tr><td>CCTV cameras mapped</td><td>${g.cctv?.found || 0}</td></tr>
+    <tr><td>Help points open as you pass</td><td>${help}</td></tr>
+    <tr><td>Longest stretch without an open help point or police</td><td>${fmtDist(r.look?.help_gap_m || 0)}</td></tr>
+    <tr><td>Longest stretch with nothing open</td><td>${fmtDist(r.look?.nothing_open_m || 0)}</td></tr>
+    ${arrive ? `<tr><td>You arrive about</td><td>${arrive}</td></tr>` : ""}
+    </tbody></table>
+    <p class="muted" style="margin:0 0 12px">Opening hours are checked for the minute you pass each place, not when you leave. ${noHours ? `${noHours} places publish no hours, so they count as unknown, never as open. ` : ""}Help points are medical stores, hospitals and petrol pumps that are open, and police stations within 150 m.</p></details>`;
 }
 
 function gauge(score) {
@@ -306,29 +395,36 @@ const daysAgo = (ts) => { const d = Math.floor((Date.now() / 1000 - ts) / 86400)
 function renderRoutes() {
   const r = state.routes.find((x) => x.kind === state.sel);
   const fastest = state.routes.find((x) => x.kind === "fastest");
-  const tabs = state.routes.map((x) => {
+  const tabs = state.routes.filter(isMain).map((x) => {
     const extra = x.minutes - fastest.minutes;
     return `<button class="tab" role="tab" aria-selected="${x.kind === state.sel}" data-kind="${x.kind}">
-      <b>${LABEL[x.kind]}</b><span class="num ${scoreClass(x.score)}">${x.score}</span>
+      <b>${LABEL[x.kind]}</b><span class="num ${x.confidence_level === "none" ? "" : scoreClass(x.score)}">${x.confidence_level === "none" ? "–" : x.score}</span>
       <small>${x.same_as ? `Same as ${LABEL[x.same_as].toLowerCase()}` : `${x.minutes} min${extra > 0 ? ` · +${extra}` : ""}`}</small></button>`;
   }).join("");
   const factors = Object.entries(r.factors).map(([k, v]) =>
     v === null ? `<div class="bar"><span>${esc(k)}</span><span class="track"></span><span class="muted">No data</span></div>`
-      : `<div class="bar"><span>${esc(k)}</span><span class="track"><span class="fill" style="display:block;width:${v}%;background:${COLOR[scoreClass(v)]}"></span></span><span>${v}</span></div>`).join("");
+      : `<div class="bar"><span>${esc(k)}<small class="muted"> · ${v.measured}% measured</small></span><span class="track"><span class="fill" style="display:block;width:${v.score}%;background:${COLOR[scoreClass(v.score)]}"></span></span><span>${v.score}</span></div>`).join("");
   const notes = [];
-  if (r.same_as) notes.push(`This is the same way as the ${LABEL[r.same_as].toLowerCase()} route.`);
-  if (r.low_data) notes.push("Most of this route has no lighting data on the map. The score uses only what is mapped, so treat it as a rough guide.");
-  if (state.rain) notes.push("It's raining, so streets may be emptier than usual.");
-  if (r.weakest && r.weakest.score < 45) notes.push(`Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because of ${r.weakest.why.toLowerCase()}. It's dashed on the map.`);
+  if (r.confidence_level === "none") notes.push(["", "There isn't enough real data on these streets to rate this route yet. Grey dashes mark the unrated parts. Reports and the street survey fill this in."]);
+  else if (r.unrated_pct >= 10) notes.push(["", `${r.unrated_pct}% of this route is too thinly mapped to rate. It's shown in grey dashes, and those streets earn no points, which pulls the score down.`]);
+  if (state.rain) notes.push(["", "It's raining, so streets may be emptier than usual."]);
+  if (r.weakest && r.weakest.score < 45) notes.push(["", `Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because of ${r.weakest.why.toLowerCase()}. It's dashed on the map.`]);
+  const unknown = (r.places || []).filter((pl) => pl.open === null).length;
+  if (unknown) notes.push(["info", `Faded pins on the map are ${unknown} places with no published hours, so we can't say if they're open. Bright pins are open when you pass. Tap "Report" and "Shops open now" to fix that for everyone.`]);
+  if (r.headline) notes.unshift(["info", r.headline]);
+  if (r.checked > 1) notes.push(["info", `We scored ${r.checked} different ways there${r.max_extra_min ? `, up to ${r.max_extra_min} min longer than the fastest` : ""}. This one ranks #${r.rank} for safety.`]);
+  else if (r.checked === 1) notes.push(["info", "This is the only sensible way there on the map, so all three options are the same."]);
+  if (r.same_as) notes.push(["info", `This is the same way as the ${LABEL[r.same_as].toLowerCase()} route.`]);
   const dusk = r.daylight > 0 && r.daylight < 1;
   renderSheet(`
     <div class="tabs" role="tablist" aria-label="Route options">${tabs}</div>
     <div class="detail">
-      ${gauge(r.score)}
+      ${r.confidence_level === "none" ? "" : gauge(r.score)}
       <div>
-        <h3>${scoreWord(r.score)}</h3>
+        <h3>${r.confidence_level === "none" ? "Not rated" : scoreWord(r.score)}</h3>
+        <p class="conf conf-${r.confidence_level}">${CONF[r.confidence_level]} · ${Math.round(r.confidence * 100)}% measured</p>
         <div class="stats">
-          <div><b>${r.minutes} min</b>walk</div>
+          <div><b>${r.minutes} min</b>${MODE[r.mode || "walk"].noun}</div>
           <div><b>${fmtDist(r.length_m)}</b>distance</div>
           <div><b>${r.turns}</b>${r.turns === 1 ? "turn" : "turns"}</div>
         </div>
@@ -339,23 +435,61 @@ function renderRoutes() {
       ${r.warnings.map((t) => `<li class="warn">${esc(t)}</li>`).join("")}
       <li class="info">${r.daylight >= 1 ? "Daylight" : dusk ? "Dusk" : "After dark"}</li>
     </ul>
-    ${notes.map((n) => `<div class="note">${icon("alert")}<span>${esc(n)}</span></div>`).join("")}
+    <div class="actions">
+      <button class="btn btn-primary" id="startBtn">${icon(MODE[r.mode || "walk"].icon)}${MODE[r.mode || "walk"].start}</button>
+      <button class="btn" id="shareRouteBtn" aria-label="Share this trip">${icon("share")}</button>
+    </div>
+    ${groupChips(r)}
+    <div class="strips">${state.routes.filter((x) => !x.same_as && isMain(x)).map((x) => stripRow(x, r)).join("")}
+      <div class="strip-key"><span><i style="background:var(--risk)"></i>300 m or more with nothing open</span><span><i style="background:#6941c6"></i>unlit</span><span><i style="background:var(--safe);width:8px;height:8px;border-radius:50%"></i>open</span><span><i style="background:#c0c5d0;width:8px;height:8px;border-radius:50%"></i>hours unknown</span></div></div>
+    ${notes.map(([kind, n]) => `<div class="note ${kind}">${icon(kind === "info" ? "shield" : "alert")}<span>${esc(n)}</span></div>`).join("")}
+    ${lookTable(r)}
+    ${r.compared && r.compared.length > 1 ? `<details class="why"><summary>${r.rank === 1 ? "Why this is the safest" : `Why this ranks #${r.rank}`} · ${r.checked} ways scanned</summary>
+      <ul class="why-list">${(r.why || []).map((t) => `<li class="${t.startsWith("But:") ? "warn" : ""}">${esc(t)}</li>`).join("")}</ul>
+      <div class="compare"><table><thead><tr><th>#</th><th>Score</th><th>Time</th><th>Lit</th><th>Open</th><th>Unrated</th></tr></thead><tbody>
+      ${r.compared.map((c) => `<tr class="${c.rank === r.rank ? "this" : ""}" data-kind="${state.routes.find((x) => x.rank === c.rank && !x.same_as)?.kind || ""}"><td>${c.rank}</td><td><b class="${c.confidence_level === "none" ? "" : scoreClass(c.score)}">${c.confidence_level === "none" ? "–" : c.score}</b></td><td>${c.minutes} min</td><td>${c.stats.lit_pct || c.stats.dark_pct ? `${c.stats.lit_pct}%` : "–"}</td><td>${c.stats.open_now ?? 0}</td><td>${c.unrated_pct}%</td></tr>`).join("")}
+      </tbody></table><p class="muted" style="margin:6px 0 0">Tap a row to see that route on the map.</p></div></details>` : ""}
+    ${(state.area || []).map((a) => `<details class="why"><summary>Past crime in ${esc(a.district)} · ${a.year}</summary>
+      <p style="margin:0 0 8px">Police recorded <b>${a.assault}</b> cases of assault on women (IPC 354, BNS 74-78) and <b>${a.insult}</b> of insulting a woman's modesty (IPC 509, BNS 79) across the whole district in ${a.year}${a.previous ? `, against ${a.previous.assault} and ${a.previous.insult} in ${a.previous.year}` : ""}.</p>
+      ${a.year >= 2024 ? `<p class="muted" style="margin:0 0 8px">NCRB warns that ${a.year} isn't directly comparable with earlier years: the new criminal law (BNS) replaced the IPC on 1 July 2024.</p>` : ""}
+      <p class="muted" style="margin:0 0 12px">Background only, it doesn't change the score: it covers the whole district, only counts cases reported to police, and says nothing about a single street tonight. Source: ${esc(a.source)}.</p></details>`).join("")}
     <details class="why"><summary>Directions · ${r.steps.length - 1} ${r.steps.length === 2 ? "step" : "steps"}</summary><ol class="steps-list">${r.steps.map((st) =>
       `<li><span class="turn">${turnIcon(st.turn)}</span>${esc(st.text)}<small>${st.dist ? fmtDist(st.dist) : ""}</small></li>`).join("")}</ol></details>
     <details class="why"><summary>Why this score?</summary><div class="bars">${factors}</div>
-      <p class="muted" style="margin:0 0 12px">Scores compare routes. They mean <b>safer</b>, never guaranteed safe. Trust your instincts.</p>
-      <p class="muted" style="margin:0 0 12px">"No data" means nothing is mapped there, which is not the same as bad. Data used: ${Object.entries(state.sources).map(([k, ts]) => `${esc(k)} (downloaded ${daysAgo(ts)})`).join(", ") || "none"}.</p></details>
-    <div class="actions">
-      <button class="btn btn-primary" id="startBtn">${icon("walk")}Start walking</button>
-      <button class="btn" id="shareRouteBtn" aria-label="Share this trip">${icon("share")}</button>
-    </div>`);
-  document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => { state.sel = t.dataset.kind; drawRoutes(); renderRoutes(); }));
+      <p class="muted" style="margin:0 0 8px">Data used: ${r.sources.map(esc).join(", ") || "none"}. Downloaded: ${Object.entries(state.sources).map(([k, ts]) => `${esc(k)} ${daysAgo(ts)}`).join(", ") || "unknown"}. "No data" means nothing is mapped there, which is not the same as bad.</p>
+      <p class="muted" style="margin:0 0 12px">Scores compare routes. They mean <b>safer</b>, never guaranteed safe. Trust your instincts.</p></details>`, true);
+  document.querySelectorAll(".tab, .strip-row, .compare tr[data-kind]").forEach((t) => (t.onclick = () => { if (state.trip || !t.dataset.kind) return; state.sel = t.dataset.kind; drawRoutes(); renderRoutes(); }));
+  document.querySelectorAll("[data-group]").forEach((b) => (b.onclick = () => {
+    const g = b.dataset.group;
+    if (state.groups.has(g)) state.groups.delete(g); else state.groups.add(g);
+    store.set("groups", [...state.groups]);
+    b.setAttribute("aria-pressed", state.groups.has(g));
+    drawRoutes();
+  }));
   $("#startBtn").onclick = startTrip;
   $("#shareRouteBtn").onclick = () => startTrip({ shareOnly: true });
 }
 
 // ---------- sheet ----------
-function renderSheet(html) { $("#sheetBody").innerHTML = html; }
+function renderSheet(html, keepSize) { $("#sheetBody").innerHTML = html; if (!keepSize) setSheet("half"); }
+// The sheet has three heights: peek (just the top), half (default) and full. Drag or tap the handle to change it.
+function setSheet(size) {
+  const s = $("#sheet");
+  s.classList.toggle("peek", size === "peek"); s.classList.toggle("full", size === "full");
+  if (size !== "full") s.scrollTop = 0;
+}
+{
+  const sizes = ["peek", "half", "full"];
+  const now = () => $("#sheet").classList.contains("full") ? 2 : $("#sheet").classList.contains("peek") ? 0 : 1;
+  let startY = null;
+  $("#grabber").addEventListener("pointerdown", (e) => { startY = e.clientY; e.target.setPointerCapture?.(e.pointerId); });
+  $("#grabber").addEventListener("pointerup", (e) => {
+    if (startY === null) return;
+    const dy = e.clientY - startY, i = now();
+    startY = null;
+    setSheet(sizes[Math.abs(dy) < 10 ? (i === 2 ? 1 : i + 1) : Math.max(0, Math.min(2, i + (dy < 0 ? 1 : -1)))]);
+  });
+}
 // keep the SOS button floating just above the sheet whatever its height
 new ResizeObserver(([e]) => document.documentElement.style.setProperty("--sheet-h", e.target.offsetHeight + "px")).observe($("#sheet"));
 async function renderIdle() {
@@ -403,7 +537,7 @@ async function startTrip(opts = {}) {
   const r = state.routes.find((x) => x.kind === state.sel);
   let t;
   try { t = await createTrip(state.to, r.minutes); } catch (e) { return toast(e.message); }
-  const shared = shareText(`I'm walking to ${state.toLabel || "my destination"} with SafeRoute, about ${r.minutes} min. Follow me live:`, tripLink(t.id));
+  const shared = shareText(`I'm ${MODE[r.mode || "walk"].verb} to ${state.toLabel || "my destination"} with SafeRoute, about ${r.minutes} min. Follow me live:`, tripLink(t.id));
   if (opts.shareOnly) { await shared; return; }
   startWatching();
   state.trip = { ...t, route: r, started: Date.now(), offCount: 0, lastMovePt: state.here, lastMoveAt: Date.now(), lastPost: 0, nextCheck: 0,
@@ -425,7 +559,7 @@ function drawTripRoute() {
   routeLayer.clearLayers(); havenLayer.clearLayers();
   L.polyline(r.coords, { color: "#fff", weight: 12, opacity: 0.9 }).addTo(routeLayer);
   state.tripLine = L.polyline(r.coords, { color: COLOR[scoreClass(r.score)], weight: 8 }).addTo(routeLayer);
-  r.havens.forEach((h) => L.marker(h.pt, { icon: divIcon("haven-dot", 14), keyboard: false }).addTo(havenLayer).bindTooltip(`Open now: ${esc(h.name)}`));
+  drawPlaces(r);
 }
 
 // ---------- turn-by-turn ----------
@@ -476,7 +610,7 @@ async function reroute(pt) {
   speak("Off route. Finding the safest way from here.");
   toast("Off route. Finding the safest way from here…");
   try {
-    const q = new URLSearchParams({ from: pt.join(","), to: state.to.join(","), at: whenParam() });
+    const q = new URLSearchParams({ from: pt.join(","), to: state.to.join(","), at: whenParam(), mode: state.mode, extra: store.get("extra", "") });
     const res = await api("/api/route?" + q, null, 60000);
     if (state.trip !== t) return;
     t.route = res.routes.find((x) => x.kind === state.sel) || res.routes[0];
@@ -640,7 +774,7 @@ async function openSOS(now = false) {
   startWatching();
   const pt = await currentPosition(5000);
   if (pt) {
-    const hv = await api(`/api/havens?near=${pt.join(",")}`).catch(() => []);
+    const hv = await api(`/api/havens?near=${pt.join(",")}&at=${encodeURIComponent(isoLocal(new Date()))}`).catch(() => []);
     $("#sosHavens").innerHTML = hv.length ? `<b>Nearest open places</b><br>${hv.slice(0, 3).map((h) => `${esc(h.name)} · ${fmtDist(h.distance_m)}`).join("<br>")}` : "";
   }
 }
@@ -743,16 +877,21 @@ $("#fakeCallBtn").onclick = () => { $("#sosCancel").click(); fakeCall(); };
 
 // ---------- reports ----------
 const REPORTS = [
-  ["lights_on", "💡", "Lights working"], ["broken_light", "🌑", "Light not working"], ["felt_unsafe", "👀", "Felt unsafe"],
-  ["harassment", "🚫", "Harassment"], ["felt_safe", "✅", "Felt safe"],
+  ["lights_on", "💡", "Street is lit"], ["broken_light", "🌑", "Dark or broken light"],
+  ["shops_open", "🏪", "Shops open now"], ["shops_closed", "🔒", "Shops closed now"],
+  ["people_around", "👥", "People around"], ["deserted", "🚶", "Deserted"],
+  ["felt_unsafe", "👀", "Felt unsafe"], ["harassment", "🚫", "Harassment"], ["felt_safe", "✅", "Felt safe"],
+  ["no_footpath", "🚧", "No footpath"], ["dogs", "🐕", "Stray dogs"], ["flooded", "🌊", "Flooded"],
 ];
 $("#reportBtn").onclick = () => {
   openDrawer(`
     <h2 id="drawerTitle">Report something</h2>
-    <p>Reports are anonymous and change scores for everyone straight away. They fade after a few weeks. Light reports only count after dark.</p>
+    <p>Anonymous, and it updates scores for everyone straight away. You count once per street for each kind of report. Light reports only count after dark.</p>
     <div class="report-grid">${REPORTS.map(([k, e, l]) => `<button data-type="${k}" aria-pressed="false"><span>${e}</span>${l}</button>`).join("")}</div>
-    <button class="btn btn-primary btn-block" id="reportHere" disabled>${icon("locate")}At my location</button>
-    <button class="btn btn-block" id="reportMap" disabled>${icon("flag")}Pick the spot on the map</button>`);
+    <div class="sticky-actions">
+      <button class="btn btn-primary btn-block" id="reportHere" disabled>${icon("locate")}At my location</button>
+      <button class="btn btn-block" id="reportMap" disabled>${icon("flag")}Pick the spot on the map</button>
+    </div>`);
   let type = null;
   document.querySelectorAll(".report-grid button").forEach((b) => (b.onclick = () => {
     type = b.dataset.type;
@@ -767,11 +906,17 @@ $("#reportBtn").onclick = () => {
   };
   $("#reportMap").onclick = () => { closeDrawer(); reportType = type; $("#reportBtn").classList.add("on"); toast("Tap where it happened", 6000); };
 };
+// a random id made once on this phone, so people sharing one network address still count as separate reporters
+function deviceId() {
+  let id = store.get("device", "");
+  if (!id) { id = crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2) + Date.now(); store.set("device", id); }
+  return id;
+}
 async function sendReport(pt) {
   const type = reportType;
   reportType = null; $("#reportBtn").classList.remove("on");
   try {
-    await api("/api/report", { lat: pt[0], lon: pt[1], type });
+    await api("/api/report", { lat: pt[0], lon: pt[1], type, at: isoLocal(new Date()), device: deviceId() });
     toast("Thanks. Your report is helping others get home safer.");
     if (state.heatOn) loadHeat();
     if (state.routes.length && !state.trip) maybeRoute();
@@ -789,22 +934,31 @@ async function loadHeat() {
   try { segs = await api("/api/heat?" + new URLSearchParams({ bbox, at: whenParam() })); } catch (e) { return toast(e.message); }
   if (seq !== heatSeq || !state.heatOn) return;
   heatLayer?.remove();
-  heatLayer = L.layerGroup(segs.map(([a, b, c, d, s]) =>
-    L.polyline([[a, b], [c, d]], { color: COLOR[scoreClass(s)], weight: 4, opacity: 0.75, interactive: false }))).addTo(map);
+  heatLayer = L.layerGroup(segs.map(([a, b, c, d, s, conf]) => conf < MIN_CONF
+    ? L.polyline([[a, b], [c, d]], { color: COLOR.none, weight: 3, opacity: 0.8, dashArray: "4 6", interactive: false })
+    : L.polyline([[a, b], [c, d]], { color: COLOR[scoreClass(s)], weight: 4, opacity: conf >= 0.5 ? 0.85 : 0.5, interactive: false }))).addTo(map);
   routeLayer.eachLayer((l) => l.bringToFront?.());
+}
+async function explainStreet(pt) {
+  let x;
+  try { x = await api("/api/explain?" + new URLSearchParams({ at_pt: pt.join(","), at: whenParam() })); } catch (e) { return toast(e.message); }
+  const rows = x.factors.map((f) => `<tr><td>${esc(f.factor)}</td><td>${f.score === null ? '<span class="muted">No data</span>' : f.score}</td><td>${esc(f.sources.join(", ") || "—")}</td></tr>`).join("");
+  L.popup({ maxWidth: 320 }).setLatLng(pt).setContent(`<b>${esc(cap(x.name))}</b><br>
+    ${x.confidence_level === "none" ? "Not rated" : `Score ${x.score}`} · ${CONF[x.confidence_level]} (${Math.round(x.confidence * 100)}% measured)
+    <table class="explain"><tr><th>Factor</th><th>Score</th><th>Data</th></tr>${rows}</table>`).openOn(map);
 }
 $("#heatBtn").onclick = () => {
   state.heatOn = !state.heatOn;
   $("#heatBtn").setAttribute("aria-pressed", state.heatOn);
   $("#legend").hidden = !state.heatOn;
-  if (state.heatOn) { loadHeat(); toast(`Safety map for ${timeLabel().toLowerCase()}`); } else { heatLayer?.remove(); heatLayer = null; }
+  if (state.heatOn) { loadHeat(); toast(`Safety map for ${timeLabel().toLowerCase()}. Tap a street to see its data.`); } else { heatLayer?.remove(); heatLayer = null; }
 };
 
 // ---------- drawer, settings, onboarding ----------
 function openDrawer(html) {
   $("#drawerBody").innerHTML = html;
   $("#drawer").hidden = false;
-  $("#drawer").querySelector("input, button:not(.close)")?.focus();
+  if (matchMedia("(pointer: fine)").matches) $("#drawer").querySelector("input, button:not(.close)")?.focus();  // on phones focus pops the keyboard
 }
 function closeDrawer() { $("#drawer").hidden = true; }
 $("#drawer").addEventListener("click", (e) => { if (e.target.id === "drawer" || e.target.closest("[data-close]")) closeDrawer(); });
@@ -845,6 +999,7 @@ function openSettings() {
     <div class="row"><label for="buffer">Check in if I'm late by</label>${sel("buffer", store.get("buffer", 10), [[5, "5 min"], [10, "10 min"], [15, "15 min"], [30, "30 min"]])}</div>
     <div class="row"><label for="caller">Fake caller name</label><input id="caller" class="input" style="width:50%" maxlength="30" value="${esc(store.get("caller", "Mom"))}"></div>
     <div class="row"><span>Fake call</span><button class="btn" id="fakeIn10">Ring me in 10 s</button></div>
+    <div class="row"><label for="extra">Consider routes up to</label>${sel("extra", store.get("extra", ""), [["", "Any reasonable detour"], [5, "5 min longer"], [10, "10 min longer"], [15, "15 min longer"], [20, "20 min longer"]])}</div>
     <div class="row"><label for="theme">Appearance</label>${sel("theme", store.get("theme", "system"), [["system", "Automatic"], ["light", "Light"], ["dark", "Dark"]])}</div>
     <div class="row"><span>Your data</span><button class="btn" id="wipe">Delete everything</button></div>
     <p class="muted">Your contacts and settings stay on this phone. Trip locations are deleted from the server when a trip ends, and 12 hours after it started at the latest. We never sell location data.</p>`);
@@ -853,17 +1008,27 @@ function openSettings() {
   $("#myName").onchange = (e) => store.set("myName", e.target.value.trim());
   $("#caller").onchange = (e) => store.set("caller", e.target.value.trim() || "Mom");
   $("#buffer").onchange = (e) => store.set("buffer", +e.target.value);
-  $("#theme").onchange = (e) => { store.set("theme", e.target.value); applyTheme(); };
+  $("#theme").onchange = (e) => { store.set("theme", e.target.value); applyTheme(); setBaseMap(); };
+  $("#extra").onchange = (e) => { store.set("extra", e.target.value); if (state.to) maybeRoute(); };
   $("#fakeIn10").onclick = () => { closeDrawer(); toast("Fake call in 10 seconds. You can lock your screen."); setTimeout(fakeCall, 10000); };
   $("#wipe").onclick = () => { if (confirm("Delete your contacts and settings from this phone?")) { try { Object.keys(localStorage).filter((k) => k.startsWith("sr.")).forEach((k) => localStorage.removeItem(k)); } catch {} location.reload(); } };
 }
 $("#settingsBtn").onclick = openSettings;
 
+function showMode() { document.querySelectorAll(".modes [data-mode]").forEach((b) => b.setAttribute("aria-checked", b.dataset.mode === state.mode)); }
+document.querySelectorAll(".modes [data-mode]").forEach((b) => (b.onclick = () => {
+  if (state.trip || state.mode === b.dataset.mode) return;
+  state.mode = b.dataset.mode; store.set("mode", state.mode); showMode();
+  if (state.to) maybeRoute();
+}));
+showMode();
+
 function onboarding(step = 0) {
   const dots = `<div class="steps">${[0, 1, 2].map((i) => `<i class="${i === step ? "on" : ""}"></i>`).join("")}</div>`;
   const pages = [
     `<div class="hero-ico">${icon("shield")}</div><h2 id="drawerTitle">Get there the safer way</h2>
-     <p>SafeRoute checks every street on your walk for lighting, open shops, police, CCTV, isolated stretches and reports from people like you, for the exact time you're leaving.</p>
+     <p class="stat-line"><b>52%</b> of urban Indian women say they always or often feel unsafe walking alone at night. <span class="muted">(YouGov survey)</span></p>
+     <p>SafeRoute checks every street on your walk, ride or drive for lighting, open shops, police, CCTV, isolated stretches and reports from people like you, for the moment you'll be there.</p>
      <button class="btn btn-primary btn-block" data-next>Continue</button>`,
     `<div class="hero-ico">${icon("check")}</div><h2 id="drawerTitle">Private by design</h2>
      <ul class="promise"><li>${icon("check")}No account needed</li><li>${icon("check")}Contacts never leave your phone</li>

@@ -5,8 +5,9 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 
+import rating
 from safety import classify, Area, daylight, is_open
-from tiles import TILE, TileStore, TooFar, tiles_near
+from tiles import TILE, TileStore, TooFar, png_pixels, tiles_near
 
 IST = timezone(timedelta(hours=5, minutes=30))
 NIGHT, LATE, NOON = (datetime(2026, 10, 25, h, 0, tzinfo=IST) for h in (22, 2, 12))
@@ -40,6 +41,12 @@ def fixture():
     return {"elements": els}
 
 
+def overture_fixture():
+    """The fixture streets as Overture segments, linked to their OSM ways."""
+    return {"elements": [{**el, "id": f"ovr{el['id']}", "tags": {"highway": el["tags"]["highway"], "overture_road": "yes", "osm_way": el["id"]}}
+                         for el in fixture()["elements"] if el["type"] == "way"]}
+
+
 class RouteTest(unittest.TestCase):
     def setUp(self):
         self.area = Area(fixture())
@@ -52,13 +59,35 @@ class RouteTest(unittest.TestCase):
         self.assertGreater(r["safest"]["length_m"], 350)
         self.assertLess(r["fastest"]["length_m"], 300)
         self.assertGreater(r["safest"]["score"], r["fastest"]["score"])
-        self.assertTrue(any("confirmed open now" in s for s in r["safest"]["reasons"]))
+        self.assertTrue(any("confirmed open as you pass" in s for s in r["safest"]["reasons"]))
         self.assertIn("Lighting", r["safest"]["factors"])
+        self.assertIn("Street lamps (OpenStreetMap)", r["safest"]["sources"])
 
     def test_identical_routes_are_flagged(self):
         r = self.kinds(NIGHT)
-        self.assertEqual(r["balanced"]["same_as"], "safest")
+        self.assertEqual(r["balanced"]["same_as"], "fastest")  # the lit detour is 1.4x, too long to count as balanced
         self.assertIsNone(r["safest"]["same_as"])
+
+    def test_every_way_is_scored_and_ranked(self):
+        r = self.kinds(NIGHT)
+        self.assertEqual(r["safest"]["checked"], 2)  # the footway and the market street; wiggles are merged
+        self.assertEqual(r["safest"]["rank"], 1)
+        self.assertEqual(r["fastest"]["rank"], 2)
+        self.assertEqual([c["rank"] for c in r["safest"]["compared"]], [1, 2])
+        why = " ".join(r["safest"]["why"])
+        self.assertIn("next best of the 2 ways scanned", why)
+        self.assertIn("More of it is lit: 100% vs 0%", why)
+        grid = []  # a 4x4 block grid has many ways through it, and the search must find several of them
+        for i in range(5):
+            grid.append(way(100 + i, [10 * i + j for j in range(5)], [(28.0 + 0.001 * i, 77.0 + 0.001 * j) for j in range(5)], highway="residential"))
+            grid.append(way(200 + i, [10 * j + i for j in range(5)], [(28.0 + 0.001 * j, 77.0 + 0.001 * i) for j in range(5)], highway="residential"))
+        routes = Area({"elements": grid}).routes((28.0, 77.0), (28.004, 77.004), NIGHT)
+        self.assertGreaterEqual(routes[0]["checked"], 3)
+        others = routes[3:]  # every scanned route comes back, so the table can show any of them on the map
+        self.assertEqual(len(routes) - sum(r["same_as"] is not None for r in routes[:3]), routes[0]["checked"])
+        self.assertEqual([r["rank"] for r in others], sorted(r["rank"] for r in others))
+        self.assertTrue(all(r["kind"] == f"#{r['rank']}" for r in others))
+        self.assertEqual(routes[0]["score"], max(r["score"] for r in routes))  # Safest never shows a lower number than another tab
 
     def test_shops_closed_lowers_score(self):
         self.assertLess(self.kinds(LATE)["safest"]["score"], self.kinds(NIGHT)["safest"]["score"])
@@ -77,8 +106,10 @@ class RouteTest(unittest.TestCase):
 
     def test_dead_end_lane_has_no_way_out(self):
         lane = next(e for e in self.area.edges if e["highway"] == "service")
-        feats, _ = self.area.factors(lane, NIGHT, 0)
-        self.assertEqual(feats["escape"], 0.2)
+        street = next(e for e in self.area.edges if e["highway"] == "residential")
+        walk = lambda e: rating.factors(self.area, e, NIGHT, 0)["walkability"]["value"]
+        self.assertEqual(lane["dead_ends"], 1)
+        self.assertLess(walk(lane), walk(street))
 
     def test_park_hurts_at_night_only(self):
         osm = fixture()
@@ -87,9 +118,8 @@ class RouteTest(unittest.TestCase):
         area = Area(osm)
         foot = next(e for e in area.edges if e["highway"] == "footway")
         self.assertEqual(foot["zones"], ["park"])
-        night, _ = area.factors(foot, NIGHT, 0)
-        day, _ = area.factors(foot, NOON, 1)
-        self.assertLess(night["surroundings"], day["surroundings"])
+        f = lambda when, light: rating.factors(area, foot, when, light)["frontage"]["value"]
+        self.assertLess(f(NIGHT, 0), f(NOON, 1))
 
     def test_turn_by_turn(self):
         r = self.area.routes(A, (28.0012, 77.001), NIGHT)[0]
@@ -176,40 +206,128 @@ class TileTest(unittest.TestCase):
 
 class NoGuessingTest(unittest.TestCase):
     def test_unknown_lighting_and_hours_are_left_out(self):
-        els = [way(1, [1, 2], [A, B], highway="primary"), node(5, (28.0001, 77.0015), shop="bakery")]
+        els = [way(1, [1, 2], [A, B], highway="residential"), node(5, (28.0001, 77.0015), shop="bakery")]
         area = Area({"elements": els})
-        feats, _ = area.factors(area.edges[0], NIGHT, 0)
+        feats = rating.factors(area, area.edges[0], NIGHT, 0)
         self.assertIsNone(feats["lighting"])  # no lit tag and no lamps: unknown, not guessed
         self.assertIsNone(feats["activity"])  # a shop with no published hours: unknown, not assumed open
+        main = Area({"elements": [way(1, [1, 2], [A, B], highway="primary"), els[1]]})
+        self.assertEqual(rating.factors(main, main.edges[0], NIGHT, 0)["activity"]["sources"], ["Main road (OpenStreetMap)"])
         r = area.routes(A, B, NIGHT)[0]
         self.assertIsNone(r["factors"]["Lighting"])
-        self.assertTrue(r["low_data"])
+        self.assertEqual(r["confidence_level"], "none")  # only the street map is known: not rated
+        self.assertEqual(r["unrated_pct"], 100)
         self.assertIn("No lighting data for 100%", r["reasons"])
+
+    def test_unrated_streets_get_no_credit_in_routing(self):
+        self.assertEqual(rating.credit(90, 0.2), 0)
+        self.assertLess(rating.credit(90, 0.5), rating.credit(90, 0.8))
+        self.assertEqual(rating.credit(90, 0.8), 90)
+
+
+    def test_mostly_unrated_route_is_not_safest(self):
+        m = (28.0, 77.0004)
+        els = [way(1, [1, 5], [A, m], highway="secondary", lit="yes"),
+               way(2, [5, 2], [m, B], highway="footway"),  # no lighting data, a shop with no hours: not rated
+               node(50, (28.0001, 77.002), shop="kiosk"),
+               way(3, [1, 10, 11, 12, 13, 2], NORTH, highway="residential", lit="yes")]
+        for i, ((a1, o1), (a2, o2)) in enumerate(zip(NORTH, NORTH[1:])):
+            els.append(node(200 + i, ((a1 + a2) / 2 + 0.0004, (o1 + o2) / 2), shop="convenience", opening_hours="Mo-Su 08:00-21:00"))
+        safest = Area({"elements": els}).routes(A, B, NIGHT)[0]
+        self.assertEqual(safest["unrated_pct"], 0)  # the measured street, not the 87% unknown shortcut
+
+    def test_closing_time_counts_to_the_minute(self):
+        els = fixture()
+        for el in els["elements"]:
+            if el["tags"].get("opening_hours") == "Mo-Su 08:00-23:00":
+                el["tags"]["opening_hours"] = "Mo-Su 08:00-22:30"
+        late = NIGHT.replace(minute=45)
+        fresh = Area(els).routes(A, B, late)[0]["score"]
+        warm = Area(els)
+        warm.routes(A, B, NIGHT)  # 22:00, shops still open
+        self.assertEqual(warm.routes(A, B, late)[0]["score"], fresh)
+
+
+class EvidenceTest(unittest.TestCase):
+    def setUp(self):
+        self.els = [way(1, [1, 2], [A, B], highway="residential"), node(9, (28.01, 77.01), amenity="police")]
+
+    def rate(self, area, when=NIGHT):
+        return rating.rate(area, area.edges[0], when, 0)
+
+    def test_observations_count_as_measured_data(self):
+        bare = self.rate(Area({"elements": self.els}))
+        seen = Area({"elements": self.els}, reports=[
+            {"lat": 28.0, "lon": 77.0015, "type": "lights_on", "ts": NIGHT.timestamp(), "hour": 22, "weekday": 6},
+            {"lat": 28.0, "lon": 77.0015, "type": "people_around", "ts": NIGHT.timestamp(), "hour": 22, "weekday": 6}])
+        score, conf, feats = self.rate(seen)
+        self.assertGreater(conf, bare[1])
+        self.assertGreaterEqual(conf, rating.MIN_CONFIDENCE)
+        self.assertEqual(feats["lighting"]["value"], 1.0)
+        self.assertEqual(feats["activity"]["sources"], ["Reports from people walking here"])
+        late = self.rate(seen, LATE)[2]["activity"]  # people seen at 10 pm say nothing about 2 am
+        self.assertIsNone(late)  # and with no shop mapped anywhere near, nothing else says the street is empty
+
+    def test_night_lights_are_weak_lighting_evidence(self):
+        px = node("nl", (28.0, 77.0015), nightlight="0.80")  # in the street's 500 m pixel
+        feats = self.rate(Area({"elements": self.els + [px]}))[2]
+        self.assertEqual(feats["lighting"]["quality"], rating.QUALITY["nightlight"])
+        self.assertAlmostEqual(feats["lighting"]["value"], 0.8)
+        self.assertIsNone(feats["lighting"]["street"])  # a bright area doesn't make this street count as lit
+
+    def test_timetable_says_if_a_stop_is_served_now(self):
+        deps = [[0] * 24 for _ in range(7)]
+        deps[6][22] = 6  # six buses on Sunday at 10 pm
+        stop = {"lat": 28.0003, "lon": 77.0015, "name": "Market", "deps": deps}
+        area = Area({"elements": self.els}, stops=[stop])
+        self.assertEqual(self.rate(area)[2]["activity"]["value"], 1.0)
+        self.assertEqual(self.rate(area, LATE)[2]["activity"]["value"], 0.0)  # stop exists but nothing runs at 2 am
+
+    def test_gtfs_feed(self):
+        import gtfs, zipfile
+        path = os.path.join(tempfile.mkdtemp(), "feed.zip")
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("stops.txt", "stop_id,stop_name,stop_lat,stop_lon\nS1,Market,28.0003,77.0015\nS2,Unused,28.1,77.1\n")
+            z.writestr("calendar.txt", "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday\nWK,1,1,1,1,1,0,0\n")
+            z.writestr("trips.txt", "route_id,service_id,trip_id\nR,WK,T1\nR,WK,T2\n")
+            z.writestr("stop_times.txt", "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT1,22:10:00,22:10:00,S1,1\nT2,24:30:00,24:30:00,S1,1\n")
+        stops = gtfs.read_feed(path)
+        self.assertEqual(len(stops), 1)
+        self.assertEqual(stops[0]["deps"][0][22], 1)  # Monday 22:00
+        self.assertEqual(stops[0]["deps"][5][0], 1)  # Friday's 24:30 trip runs at 00:30 on Saturday
+        self.assertEqual(stops[0]["deps"][6][22], 0)  # no weekend service
+        self.assertEqual(gtfs.load(os.path.dirname(path)), stops)  # and again from the cache
+
+    def test_png_decoder(self):
+        import struct, zlib
+        rows = [[(10, 20, 30), (200, 100, 50)], [(0, 0, 0), (255, 255, 255)]]
+        raw = b"".join(b"\x00" + bytes(v for p in r for v in p) for r in rows)
+        chunk = lambda k, d: struct.pack(">I", len(d)) + k + d + struct.pack(">I", zlib.crc32(k + d))
+        png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+        self.assertEqual(png_pixels(png), rows)
 
     def test_nothing_mapped_nearby_is_unknown_not_bad(self):
         bare = Area({"elements": [way(1, [1, 2], [A, B], highway="residential")]})
-        feats, _ = bare.factors(bare.edges[0], NIGHT, 0)
-        self.assertIsNone(feats["activity"])  # no shop mapped within 500 m: unmapped, not empty
-        self.assertIsNone(feats["transit"])
+        self.assertIsNone(rating.factors(bare, bare.edges[0], NIGHT, 0)["activity"])  # no shop within 500 m: unmapped, not empty
         mapped = Area({"elements": [way(1, [1, 2], [A, B], highway="residential"),
                                     node(5, (28.003, 77.0015), shop="bakery", opening_hours="Mo-Su 08:00-20:00")]})
-        self.assertEqual(mapped.factors(mapped.edges[0], NIGHT, 0)[0]["activity"], 0.0)  # shops mapped 330 m away, none here
+        activity = rating.factors(mapped, mapped.edges[0], NIGHT, 0)["activity"]
+        self.assertEqual((activity["value"], activity["sources"]), (0.0, ["No shops or services mapped nearby"]))  # mapped 330 m away
+
 
 class LightReportTest(unittest.TestCase):
     def lighting(self, *reports):
         area = Area({"elements": [way(1, [1, 2], [A, B], highway="primary", lit="yes")]})
-        for r in reports:
-            area.add_report({"lat": 28.0, "lon": 77.0015, "ts": r[1].timestamp(), "type": r[0]})
-        return area.factors(area.edges[0], NIGHT, 0)[0]["lighting"]
+        for kind, seen in reports:
+            area.add_report({"lat": 28.0, "lon": 77.0015, "ts": seen.timestamp(), "type": kind})
+        return rating.factors(area, area.edges[0], NIGHT, 0)["lighting"]["value"]
 
-    def test_reports_after_dark_override_map_and_fade(self):
-        recent = datetime.now(IST).replace(hour=23)
-        if recent > datetime.now(IST):
-            recent -= timedelta(days=1)
-        self.assertEqual(self.lighting(("broken_light", recent)), 0.0)
-        self.assertEqual(self.lighting(("broken_light", recent), ("lights_on", recent)), 1.0)  # a tie falls back to lit=yes
-        self.assertEqual(self.lighting(("broken_light", recent - timedelta(days=90))), 1.0)  # an old report fades out
-        self.assertEqual(self.lighting(("broken_light", recent.replace(hour=13))), 1.0)  # nobody can see it in daylight
+    def test_light_reports_count_only_after_dark(self):
+        night = datetime.now(IST).replace(hour=23)
+        if night > datetime.now(IST):
+            night -= timedelta(days=1)
+        self.assertLess(self.lighting(("broken_light", night)), 0.5)  # seen dark at night outweighs the map's lit=yes
+        self.assertEqual(self.lighting(("broken_light", night.replace(hour=13))), 1.0)  # nobody can see it in daylight
 
     def test_old_mapillary_objects_dropped(self):
         from tiles import seen_years_ago
@@ -266,9 +384,9 @@ class OpenDataTest(unittest.TestCase):
     def test_buildings_overlook_street(self):
         els = fixture()["elements"] + [node(f"b{k}", (28.0004, 77.0005 + k * 0.0001), building="yes") for k in range(20)]
         area = Area({"elements": els})
-        feats = lambda a: a.factors(a.edges[1], NIGHT, 0)[0]["overlooked"]
+        feats = lambda a: rating.factors(a, a.edges[1], NIGHT, 0)["frontage"]
         self.assertIsNone(feats(Area(fixture())))  # no footprints loaded: unknown, not zero
-        self.assertGreater(feats(area), 0)
+        self.assertGreater(feats(area)["value"], 0)
 
     def test_slow_source_is_fetched_in_background(self):
         d = tempfile.mkdtemp()
@@ -280,13 +398,7 @@ class OpenDataTest(unittest.TestCase):
 
 
     def test_fast_roads_with_osm_detail_later(self):
-        def roads(*a):  # the fixture streets as Overture segments, linked to their OSM ways
-            out = []
-            for el in fixture()["elements"]:
-                if el["type"] == "way":
-                    tags = {"highway": el["tags"]["highway"], "overture_road": "yes", "osm_way": el["id"]}
-                    out.append({**el, "id": f"ovr{el['id']}", "tags": tags})
-            return {"elements": out}
+        roads = lambda *a: overture_fixture()
         osm_calls, release = [], threading.Event()
         def osm(*a):
             release.wait(5)  # hold the background fetch until the first area is checked, or the test races it
@@ -303,9 +415,8 @@ class OpenDataTest(unittest.TestCase):
         self.assertEqual(len(later.edges), len(Area(fixture()).edges))  # OSM ways lend tags, not duplicate streets
         self.assertTrue(later.pois)
         self.assertEqual([e["lit"] for e in later.edges if e["highway"] == "footway"], ["no"])
-        surroundings = lambda area: area.factors(area.edges[1], NIGHT, 0)[0]["surroundings"]
-        self.assertIsNone(surroundings(first))  # parks and wasteland not loaded yet: unknown, not safe
-        self.assertIsNotNone(surroundings(later))
+        self.assertIn("surroundings", first.edges[1]["unloaded"])  # parks and wasteland not loaded yet: unknown, not safe
+        self.assertNotIn("surroundings", later.edges[1]["unloaded"])
 
     def test_overpass_answers_when_overture_is_down(self):
         def roads(*a):
@@ -319,7 +430,8 @@ class OpenDataTest(unittest.TestCase):
     def test_buildings_not_loaded_here_are_unknown(self):
         els = fixture()["elements"] + [node("b1", (28.0004, 77.0005), building="yes")]
         area = Area({"elements": els}, unloaded={"overlooked": [(27, 76, 29, 78)]})
-        self.assertIsNone(area.factors(area.edges[1], NIGHT, 0)[0]["overlooked"])
+        self.assertIn("overlooked", area.edges[1]["unloaded"])
+        self.assertIsNone(rating.factors(area, area.edges[1], NIGHT, 0)["frontage"])
 
     def test_area_built_during_background_write_is_not_cached(self):
         import tiles
@@ -334,6 +446,285 @@ class OpenDataTest(unittest.TestCase):
         finally:
             tiles.Area = real
         self.assertFalse(store.areas)
+
+
+class ImportTest(unittest.TestCase):
+    def test_imported_tiles_are_used_without_fetching(self):
+        d = tempfile.mkdtemp()
+        from tiles import write_tiles
+        tiles = tiles_near(A, B, 400)
+        write_tiles(d, fixture()["elements"], tiles)
+        with open(os.path.join(d, "extract.json"), "w") as f:
+            import json
+            json.dump({"tiles": sorted(tiles)}, f)
+        fail = lambda *a: self.fail("imported tiles must not be fetched")
+        area = TileStore(d, fetch=fail, roads=fail).for_trip(A, B)
+        self.assertEqual(len(area.edges), len(Area(fixture()).edges))
+
+    def test_trip_half_inside_the_import_keeps_its_streets(self):
+        import json
+        from tiles import write_tiles
+        d = tempfile.mkdtemp()
+        tiles = sorted(tiles_near(A, B, 400))
+        write_tiles(d, fixture()["elements"], tiles[:1])
+        with open(os.path.join(d, "extract.json"), "w") as f:
+            json.dump({"tiles": tiles[:1]}, f)
+        asked = []
+        def roads(*box):
+            asked.append(box)
+            return overture_fixture()
+        def overpass_down(*a):
+            raise ConnectionError("Map data servers are busy")
+        store = TileStore(d, fetch=overpass_down, roads=roads)
+        area = store.for_trip(A, B)
+        store.pool.shutdown(wait=True)
+        self.assertTrue(asked)  # the tiles outside the import come from Overture, not the slow Overpass
+        self.assertEqual(len(area.edges), len(Area(fixture()).edges))  # one connected street network, no duplicates
+
+    def test_import_matches_overpass_selection(self):
+        import import_osm
+        self.assertEqual(import_osm.wanted({"highway": "residential"}), "road")
+        self.assertIsNone(import_osm.wanted({"highway": "residential", "access": "private"}))
+        self.assertEqual(import_osm.wanted({"highway": "street_lamp"}), "poi")
+        self.assertEqual(import_osm.wanted({"amenity": "police"}), "poi")
+        self.assertEqual(import_osm.wanted({"landuse": "construction"}), "zone")
+        self.assertIsNone(import_osm.wanted({"landuse": "residential"}))
+        self.assertEqual(import_osm.wanted({"highway": "crossing"}), "poi")
+        self.assertEqual(import_osm.wanted({"building": "guardhouse"}), "poi")
+        self.assertEqual(import_osm.wanted({"emergency": "phone"}), "poi")
+        self.assertEqual(import_osm.wanted({"amenity": "fire_station"}), "poi")
+        self.assertEqual(import_osm.wanted({"building": "yes"}), "building")
+
+    def test_offline_search(self):
+        import import_osm
+        path = os.path.join(tempfile.mkdtemp(), "search.db")
+        names = [("IILM University", "university", 28.47, 77.50), ("Knowledge Park Road", "street", 28.47, 77.49),
+                 ("Knowledge Park Road", "street", 28.4701, 77.4901), ("Park Plaza", "hotel", 28.6, 77.2)]
+        self.assertEqual(import_osm.write_search(path, names), 3)  # one row per street name per area
+        hits = import_osm.search(path, "park", near=(28.47, 77.5))
+        self.assertEqual([h["name"] for h in hits], ["Park Plaza", "Knowledge Park Road"])  # names starting with it first
+        self.assertEqual(import_osm.search(path, "iilm")[0]["kind"], "university")
+
+    def test_imported_building_counts(self):
+        counted = node("b1", (28.0004, 77.0005), building="yes", building_count="25")
+        area = Area({"elements": fixture()["elements"] + [counted]})
+        self.assertEqual(sum(area.building_cells.values()), 25)
+        overture = node("ovb1", (28.0004, 77.0005), building="yes")
+        area = Area({"elements": fixture()["elements"] + [counted, overture]})
+        self.assertEqual(sum(area.building_cells.values()), 1)  # Overture includes OSM, so never both
+        shop = node(7, (28.0004, 77.0006), building="yes", shop="bakery")
+        area = Area({"elements": fixture()["elements"] + [counted, shop]})
+        self.assertEqual(sum(area.building_cells.values()), 25)  # a shop mapped as a building is a shop
+        self.assertEqual(classify(shop["tags"]), "place")
+
+
+    @unittest.skipUnless(__import__("importlib.util").util.find_spec("osmium"), "pip install osmium")
+    def test_import_end_to_end(self):
+        import json
+        import import_osm
+        d = tempfile.mkdtemp()
+        nodes = {1: A, 2: B, 3: (28.0004, 77.0010), 4: (28.0004, 77.0012), 5: (28.0006, 77.0012), 6: (28.0006, 77.0010),
+                 7: (28.0, 77.0015)}
+        xml = ['<osm version="0.6">'] + [f'<node id="{i}" version="1" lat="{a}" lon="{b}"/>' for i, (a, b) in nodes.items() if i != 7]
+        xml += ['<node id="7" version="1" lat="28.0000" lon="77.0015"><tag k="highway" v="crossing"/></node>',
+                '<way id="1" version="1"><nd ref="1"/><nd ref="2"/><tag k="highway" v="primary"/><tag k="name" v="Knowledge Park Road"/>'
+                '<tag k="lanes" v="4"/></way>',
+                '<way id="2" version="1"><nd ref="3"/><nd ref="4"/><nd ref="5"/><nd ref="6"/><nd ref="3"/><tag k="building" v="yes"/></way>',
+                '</osm>']
+        src = os.path.join(d, "tiny.osm")
+        with open(src, "w") as f:
+            f.write("".join(xml))
+        import_osm.DATA = d
+        import_osm.main([src, "--bbox", "27.995,76.995,28.005,77.005"])
+        folder = os.path.join(d, "tiles")
+        with open(os.path.join(folder, "extract.json")) as f:
+            self.assertEqual(json.load(f)["sources"], [src])
+        area = TileStore(folder, fetch=lambda *a: self.fail("imported tiles must not be fetched")).for_trip(A, B)
+        self.assertEqual(area.edges[0]["lanes"], 4)
+        self.assertEqual(sum(area.building_cells.values()), 1)
+        self.assertTrue(area.edges[0]["near"]["crossing"])
+        self.assertEqual(import_osm.search(os.path.join(folder, "search.db"), "knowledge")[0]["kind"], "street")
+
+
+class CollectionTest(unittest.TestCase):
+    """Data Raasta collects that SafeRoute now uses: road detail, official lists, and one vote per person."""
+    def walk(self, **tags):
+        area = Area({"elements": [way(1, [1, 2, 3], [A, (28.0, 77.0015), B], highway="primary", **tags)]})
+        return rating.factors(area, area.edges[0], NOON, 1)["walkability"]["value"]
+
+    def test_road_detail(self):
+        plain = self.walk()
+        self.assertLess(self.walk(lanes="4"), plain)
+        self.assertLess(self.walk(maxspeed="60 km/h"), plain)
+        self.assertGreater(self.walk(lanes="4", sidewalk="both"), self.walk(lanes="4"))
+        self.assertLess(self.walk(surface="dirt"), plain)
+
+    def test_main_road_helps_a_little(self):
+        shop = node(5, (28.003, 77.0015), shop="bakery")  # shops are mapped around here, just not on this street
+        at = lambda hw: rating.factors(a := Area({"elements": [way(1, [1, 2], [A, B], highway=hw), shop]}), a.edges[0], LATE, 0)["activity"]
+        self.assertGreater(at("primary")["value"], at("residential")["value"])
+        self.assertLess(at("primary")["value"], 0.5)  # a main road with nothing open is still not a busy street
+
+    def test_guards_and_emergency_phones(self):
+        els = [way(1, [1, 2], [A, B], highway="residential")]
+        none = Area({"elements": els})
+        guarded = Area({"elements": els + [node(5, (28.0002, 77.0015), building="guardhouse"),
+                                           node(6, (28.0003, 77.0015), emergency="phone")]})
+        self.assertIsNone(rating.factors(none, none.edges[0], NIGHT, 0)["security"])
+        self.assertEqual(rating.factors(guarded, guarded.edges[0], NIGHT, 0)["security"]["value"], 0.5)
+        self.assertEqual(classify({"amenity": "fire_station"}), "haven")
+
+    def test_one_vote_per_person(self):
+        r = lambda by, t=0: {"lat": 28.0, "lon": 77.0015, "type": "felt_unsafe", "ts": NIGHT.timestamp() - t, "hour": 22,
+                             "weekday": 6, "by": by}
+        area = lambda reps: Area({"elements": fixture()["elements"]}, reports=reps)
+        score = lambda reps: rating.rate(a := area(reps), a.edges[0], NIGHT, 0, now=NIGHT.timestamp())[0]
+        self.assertEqual(score([r("x"), r("x", 60), r("x", 120)]), score([r("x")]))
+        self.assertLess(score([r("x"), r("y")]), score([r("x")]))
+
+    def test_layers_are_loaded_and_reloaded(self):
+        d, layers = tempfile.mkdtemp(), tempfile.mkdtemp()
+        store = TileStore(d, fetch=lambda *a: fixture(), layers=layers)
+        footway = lambda: next(e for e in store.for_trip(A, B).edges if e["highway"] == "footway")
+        before = len(footway()["near"]["lamp"])
+        with open(os.path.join(layers, "streetlights.csv"), "w") as f:
+            f.write("lat,lon,name\n28.0001,77.0015,Pole 17\n")
+        with open(os.path.join(layers, "blackspots.csv"), "w") as f:
+            f.write("lat,lon\n28.0,77.0015\nbad,row\n")
+        e = footway()
+        self.assertEqual(len(e["near"]["lamp"]), before + 1)
+        area = store.for_trip(A, B)
+        self.assertIn("streetlights.csv (official list)", rating.factors(area, e, NIGHT, 0)["lighting"]["sources"][-1])
+        self.assertTrue(e["near"]["blackspot"])
+
+    def test_waterlogging_only_when_raining(self):
+        els = [way(1, [1, 2], [A, B], highway="residential"), node(5, (28.0, 77.0015), hazard="waterlogging")]
+        area = Area({"elements": els})
+        dry, wet = (rating.rate(area, area.edges[0], NOON, 1, rain)[0] for rain in (False, True))
+        self.assertEqual(dry - wet, 20)
+
+    def test_reports_database(self):
+        from reports import Reports
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "reports.json"), "w") as f:
+            f.write('[{"lat": 28.0, "lon": 77.0, "type": "deserted", "ts": 1000, "hour": 22, "weekday": 6}]')
+        db = Reports(os.path.join(d, "reports.db"))
+        self.assertEqual([r["type"] for r in db.all()], ["deserted"])  # old reports carried over
+        sent = [db.add(28.0, 77.0, "dogs", "1.2.3.4") for _ in range(11)]
+        self.assertIsNone(sent[-1])  # ten an hour
+        with open(os.path.join(d, "reports.db"), "rb") as f:
+            self.assertNotIn(b"1.2.3.4", f.read())
+        self.assertEqual(len({r["by"] for r in db.all() if r["by"]}), 1)
+
+
+class ReportSenderTest(unittest.TestCase):
+    def test_each_phone_counts_once_and_keeps_its_own_hour(self):
+        from reports import Reports
+        db = Reports(os.path.join(tempfile.mkdtemp(), "reports.db"))
+        seen = datetime(2026, 10, 25, 22, 10, tzinfo=IST)  # a server on UTC would call this 16:40
+        r = db.add(28.0, 77.0, "deserted", "phone-a", seen)
+        self.assertEqual((r["hour"], r["weekday"]), (22, 6))
+        db.add(28.0, 77.0, "deserted", "phone-b", seen)  # same network address, another phone
+        self.assertEqual(len(rating.votes(db.all())), 2)
+        for _ in range(9):
+            db.add(28.0, 77.0, "deserted", "phone-a", seen)
+        self.assertIsNone(db.add(28.0, 77.0, "deserted", "phone-a", seen))  # 10 an hour per phone
+
+
+class CrimeContextTest(unittest.TestCase):
+    HEADER = ("id,year,state_name,state_code,district_name,district_code,registration_circles,murder_with_rape_gang_rape,dowry_deaths,abetment_to_suicide_of_women,miscarriage,acid_attack,attempt_to_acid_attack,cruelty_by_husband_or_his_relatives,kidnapping_and_abduction,kidnapping_abduction_in_order_to_murder,kidnapping_for_ransom,kidnp_and_abductn_of_women_above_18_for_marrg,kidnp_and_abductn_of_girls_below_18_for_marrg,procuration_of_minor_girls,importation_of_girls_from_foreign,kidnapping_and_abduction_of_women_others,human_trafficking,selling_of_minor_girls,buying_of_minor_girls,rape_women_above_18,rape_girls_below_18,attempt_to_commit_rape_above_18,attempt_to_commit_rape_girls_below_18,assault_on_womenabove_18,assault_on_women_below_18,insult_to_the_modesty_of_women_above_18,insult_to_the_modesty_of_women_below_18,dowry_prohibition,procuring_inducing_children_for_the_sake_of_prostitution,detaining_a_prsn_in_premises_where_prost_is_carried,prostitution_in_or_in_the_vicinity_of_public_places,seducing_or_soliciting_for_purpose_of_prostitution,other_sections_under_itp_act,protection_of_women_from_domestic_violence,publshng_or_transmitting_of_sexually_explicit_mtrl,other_women_centric_cyber_crimes,child_rape,sexual_assault_of_children,child_sexual_harassment,use_of_child_for_pornography,offences_of_pocso_act,pocso_act_unnatural_offences,indecent_representation_of_women")
+    ROWS = [  # real rows from the NCRB table (India Data Portal), the last one repeated as the second table would
+        "5313,2022,Uttar Pradesh,09,Gautam Buddha Nagar,144,Gautambudh Nagar,0,32,0,0,1,0,293,181,9,,209,0,0,0,0,0,0,0,29,29,2,0,79,0,2,0,0,0.0,0.0,0.0,0.0,0,0,0.0,0,53,20,1,0,0,0,0",
+        "5077,2022,Delhi,07,South East,670,South-East,0,10,3,0,0,1,354,341,0,,0,0,0,0,6,0,0,0,121,4,0,0,205,0,56,0,7,3.0,0.0,0.0,0.0,0,0,36.0,0,90,46,1,0,0,0,0",
+        "5246,2021,Haryana,06,Gurugram,062,Irrigation Andpower,0,0,0,0,0,0,0,0,0,,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.0,0.0,0.0,0.0,0,0,0.0,0,0,0,0,0,0,0,0",
+        "5077,2022,Delhi,07,South East,670,South-East,0,10,3,0,0,1,354,341,0,,0,0,0,0,6,0,0,0,121,4,0,0,205,0,56,0,7,3.0,0.0,0.0,0.0,0,0,36.0,0,90,46,1,0,0,0,0",
+    ]
+
+    def test_counts_and_lookup(self):
+        import csv, io, crime
+        got = crime.counts(csv.DictReader(io.StringIO("\n".join([self.HEADER] + self.ROWS))))
+        self.assertEqual(got[crime.key("Gautam Buddha Nagar")]["2022"], {"assault": 79, "insult": 2})
+        self.assertEqual(got[crime.key("South East Delhi")]["2022"], {"assault": 205, "insult": 56})  # counted once
+        square = {"type": "Polygon", "coordinates": [[[77.4, 28.4], [77.6, 28.4], [77.6, 28.6], [77.4, 28.6], [77.4, 28.4]]]}
+        data = {"source": "test", "districts": [{"name": "Gautam Buddha Nagar", "shape": square, "years": got["gautambuddhanagar"]}]}
+        area = crime.around(data, [(28.4741, 77.4998)])
+        self.assertEqual((area[0]["district"], area[0]["year"], area[0]["assault"], area[0]["previous"]), ("Gautam Buddha Nagar", 2022, 79, None))
+        self.assertEqual(crime.around(data, [(28.63, 77.22)]), [])
+        self.assertEqual(crime.around(None, [(28.47, 77.5)]), [])
+        new = csv.DictReader(io.StringIO("year,state_name,registration_circles,assault_outrage_modesty_women,sexual_harassment_women,"
+                                         "assault_criminal_force_disrobe_women,voyeurism_women,stalking_women,insult_modesty_women,rape_women\n"
+                                         "2024,Delhi,Central,22,14,13,4,4,19,78"))  # the 2024 table's column names, Central Delhi's real row
+        self.assertEqual(crime.counts(new)["central"]["2024"], {"assault": 57, "insult": 19})
+
+
+class ModeTest(unittest.TestCase):
+    def test_shop_that_shuts_before_you_get_there_counts_as_closed(self):
+        far = (28.0, 77.012)  # about 1.2 km, so a walk reaches the shop about 14 minutes after leaving
+        els = [way(1, [1, 2], [A, far], highway="residential"),
+               node(5, (28.0002, 77.011), shop="convenience", opening_hours="Mo-Su 08:00-22:05", name="Late Shop")]
+        leave = NIGHT  # 22:00: open as you leave, shut by the time you pass it
+        r = Area({"elements": els}).routes(A, far, leave)[0]
+        shop = next(p for p in r["places"] if p["name"] == "Late Shop")
+        self.assertIs(shop["open"], False)
+        self.assertGreater(shop["minutes"], 5)
+        self.assertEqual(r["look"]["groups"]["shop"], {"found": 1, "open": 0, "no_hours": 0})
+        drive = Area({"elements": els}).routes(A, far, leave, mode="car")[0]
+        self.assertIs(next(p for p in drive["places"] if p["name"] == "Late Shop")["open"], True)  # by car it's 3 min away
+
+    def test_car_keeps_to_roads_and_one_way_streets(self):
+        els = fixture()["elements"]
+        area = Area({"elements": els})
+        walk = {r["kind"]: r for r in area.routes(A, B, NIGHT)}
+        car = {r["kind"]: r for r in area.routes(A, B, NIGHT, mode="car")}
+        self.assertLess(walk["fastest"]["length_m"], 300)  # the footway
+        self.assertGreater(car["fastest"]["length_m"], 350)  # cars can't use it
+        self.assertEqual(car["fastest"]["mode"], "car")
+        self.assertLess(car["fastest"]["minutes"], walk["safest"]["minutes"])
+        one_way = [way(1, [1, 2], [A, B], highway="residential", oneway="yes"),
+                   way(2, [1, 10, 11, 12, 13, 2], NORTH, highway="residential")]
+        there = Area({"elements": one_way}).routes(A, B, NIGHT, mode="car")[1]
+        back = Area({"elements": one_way}).routes(B, A, NIGHT, mode="car")[1]
+        self.assertLess(there["length_m"], 300)  # with the one-way street
+        self.assertGreater(back["length_m"], 350)  # against it: round the block
+        self.assertLess(Area({"elements": one_way}).routes(B, A, NIGHT)[1]["length_m"], 300)  # walking ignores it
+
+    def test_bike_avoids_steps_and_no_route_is_a_clear_error(self):
+        els = [way(1, [1, 2], [A, B], highway="steps")]
+        with self.assertRaises(ValueError):
+            Area({"elements": els}).routes(A, B, NIGHT, mode="bike")
+        self.assertEqual(Area({"elements": els}).routes(A, B, NIGHT)[0]["mode"], "walk")
+
+    def test_extra_minutes_limit_and_headline(self):
+        area = Area(fixture())
+        r = {x["kind"]: x for x in area.routes(A, B, NIGHT)}
+        self.assertIn("this way has", r["safest"]["headline"])
+        self.assertIsNone(r["fastest"]["headline"])
+        tight = area.routes(A, B, NIGHT, max_extra_min=1)
+        self.assertEqual(tight[0]["checked"], 1)  # the lit detour is about 3 minutes longer, so it's left out
+        self.assertEqual(r["safest"]["look"]["groups"]["pharmacy"]["found"], 1)
+        self.assertTrue(all(0 <= p["frac"] <= 1 for p in r["safest"]["places"]))
+
+
+class GeoapifyTest(unittest.TestCase):
+    def test_places_merge_with_osm_and_keep_hours(self):
+        import io, json
+        from unittest import mock
+        import tiles
+        page = {"features": [
+            {"properties": {"name": "Apollo Pharmacy", "lat": 28.0005, "lon": 77.002, "place_id": "a1", "opening_hours": "24/7",
+                            "categories": ["healthcare.pharmacy"], "datasource": {"sourcename": "openstreetmap",
+                            "raw": {"osm_type": "n", "osm_id": 300, "amenity": "pharmacy"}}}},
+            {"properties": {"name": "Indian Oil", "lat": 28.0006, "lon": 77.001, "place_id": "b2",
+                            "categories": ["service.vehicle.fuel", "service"], "datasource": {"sourcename": "other"}}},
+        ]}
+        with mock.patch.dict(os.environ, {"GEOAPIFY_KEY": "test"}), \
+                mock.patch.object(tiles.urllib.request, "urlopen", return_value=io.BytesIO(json.dumps(page).encode())):
+            got = tiles.geoapify(28.0, 77.0, 28.01, 77.01)["elements"]
+        self.assertEqual((got[0]["type"], got[0]["id"], got[0]["tags"]["opening_hours"]), ("node", 300, "24/7"))
+        self.assertEqual(got[1]["tags"]["amenity"], "fuel")
+        area = Area({"elements": fixture()["elements"] + got[1:]})
+        fuel = next(p for p in area.pois if p["name"] == "Indian Oil")
+        self.assertEqual((fuel["group"], fuel["source"]), ("fuel", "Geoapify"))
 
 
 if __name__ == "__main__":
