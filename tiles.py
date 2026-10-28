@@ -28,6 +28,7 @@ LAYERS = {  # data/layers/<name>.csv (lat,lon[,name]) from official lists or RTI
     "hospitals": {"amenity": "hospital"}, "blackspots": {"hazard": "blackspot"}, "waterlogging": {"hazard": "waterlogging"},
 }
 MAX_TRIP_M = 10000
+MAX_TILES = 300  # a 10 km trip needs about 90 tiles in Delhi; more is a request that would download a whole region
 MIRRORS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -429,7 +430,8 @@ class TileStore:
 
     def _fetch_chunk(self, tiles, source="", required=False):
         """One request for a block of missing tiles from one source, split back into per-tile cache files."""
-        with self.locks[(min(tiles), source)]:  # two trips needing the same block download it once
+        # keyed by block, not its first missing tile, so two trips needing the same block download (and write) it once
+        with self.locks[(min(tiles)[0] // CHUNK, min(tiles)[1] // CHUNK, source)]:
             tiles = [t for t in tiles if not self._fresh(t, source)]
             if not tiles:
                 return
@@ -475,6 +477,8 @@ class TileStore:
 
     def area(self, tiles):
         key = frozenset(tiles)
+        if len(key) > MAX_TILES:
+            raise TooFar("That area is too big to load at once, try a shorter trip.")
         layers = self.layer_elements()
         with self.lock:
             if key in self.areas:

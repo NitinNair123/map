@@ -11,7 +11,7 @@ from unittest import mock
 import server
 from test_safety import A, B, NIGHT, fixture
 from reports import Reports
-from tiles import TileStore
+from tiles import TileStore, TooFar
 
 
 class ServerTest(unittest.TestCase):
@@ -127,10 +127,28 @@ class ServerTest(unittest.TestCase):
         # someone else behind the same tunnel still gets a trip
         self.assertEqual(self.call("/api/trip", {"dest": [28.6, 77.2]}, {"X-Forwarded-For": "5.6.7.8"})[0], 200)
 
+    def test_spoofed_cloudflare_header_cannot_dodge_the_limit(self):
+        # behind Caddy the caller writes Cf-Connecting-IP, but Caddy writes the last X-Forwarded-For entry
+        limit = server.LIMITS["trip"][0]
+        codes = [self.call("/api/trip", {"dest": [28.6, 77.2]}, {"X-Forwarded-For": "1.2.3.4", "Cf-Connecting-IP": f"9.9.9.{i}"})[0]
+                 for i in range(limit + 1)]
+        self.assertEqual(codes[-1], 429)
+
+    def test_huge_areas_and_negative_detours_are_refused(self):
+        self.assertEqual(self.call("/api/havens?near=89.99,0")[0], 400)
+        with self.assertRaises(TooFar):  # a request spanning a whole region would download all of it
+            server.store.area({(i, 0) for i in range(301)})
+        self.assertEqual(self.call(f"/api/route?from={A[0]},{A[1]}&to={B[0]},{B[1]}&extra=-5")[0], 200)
+
     def test_bad_lengths_and_values(self):
         self.assertEqual(self.call("/api/trip", {"dest": [28.6, 77.2], "eta": "inf"})[0], 400)
         c = HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=5)
         c.putrequest("POST", "/api/trip"); c.putheader("Content-Length", "-1"); c.endheaders()
+        self.assertEqual(c.getresponse().status, 400)
+        c.close()
+        c = HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=5)
+        c.putrequest("POST", "/api/trip"); c.putheader("Transfer-Encoding", "chunked"); c.endheaders()
+        c.send(b"0\r\n\r\n")
         self.assertEqual(c.getresponse().status, 400)
         c.close()
 
