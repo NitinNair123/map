@@ -44,7 +44,7 @@ class Search(unittest.TestCase):
         self.assertEqual([r["name"] for r in out], ["Knowledge Park II", "Metro Dhaba"])
 
     def test_overture_places_near_user_are_found_and_one_source_down_is_survived(self):
-        old = server.store, server.photon, server.GEOAPIFY_KEY
+        old = server.store, server.photon, server.GEOAPIFY_KEY, server.SEARCH_DB
         with tempfile.TemporaryDirectory() as d:
             server.store = TileStore(d)
             with open(server.store._path((2847, 7749), "places"), "w") as f:
@@ -54,12 +54,12 @@ class Search(unittest.TestCase):
 
             def down(q, near):
                 raise OSError("no network")
-            server.photon, server.GEOAPIFY_KEY = down, ""
+            server.photon, server.GEOAPIFY_KEY, server.SEARCH_DB = down, "", os.path.join(d, "none.db")  # not the laptop's real index
             try:
                 out = server.geocode("tea st", HOME)
                 atms = server.nearby_places("atm", HOME)  # categories match too, not just names
             finally:
-                server.store, server.photon, server.GEOAPIFY_KEY = old
+                server.store, server.photon, server.GEOAPIFY_KEY, server.SEARCH_DB = old
         self.assertEqual([(r["name"], r["kind"]) for r in out], [("Sharma Tea Stall", "cafe")])
         self.assertEqual([r["name"] for r in atms], ["SBI"])
         self.assertNotIn(("tea st", (28.47, 77.49)), server.geocode_cache)  # offline answers aren't cached
