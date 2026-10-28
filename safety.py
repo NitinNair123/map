@@ -6,7 +6,9 @@ import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 
+import buses
 import rating
+import traffic
 from rating import LABELS, SURROUNDINGS
 
 # Average speeds for travel times: walking, a city bike and a car in city traffic
@@ -33,6 +35,8 @@ REPORT_RADIUS_M = 50
 INCIDENT_RADIUS_M = 100
 STOP_RADIUS_M = 150
 NIGHT_CELL = 0.005  # NASA night-light pixels, about 500 m
+# taps from people on the street that say how busy it is, shown on the route card
+FOOT_TAPS = {"people_around": "said it's busy", "shops_open": "saw shops open", "deserted": "said it's deserted", "shops_closed": "saw shops shut"}
 HELP_GROUPS = {"pharmacy", "hospital", "fuel", "police"}  # places to step into for help: open ones, and police at any hour
 NEAR_M = {"lamp": 20, "cctv": 50, "transit": 150, "crossing": 15, "sos_phone": 100, "blackspot": 100, "waterlogging": 50}
 
@@ -509,7 +513,8 @@ class Area:
     def ratings(self, when, rain=False, mode="walk"):
         """(score, confidence) for every segment at this time."""
         light = self.light(when)
-        key = (when.weekday(), when.hour, when.minute, round(light, 1), rain, mode)  # to the minute: opening hours end at any minute
+        # to the minute: opening hours end at any minute; live buses and traffic change, so entries last 5 minutes at most
+        key = (when.weekday(), when.hour, when.minute, round(light, 1), rain, mode, int(time.time() // 300))
         if key not in self._cache:
             if len(self._cache) > 200:
                 self._cache.clear()
@@ -650,6 +655,7 @@ class Area:
         underpasses = 0
         zones = set()
         done = 0.0
+        bus_ids, live_buses, jammed, said = set(), False, 0.0, {}  # said: report -> its type, once per report
         for (_, ei), t in zip(path, at):
             e = self.edges[ei]
             lt = self.light(t)
@@ -699,6 +705,11 @@ class Area:
             police_m = min(police_m, e["police_m"])
             underpasses += e["underpass"]
             zones.update(e["zones"])
+            passed = buses.LIVE.near(e["mid"], t, now)
+            live_buses |= passed is not None
+            bus_ids |= passed or set()
+            jammed += e["length"] if e["highway"] in rating.MAIN_ROADS and traffic.LIVE.jammed(e["mid"], t, now) else 0
+            said.update((id(r), r["type"]) for r in rating.votes(e["reports"]) if r["type"] in FOOT_TAPS and rating.same_time(r, t))
             done += e["length"]
         if gap >= 300:
             gaps.append([round((done - gap) / length, 3), 1.0])
@@ -729,11 +740,21 @@ class Area:
                 reasons.append(f"{round(100 * lit_len / length)}% lit, {round(100 * dark_len / length)}% unlit")
             if no_light >= 1:
                 reasons.append(f"No lighting data for {round(100 * no_light / length)}%")
+        if live_buses:
+            reasons.append(f"{len(bus_ids)} {'bus' if len(bus_ids) == 1 else 'buses'} passed in the last 30 min")
+        if jammed:
+            reasons.append(f"Busy traffic on {round(100 * jammed / length)}% (TomTom, live)")
         if cctv:
             reasons.append(f"{len(cctv)} CCTV cameras")
         if police_m < 800:
             reasons.append(f"Police within {round(police_m)} m")
         warnings = []
+        taps = defaultdict(int)
+        for kind in said.values():
+            taps[kind] += 1
+        for kind, text in FOOT_TAPS.items():
+            if taps[kind]:
+                (warnings if kind in ("deserted", "shops_closed") else reasons).append(f"{taps[kind]} {'person' if taps[kind] == 1 else 'people'} {text} at this time")
         if unrated_pct >= 10:
             warnings.append(f"{unrated_pct}% of this route has too little data to rate")
         if isolated >= 100:

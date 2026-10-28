@@ -19,8 +19,10 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
+import buses
 import crime
 import gtfs
+import traffic
 from import_osm import search as offline_search
 from rating import REPORT_TYPES
 from reports import Reports
@@ -90,6 +92,18 @@ if importlib.util.find_spec("pyarrow"):
 print("Overture streets, places and buildings:", "on" if "places" in EXTRAS else "off (pip install pyarrow), using slower Overpass for streets", flush=True)
 print("Mapillary lights and cameras:", "on" if os.environ.get("MAPILLARY_TOKEN") else "off (no token)", flush=True)
 print("Geoapify places:", "on" if os.environ.get("GEOAPIFY_KEY") else "off (no key in data/geoapify_key.txt)", flush=True)
+def key_file(name, env):
+    """A free API key from the environment or data/<name> (gitignored), or ""."""
+    path = os.path.join(DATA_DIR, name)
+    return os.environ.get(env) or (open(path).read().strip() if os.path.exists(path) else "")
+
+
+buses.LIVE.key = key_file("otd_key.txt", "OTD_KEY")  # free key from otd.delhi.gov.in
+if buses.LIVE.key:
+    threading.Thread(target=buses.LIVE.run, daemon=True).start()
+traffic.LIVE.key = key_file("tomtom_key.txt", "TOMTOM_KEY")  # free key from developer.tomtom.com
+print("Live buses:", "on (counts start after 30 min)" if buses.LIVE.key else "off (no key in data/otd_key.txt)", flush=True)
+print("Live traffic:", "on" if traffic.LIVE.key else "off (no key in data/tomtom_key.txt)", flush=True)
 SURVEY = load_csv(SURVEY_PATH, REPORT_TYPES, source="Street survey")
 STOPS = gtfs.load(GTFS_DIR)
 print(f"Street survey: {len(SURVEY)} observations. Timetables: {len(STOPS)} stops (put GTFS zips in data/gtfs).", flush=True)
@@ -395,6 +409,7 @@ class Handler(SimpleHTTPRequestHandler):
                     raise ValueError("mode must be walk, bike or car")
                 extra = int(q["extra"][0]) if q.get("extra", [""])[0] else None  # longest detour to consider, in minutes
                 area = store.for_trip(a, b)
+                traffic.LIVE.warm(traffic.sample(area, a, b) if traffic.is_now(when, time.time()) else [])
                 return self.send_json({"routes": area.routes(a, b, when, rain, mode, extra), "rain": rain,
                                        "area": crime.around(CRIME, [a, b]), "sources": area.sources})
             if u.path.startswith("/api/trip/"):
