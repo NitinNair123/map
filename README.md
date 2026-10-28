@@ -183,7 +183,8 @@ No rating is 100% accurate. Scores compare routes and mean *safer*, never *safe*
 ## Before selling it
 
 - Set your contact email in `static/index.html` (search for `hello@example.com`).
-- Host it behind HTTPS. The server only answers phones on your own network (and local tunnels); behind an
-  HTTPS proxy on a public server, start it with `SAFEROUTE_PUBLIC=1`. Live trips are kept in memory, so use a single server process or move them to Redis.
+- Host it behind HTTPS: see [DEPLOY.md](DEPLOY.md) for an Ubuntu VPS with Caddy. The server only answers phones on your own
+  network, local tunnels and a proxy on the same machine, so leave `SAFEROUTE_PUBLIC` off behind Caddy; set
+  `SAFEROUTE_PUBLIC=1` only when a proxy on another machine forwards to it. Live trips are kept in memory, so use a single server process or move them to Redis.
 - Add a privacy policy and terms page.
 - For app-store listings, wrap `/app/` with Capacitor.
