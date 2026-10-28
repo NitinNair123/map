@@ -147,8 +147,8 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(c.getresponse().status, 400)
         c.close()
         c = HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=5)
+        # no body sent: the server answers and closes first, and Windows resets a socket closed with unread data
         c.putrequest("POST", "/api/trip"); c.putheader("Transfer-Encoding", "chunked"); c.endheaders()
-        c.send(b"0\r\n\r\n")
         self.assertEqual(c.getresponse().status, 400)
         c.close()
 
