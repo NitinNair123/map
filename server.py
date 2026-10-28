@@ -45,6 +45,9 @@ MAX_TRIPS = 20000
 # requests allowed per network address in a window of seconds, so one script can't flood reports or fill the trip table.
 # One address can be many phones (mobile carriers share them), so reports are also limited per device in reports.py.
 LIMITS = {"report": (60, 3600), "trip": (60, 3600), "update": (120, 600), "read": (300, 600)}
+# map-building requests running at once; the rest wait, so a burst of users can't run a small server out of memory
+BUSY = threading.BoundedSemaphore(6)
+HEAVY = ("/api/heat", "/api/explain", "/api/havens", "/api/route")
 PUBLIC = os.environ.get("SAFEROUTE_PUBLIC") == "1"  # serve clients outside the home network directly (only behind HTTPS)
 lock = threading.Lock()
 # shortcut: live trips and limits live in memory and vanish on restart, move to Redis when running more than one server
@@ -139,7 +142,7 @@ threading.Thread(target=reimport_daily, daemon=True).start()
 
 def latlon(s):
     lat, lon = (float(v) for v in s.split(",")) if isinstance(s, str) else (float(s[0]), float(s[1]))
-    if not (-90 <= lat <= 90 and math.isfinite(lon)):
+    if not (-85 <= lat <= 85 and math.isfinite(lon)):  # near the poles a 500 m circle spans thousands of map tiles
         raise ValueError("bad coordinates")
     return lat, lon if -180 <= lon <= 180 else (lon + 180) % 360 - 180  # a map panned round the world sends 77.4 as -642.6
 
@@ -230,8 +233,9 @@ def nearby_places(q, near, radius_m=5000):
 def geocode(q, near):
     """Place search anywhere, from the offline index and every free source at once, with places near the user first."""
     key = (q.lower(), near and (round(near[0], 2), round(near[1], 2)))
-    if key in geocode_cache:
-        return geocode_cache[key]
+    hit = geocode_cache.get(key)  # another thread may drop the key between a check and a read
+    if hit is not None:
+        return hit
     sources = [photon] + ([geoapify_search] if GEOAPIFY_KEY else [])
     with ThreadPoolExecutor(len(sources)) as ex:
         jobs = [ex.submit(fetch, q, near) for fetch in sources]
@@ -355,7 +359,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def read_json(self):
         n = int(self.headers.get("Content-Length", 0))
-        if not 0 <= n <= 10_000:
+        if not 0 <= n <= 10_000 or "Transfer-Encoding" in self.headers:  # a chunked body isn't read, so refuse it
             self.close_connection = True  # the unread body would otherwise be taken for the next request
             raise ValueError("bad length")
         body = json.loads(self.rfile.read(n) or b"{}")
@@ -364,8 +368,9 @@ class Handler(SimpleHTTPRequestHandler):
         return body
 
     def address(self):
-        """The caller's address. Behind a tunnel every request comes from this machine, and the tunnel adds the real one last."""
-        forwarded = self.headers.get("Cf-Connecting-IP") or self.headers.get("X-Forwarded-For", "").split(",")[-1].strip()
+        """The caller's address. Behind a tunnel or Caddy every request comes from this machine, and the proxy adds the real
+        one last to X-Forwarded-For. Cf-Connecting-IP comes second: behind Caddy a caller could set it to anything."""
+        forwarded = self.headers.get("X-Forwarded-For", "").split(",")[-1].strip() or self.headers.get("Cf-Connecting-IP")
         ip = self.client_address[0].removeprefix("::ffff:")  # IPv4 callers of the dual-stack socket look like ::ffff:1.2.3.4
         if forwarded and ip in ("127.0.0.1", "::1"):
             return forwarded
@@ -379,6 +384,9 @@ class Handler(SimpleHTTPRequestHandler):
         q = parse_qs(u.query)
         if u.path.startswith("/api/") and not allowed("read", self.address()):
             return self.send_json({"error": "Too many requests, please wait a minute."}, 429)
+        heavy = u.path in HEAVY
+        if heavy and not BUSY.acquire(timeout=60):
+            return self.send_json({"error": "SafeRoute is busy right now, please try again in a minute."}, 503)
         try:
             if u.path == "/api/search":
                 text = q.get("q", [""])[0].strip()[:80]
@@ -407,7 +415,7 @@ class Handler(SimpleHTTPRequestHandler):
                 mode = q.get("mode", ["walk"])[0]
                 if mode not in MODES:
                     raise ValueError("mode must be walk, bike or car")
-                extra = int(q["extra"][0]) if q.get("extra", [""])[0] else None  # longest detour to consider, in minutes
+                extra = max(0, int(q["extra"][0])) if q.get("extra", [""])[0] else None  # longest detour to consider, in minutes
                 area = store.for_trip(a, b)
                 traffic.LIVE.warm(traffic.sample(area, a, b) if traffic.is_now(when, time.time()) else [])
                 return self.send_json({"routes": area.routes(a, b, when, rain, mode, extra), "rain": rain,
@@ -430,6 +438,9 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": msg}, 400)
         except Exception:
             return self.server_error()
+        finally:
+            if heavy:
+                BUSY.release()
         super().do_GET()
 
     def server_error(self):
