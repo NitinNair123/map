@@ -44,6 +44,7 @@
     <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="m16 9 6 6m0-6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-bike" viewBox="0 0 24 24"><circle cx="5.5" cy="17" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="18.5" cy="17" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5.5 17 9 9h6l3.5 8M9 9 12 17h-3M14 5h2l1 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-car" viewBox="0 0 24 24"><path d="M4 16V12l2-5h12l2 5v4M4 16h16M4 16v3h3v-3M17 16v3h3v-3M4 12h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="7.5" cy="14" r=".8" fill="currentColor"/><circle cx="16.5" cy="14" r=".8" fill="currentColor"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-swap" viewBox="0 0 24 24"><path d="M7 4v16m0 0-3-3m3 3 3-3M17 20V4m0 0-3 3m3-3 3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   </defs>
 </svg>
@@ -57,6 +58,7 @@
       <span class="dot from" aria-hidden="true"></span>
       <input id="fromInput" placeholder="Your location" autocomplete="off" aria-label="Start">
     </div>
+    <div id="stopFields"></div>
     <div class="field">
       <span class="dot to" aria-hidden="true"></span>
       <input id="toInput" placeholder="Where to?" autocomplete="off" aria-label="Destination">
@@ -73,6 +75,7 @@
     <button class="chip" id="timeChip"><svg><use href="#i-clock"/></svg><span id="timeLabel">Leave now</span></button>
     <input type="datetime-local" id="timeInput" class="sr-only" aria-label="Departure time">
     <span class="spacer"></span>
+    <button class="chip round-chip" id="addStopBtn" aria-label="Add a stop"><svg><use href="#i-plus"/></svg></button>
     <button class="chip round-chip" id="locateBtn" aria-label="Show my location"><svg><use href="#i-locate"/></svg></button>
     <button class="chip round-chip" id="heatBtn" aria-label="Safety map" aria-pressed="false"><svg><use href="#i-layers"/></svg></button>
     <button class="chip round-chip" id="reportBtn" aria-label="Report something"><svg><use href="#i-flag"/></svg></button>
@@ -109,9 +112,13 @@
     <p id="sosSub">Your messages app opens in <b id="sosSecs">5</b> seconds with your location written in. Tap cancel if you're OK.</p>
     <div class="sos-actions">
       <a class="btn btn-block sos-call" href="tel:112"><svg><use href="#i-phone"/></svg>Call 112</a>
+      <a class="btn btn-block sos-call" href="tel:108"><svg><use href="#i-phone"/></svg>Call ambulance 108</a>
+      <button class="btn btn-block" id="sosMedical"><svg><use href="#i-share"/></svg>Ambulance alert with my medical info</button>
       <button class="btn btn-block" id="sosAlertNow"><svg><use href="#i-share"/></svg>Write the text now</button>
       <button class="btn btn-block" id="sirenBtn" aria-pressed="false"><svg><use href="#i-siren"/></svg>Loud siren</button>
       <button class="btn btn-block" id="fakeCallBtn"><svg><use href="#i-phone"/></svg>Fake incoming call</button>
+      <!-- Blinkit has no public API: its ambulance (parts of Gurugram only) is booked in the Blinkit app -->
+      <a class="btn btn-block" href="https://blinkit.com/" target="_blank" rel="noopener">Blinkit ambulance (parts of Gurugram)</a>
     </div>
     <div id="sosHavens" class="sos-havens"></div>
     <button class="btn btn-ghost btn-block sos-cancel" id="sosCancel">I'm OK, cancel</button>

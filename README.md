@@ -72,6 +72,17 @@ and open the https link on the phone. Then use "Add to Home Screen".
 - **Live traffic** (free TomTom key from https://developer.tomtom.com, in `data/tomtom_key.txt` or `TOMTOM_KEY`):
   up to 6 main roads near each route are looked up (cached 10 minutes, at most 2,000 calls a day). Slow, heavy
   traffic counts as a weak sign the road isn't deserted; free-flowing traffic counts as nothing.
+- **Gemini** (key from https://aistudio.google.com, in `data/gemini_key.txt` or `GEMINI_KEY`; it stays on the
+  server): for each trip, named shops within 300 m of it that publish no opening hours are looked up in one
+  Google-Search-grounded call (at most 15 places), and the answers are kept in `data/gemini_hours.json` for 30 days.
+  A second call per area and hour looks for VIP movement, barricades, closures and protests. Each alert must name a
+  street or landmark that place search finds near the trip, or it is dropped. Alerts plug in through `safety.SIGNALS`:
+  ones within 400 m take 20 points off those streets around that time, wider ones only show a warning. At most 300 calls a day.
+- **SOS ambulance alert**: "Ambulance alert with my medical info" on the SOS screen. With the Gemini key above, the
+  text is reworded so allergies and conditions come first (no search, no thinking, 4 s timeout). It only rewords;
+  the user still presses Send. With no key, a slow or failed call, or a reply that drops a location link, the plain
+  text is used. The SOS screen also has Call ambulance 108 and a Blinkit ambulance link (Blinkit has no public API;
+  its ambulance runs in parts of Gurugram and is booked in the Blinkit app).
 - **Busy / empty taps**: while navigating, one tap reports "people around", "deserted", "shops open" or
   "shops shut" at your spot. The route card shows how many people said so at this time of day.
 - **Street survey**: `data/survey.csv` with columns `lat,lon,type,when`, one row per thing you checked on a
@@ -143,6 +154,16 @@ Weights blend from day to night with the real sun position, so dusk counts as du
   by bike and 25 km/h by car in city traffic. The same evidence is weighed differently: day / dark weights are
   bike lighting 0/30, people 30/25, buildings 20/15, police 10/10, footpath 40/20; car lighting 0/15, people
   45/40, buildings 20/15, police 25/20, footpath 10/10 (in a car, help points that are open matter most).
+- **Stops.** Up to 5 stops, visited in order. Each leg is searched on its own and the k-th way of every leg is joined into
+  the k-th candidate, so the whole trip is scored and ranked like a trip without stops.
+- **Your priorities.** Settings let you ask for more medical stores, hospitals, places to eat, shops, petrol pumps or
+  bus and metro stops on the way (0–3 each, kept on the phone). Every open one of those passed adds 1.5 points × its
+  weight, at most 3 counted per kind and at most +10 in all, so safety still decides. The card says what was counted.
+- **Plug-in signals.** Other features add evidence without touching the rating: append `fn(pt, when)` to
+  `safety.SIGNALS`, returning `None` or `{"delta": points, "warning": text}` (or `"reason"`). `delta` is added to
+  that street's score for the moment the trip gets there (0 for awareness only), and the text shows on the route
+  card with how much of the route it covers. A signal that raises an error is skipped. Physical and situational
+  conditions only, never who lives somewhere.
 - **Detour limit.** Settings can cap candidates at 5, 10, 15 or 20 minutes longer than the fastest way.
 - **A closer look.** Every route lists the medical stores, hospitals, petrol pumps, shops, stops and cameras
   along it, how many are open as you pass, the longest stretch without an open help point (medical store,
@@ -155,6 +176,10 @@ No rating is 100% accurate. Scores compare routes and mean *safer*, never *safe*
 ## App features
 
 - Live navigation: next-turn banner, spoken directions, map follows you, automatic re-route when you go off route, and a Simulate walk demo.
+- **Live re-scoring.** Every 3 minutes while navigating, the way ahead is scored again for the current time (shops shut,
+  night falls, new reports, live buses and traffic, plug-in signals). If another way from where you are is now 10 or more
+  points safer than the rest of your route, the app switches to it, says so and vibrates.
+- Stops between start and destination (the + button), announced as you reach each one.
 - Place search anywhere, biased towards where you're looking, or a pin dropped on the map.
 - A departure time picker, because a 1 am walk scores differently from a 7 pm one.
 - A safety map overlay for the chosen hour.

@@ -1,10 +1,12 @@
 """Website, app and JSON API. Usage: python server.py [port]"""
 import csv
+import functools
 import importlib.util
 import ipaddress
 import json
 import math
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -21,12 +23,13 @@ from urllib.request import Request, urlopen
 
 import buses
 import crime
+import gemini
 import gtfs
 import traffic
 from import_osm import search as offline_search
 from rating import REPORT_TYPES
 from reports import Reports
-from safety import MODES, dist
+from safety import MODES, SIGNALS, dist, seg_dist
 from tiles import (TileStore, TooFar, geoapify, mapillary, nightlights, overture_buildings, overture_places, overture_roads, tiles_near,
                    warm_overture)
 
@@ -107,6 +110,9 @@ if buses.LIVE.key:
 traffic.LIVE.key = key_file("tomtom_key.txt", "TOMTOM_KEY")  # free key from developer.tomtom.com
 print("Live buses:", "on (counts start after 30 min)" if buses.LIVE.key else "off (no key in data/otd_key.txt)", flush=True)
 print("Live traffic:", "on" if traffic.LIVE.key else "off (no key in data/tomtom_key.txt)", flush=True)
+gemini.LIVE = gemini.Gemini(key_file("gemini_key.txt", "GEMINI_KEY"), os.path.join(DATA_DIR, "gemini_hours.json"))
+SIGNALS.append(gemini.signal)
+print("Gemini shop hours and live events:", "on" if gemini.LIVE.key else "off (no key in data/gemini_key.txt)", flush=True)
 SURVEY = load_csv(SURVEY_PATH, REPORT_TYPES, source="Street survey")
 STOPS = gtfs.load(GTFS_DIR)
 print(f"Street survey: {len(SURVEY)} observations. Timetables: {len(STOPS)} stops (put GTFS zips in data/gtfs).", flush=True)
@@ -278,10 +284,66 @@ def rank(q, near, found, limit=8):
     return out[:limit]
 
 
+@functools.lru_cache(512)
+def place_name(pt):
+    """"Connaught Place, New Delhi" style name for a point (rounded to ~100 m), for Gemini prompts."""
+    try:
+        hit = photon_get("reverse", {"lat": pt[0], "lon": pt[1], "limit": 1, "lang": "en"})
+        return f"{hit[0]['name']}, {hit[0]['kind']}" if hit else f"{pt[0]:.4f},{pt[1]:.4f}"
+    except (OSError, ValueError, KeyError):
+        return f"{pt[0]:.4f},{pt[1]:.4f}"
+
+
+def ai_extras(area, stops, when):
+    """Gemini opening hours for places along the trip (start, stops, end) and live event alerts near it; [] without a key."""
+    if not gemini.LIVE.key:
+        return []
+    a, b = stops[0], stops[-1]
+    where = f"{place_name((round(a[0], 3), round(a[1], 3)))} to {place_name((round(b[0], 3), round(b[1], 3)))}"
+    legs = list(zip(stops, stops[1:]))
+    near = lambda p, m: any(seg_dist(p, x, y) <= m for x, y in legs)
+
+    def locate(q):
+        hit = next((h for h in geocode(q, ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)) if not h.get("big")), None)
+        return hit["pt"] if hit and near(hit["pt"], 3000) else None  # far away means it matched the wrong place
+
+    with ThreadPoolExecutor(2) as ex:
+        jobs = [ex.submit(gemini.LIVE.fill_hours, area, lambda p: near(p, 300), where),
+                ex.submit(gemini.LIVE.find_events, a, b, when, where, locate)]
+    try:
+        jobs[0].result()
+        return jobs[1].result()
+    except Exception:  # a bonus: a bug here must not cost the trip
+        traceback.print_exc()
+        return []
+
+
 def expire_trips():
     now = time.time()
     for k in [k for k, t in trips.items() if now - t["started"] > TRIP_TTL or t["ended"] and now - t["updated"] > ENDED_TTL]:
         del trips[k]
+
+
+def keeps_links(text, out):
+    """A reworded alert that dropped or changed a location link is worse than the plain one."""
+    return bool(out) and all(u in out for u in re.findall(r"https?://\S+", text))
+
+
+def reword_sos(text):
+    """Gemini puts the facts a paramedic needs first. It only rewords; the user still presses Send."""
+    if not gemini.LIVE.key:
+        return text
+    prompt = ("Rewrite this emergency text message for family and ambulance responders. Put allergies and conditions that "
+              "change treatment first. Keep every fact and every link exactly; add nothing. Plain text, under 400 characters.\n\n" + text)
+    # no search grounding or thinking: an SOS can't wait, and the default thinking alone takes over 4 s
+    body = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0, "thinkingConfig": {"thinkingBudget": 0}}}
+    req = Request(gemini.URL, json.dumps(body).encode(), {"Content-Type": "application/json", "x-goog-api-key": gemini.LIVE.key})
+    try:
+        with urlopen(req, timeout=4) as r:
+            out = json.load(r)["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception:
+        return text
+    return out if keeps_links(text, out) else text
 
 
 def end_trip(t):
@@ -410,18 +472,21 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json(store.around(pt).havens_near(pt, self.when(q)))
             if u.path == "/api/route":
                 a, b = latlon(q["from"][0]), latlon(q["to"][0])
+                via = [latlon(v) for v in q.get("via", [""])[0].split(";") if v][:5]  # stops, in order
+                prefer = {k: min(3, max(0, int(w))) for k, _, w in (p.partition(":") for p in q.get("prefer", [""])[0].split(",") if p)}
                 when = self.when(q)
                 rain = is_raining(a, when)
                 mode = q.get("mode", ["walk"])[0]
                 if mode not in MODES:
                     raise ValueError("mode must be walk, bike or car")
                 extra = max(0, int(q["extra"][0])) if q.get("extra", [""])[0] else None  # longest detour to consider, in minutes
-                area = store.for_trip(a, b)
+                area = store.for_trip(a, b, via)
                 traffic.LIVE.warm(traffic.sample(area, a, b) if traffic.is_now(when, time.time()) else [])
-                routes = area.routes(a, b, when, rain, mode, extra)
+                alerts = ai_extras(area, [a, *via, b], when)
+                routes = area.routes(a, b, when, rain, mode, extra, via, prefer)
                 for r in routes:  # the districts each route passes through, as background only (never scored)
                     r["area"] = crime.around(CRIME, crime.along(r["coords"]))
-                return self.send_json({"routes": routes, "rain": rain, "sources": area.sources})
+                return self.send_json({"routes": routes, "rain": rain, "alerts": alerts, "sources": area.sources})
             if u.path.startswith("/api/trip/"):
                 with lock:
                     expire_trips()
@@ -463,6 +528,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.start_trip(body)
             if path.startswith("/api/trip/"):
                 return self.update_trip(path.rsplit("/", 1)[1], body)
+            if path == "/api/sos-text":
+                return self.send_json({"text": reword_sos(str(body["text"])[:1000])})
         except (KeyError, ValueError, TypeError) as e:
             return self.send_json({"error": f"bad request: {e}"}, 400)
         except Exception:
