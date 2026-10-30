@@ -21,7 +21,8 @@ class ServerTest(unittest.TestCase):
         cls.patches = [mock.patch.object(server, "store", TileStore(tempfile.mkdtemp(), fetch=lambda *a: fixture())),
                        mock.patch.object(server, "is_raining", lambda *a: False),
                        mock.patch.object(server, "geocode", lambda q, near: [{"name": "City Pharmacy", "pt": [28.0007, 77.0025], "kind": "pharmacy"}]),
-                       mock.patch.object(server, "REPORTS", Reports(os.path.join(tempfile.mkdtemp(), "reports.db")))]
+                       mock.patch.object(server, "REPORTS", Reports(os.path.join(tempfile.mkdtemp(), "reports.db"))),
+                       mock.patch.object(server.gemini.LIVE, "key", "")]  # a real data/gemini_key.txt must not make live calls
         for p in cls.patches:
             p.start()
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
@@ -165,6 +166,23 @@ class ServerTest(unittest.TestCase):
         for ip in ("192.168.1.5", "::ffff:10.0.0.2", "127.0.0.1", "fe80::1%eth0"):
             h.client_address = (ip, 1)
             self.assertTrue(server.Handler.private_client(h), ip)
+
+    def test_sos_text_keeps_the_plain_alert_unless_gemini_keeps_every_link(self):
+        text = "Medical emergency: Asha needs an ambulance. Allergies: penicillin. https://maps.google.com/?q=28.0,77.0"
+        self.assertEqual(self.call("/api/sos-text", {"text": text}), (200, {"text": text}))  # no key: unchanged
+
+        def gemini(reply):
+            r = mock.MagicMock()
+            r.__enter__.return_value.read.return_value = json.dumps({"candidates": [{"content": {"parts": [{"text": reply}]}}]}).encode()
+            return mock.patch.object(server, "urlopen", lambda *a, **kw: r)
+        with mock.patch.object(server.gemini.LIVE, "key", "k"):
+            with gemini("Allergic to penicillin! Asha needs an ambulance https://maps.google.com/?q=28.0,77.0"):
+                self.assertTrue(server.reword_sos(text).startswith("Allergic"))
+            with gemini("Asha needs an ambulance."):
+                self.assertEqual(server.reword_sos(text), text, "dropped the location link")
+            with mock.patch.object(server, "urlopen", mock.Mock(side_effect=OSError)):
+                self.assertEqual(server.reword_sos(text), text, "Gemini down")
+        self.assertEqual(self.call("/api/sos-text", {})[0], 400)
 
     def test_logs_leave_out_places_and_trip_ids(self):
         self.assertEqual(server.redact("/api/route?from=28.6,77.2&to=28.7,77.3"), "/api/route")
