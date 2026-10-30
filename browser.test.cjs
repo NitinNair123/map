@@ -79,6 +79,24 @@ test("SOS: hold to open, then the text is written for the user to send", async (
   await ctx.close();
 });
 
+test("SOS ambulance alert carries the medical info from settings", async () => {
+  const { ctx, page, errors } = await phone();
+  await ctx.addInitScript(() => {
+    localStorage.setItem("sr.medical", JSON.stringify({ blood: "B+", allergies: "penicillin" }));
+    navigator.share = async (d) => { window.shared = d.text; };
+  });
+  await page.goto(BASE + "/app/");
+  await page.focus("#sosBtn");
+  await page.keyboard.press("Enter");
+  await page.click("#sosMedical");
+  await page.waitForFunction(() => window.shared);
+  assert.match(await page.evaluate(() => window.shared), /ambulance\. Blood group: B\+\. Allergies: penicillin\. Live location: .*maps\.google\.com/);
+  assert.equal(await page.getAttribute("a[href='tel:108']", "href"), "tel:108");
+  await page.click("#sosCancel");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
 test("friend's viewer follows a live trip and shows when it ends", async () => {
   const post = (path, body) => fetch(BASE + path, { method: "POST", body: JSON.stringify(body) }).then((r) => r.json());
   const t = await post("/api/trip", { dest: [28.0007, 77.0025], eta: 5, name: "Asha" });

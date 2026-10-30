@@ -19,7 +19,7 @@ From your laptop (PowerShell has `scp` built in):
 ```
 scp "C:\Users\nitin\Downloads\hackathon apps\saferoute-new\data\*.txt" nitin@VPS_IP:/opt/saferoute/data/
 ```
-That copies `mapillary_token.txt`, `geoapify_key.txt`, `otd_key.txt`, `tomtom_key.txt` and `report_salt.txt`. Also copy `data/reports.db` if you want to keep the reports made so far. Then on the VPS: `chmod 600 /opt/saferoute/data/*.txt`
+That copies `mapillary_token.txt`, `geoapify_key.txt`, `otd_key.txt`, `tomtom_key.txt`, `gemini_key.txt` and `report_salt.txt`. Also copy `data/reports.db` if you want to keep the reports made so far. Then on the VPS: `chmod 600 /opt/saferoute/data/*.txt`
 
 ## 4. Map data (optional)
 The server downloads map tiles on demand, so it works without this. For instant routes in Delhi NCR run `pip install --break-system-packages osmium && python3 /opt/saferoute/import_osm.py` once (about 575 MB download, 10-15 min, needs 2 GB RAM). Or copy `data/tiles/` from the laptop instead.

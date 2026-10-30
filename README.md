@@ -78,6 +78,11 @@ and open the https link on the phone. Then use "Add to Home Screen".
   A second call per area and hour looks for VIP movement, barricades, closures and protests. Each alert must name a
   street or landmark that place search finds near the trip, or it is dropped. Alerts plug in through `safety.SIGNALS`:
   ones within 400 m take 20 points off those streets around that time, wider ones only show a warning. At most 300 calls a day.
+- **SOS ambulance alert**: "Ambulance alert with my medical info" on the SOS screen. With the Gemini key above, the
+  text is reworded so allergies and conditions come first (no search, no thinking, 4 s timeout). It only rewords;
+  the user still presses Send. With no key, a slow or failed call, or a reply that drops a location link, the plain
+  text is used. The SOS screen also has Call ambulance 108 and a Blinkit ambulance link (Blinkit has no public API;
+  its ambulance runs in parts of Gurugram and is booked in the Blinkit app).
 - **Busy / empty taps**: while navigating, one tap reports "people around", "deserted", "shops open" or
   "shops shut" at your spot. The route card shows how many people said so at this time of day.
 - **Street survey**: `data/survey.csv` with columns `lat,lon,type,when`, one row per thing you checked on a

@@ -6,6 +6,7 @@ import ipaddress
 import json
 import math
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -323,6 +324,28 @@ def expire_trips():
         del trips[k]
 
 
+def keeps_links(text, out):
+    """A reworded alert that dropped or changed a location link is worse than the plain one."""
+    return bool(out) and all(u in out for u in re.findall(r"https?://\S+", text))
+
+
+def reword_sos(text):
+    """Gemini puts the facts a paramedic needs first. It only rewords; the user still presses Send."""
+    if not gemini.LIVE.key:
+        return text
+    prompt = ("Rewrite this emergency text message for family and ambulance responders. Put allergies and conditions that "
+              "change treatment first. Keep every fact and every link exactly; add nothing. Plain text, under 400 characters.\n\n" + text)
+    # no search grounding or thinking: an SOS can't wait, and the default thinking alone takes over 4 s
+    body = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0, "thinkingConfig": {"thinkingBudget": 0}}}
+    req = Request(gemini.URL, json.dumps(body).encode(), {"Content-Type": "application/json", "x-goog-api-key": gemini.LIVE.key})
+    try:
+        with urlopen(req, timeout=4) as r:
+            out = json.load(r)["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception:
+        return text
+    return out if keeps_links(text, out) else text
+
+
 def end_trip(t):
     """Delete every location of a trip as soon as it ends; only the name and "ended" stay for the viewer."""
     t.update(points=[], dest=None, eta=0, ended=True, updated=time.time())
@@ -505,6 +528,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.start_trip(body)
             if path.startswith("/api/trip/"):
                 return self.update_trip(path.rsplit("/", 1)[1], body)
+            if path == "/api/sos-text":
+                return self.send_json({"text": reword_sos(str(body["text"])[:1000])})
         except (KeyError, ValueError, TypeError) as e:
             return self.send_json({"error": f"bad request: {e}"}, 400)
         except Exception:

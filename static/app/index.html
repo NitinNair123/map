@@ -112,9 +112,13 @@
     <p id="sosSub">Your messages app opens in <b id="sosSecs">5</b> seconds with your location written in. Tap cancel if you're OK.</p>
     <div class="sos-actions">
       <a class="btn btn-block sos-call" href="tel:112"><svg><use href="#i-phone"/></svg>Call 112</a>
+      <a class="btn btn-block sos-call" href="tel:108"><svg><use href="#i-phone"/></svg>Call ambulance 108</a>
+      <button class="btn btn-block" id="sosMedical"><svg><use href="#i-share"/></svg>Ambulance alert with my medical info</button>
       <button class="btn btn-block" id="sosAlertNow"><svg><use href="#i-share"/></svg>Write the text now</button>
       <button class="btn btn-block" id="sirenBtn" aria-pressed="false"><svg><use href="#i-siren"/></svg>Loud siren</button>
       <button class="btn btn-block" id="fakeCallBtn"><svg><use href="#i-phone"/></svg>Fake incoming call</button>
+      <!-- Blinkit has no public API: its ambulance (parts of Gurugram only) is booked in the Blinkit app -->
+      <a class="btn btn-block" href="https://blinkit.com/" target="_blank" rel="noopener">Blinkit ambulance (parts of Gurugram)</a>
     </div>
     <div id="sosHavens" class="sos-havens"></div>
     <button class="btn btn-ghost btn-block sos-cancel" id="sosCancel">I'm OK, cancel</button>

@@ -840,7 +840,10 @@ async function openSOS(now = false) {
     $("#sosHavens").innerHTML = hv.length ? `<b>Nearest open places</b><br>${hv.slice(0, 3).map((h) => `${esc(h.name)} · ${fmtDist(h.distance_m)}`).join("<br>")}` : "";
   }
 }
-async function alertContacts() {
+const MEDICAL = [["blood", "Blood group"], ["conditions", "Conditions"], ["allergies", "Allergies"], ["meds", "Medication"]];
+// the server asks Gemini to put the critical facts first; any failure or slow answer keeps the plain text
+const reword = (text) => api("/api/sos-text", { text }, 5000).then((r) => r.text || text, () => text);
+async function alertContacts(medical = false) {
   const contacts = store.get("contacts", []);
   $("#sosTitle").textContent = "Getting your message ready";
   $("#sosSub").textContent = "Finding your location. If you're in danger, call 112 now.";
@@ -852,7 +855,12 @@ async function alertContacts() {
     else link = tripLink(state.trip.id);
   } catch {}
   const maps = pt ? `https://maps.google.com/?q=${pt[0].toFixed(6)},${pt[1].toFixed(6)}` : "";
-  const body = `SOS from ${store.get("myName", "me") || "me"}: I need help. ${link ? "Live location: " + link : ""} ${maps}`.trim();
+  const who = store.get("myName", "me") || "me", where = `${link ? "Live location: " + link : ""} ${maps}`;
+  const med = store.get("medical", {});
+  const facts = MEDICAL.filter(([k]) => med[k]).map(([k, l]) => `${l}: ${med[k]}.`).join(" ");
+  const body = medical
+    ? await reword(`Medical emergency: ${who} needs an ambulance. ${facts} ${where}`.replace(/\s+/g, " ").trim())
+    : `SOS from ${who}: I need help. ${where}`.trim();
   // a web page can't send a text or call by itself: it opens the messages app or share sheet, and the user presses Send
   $("#sosTitle").textContent = contacts.length ? "Press Send in your messages app" : "Choose who to send it to";
   $("#sosSub").textContent = `${contacts.length ? "Your text is written, but it only goes out when you press Send." : "Send it from the share menu, or paste it into a chat if it was copied."} ${
@@ -868,7 +876,9 @@ async function alertContacts() {
     }, 15000);
   }
 }
-$("#sosAlertNow").onclick = () => { clearInterval(sosTimer); $("#sosCount").textContent = "SOS"; $("#sosCount").classList.add("done"); alertContacts(); };
+const alertNow = (medical) => { clearInterval(sosTimer); $("#sosCount").textContent = "SOS"; $("#sosCount").classList.add("done"); alertContacts(medical); };
+$("#sosAlertNow").onclick = () => alertNow(false);
+$("#sosMedical").onclick = () => alertNow(true);
 $("#sosCancel").onclick = () => {
   clearInterval(sosTimer); clearInterval(state.sosPing); stopSiren();
   if (state.sosTrip) { api(`/api/trip/${state.sosTrip.id}`, { key: state.sosTrip.key, ended: true }).catch(() => {}); state.sosTrip = null; }
@@ -1059,6 +1069,9 @@ function openSettings() {
     <h3 style="font-size:16px;margin-top:6px">Trusted contacts</h3>
     <div id="contactsBox" style="display:grid;gap:8px">${contactsHtml()}</div>
     <div class="row"><label for="myName">Your name in alerts</label><input id="myName" class="input" style="width:50%" maxlength="40" value="${esc(store.get("myName", ""))}"></div>
+    <h3 style="font-size:16px;margin-top:6px">Medical info for ambulance alerts</h3>
+    ${MEDICAL.map(([k, l]) => `<div class="row"><label for="med_${k}">${l}</label><input id="med_${k}" class="input" style="width:50%" maxlength="120" value="${esc(store.get("medical", {})[k] || "")}"></div>`).join("")}
+    <p class="muted">Added only to the SOS ambulance alert. It's stored on this phone; when you send that alert it passes through SafeRoute's server (and Google Gemini, if set up) to be worded, and isn't kept.</p>
     <div class="row"><label for="buffer">Check in if I'm late by</label>${sel("buffer", store.get("buffer", 10), [[5, "5 min"], [10, "10 min"], [15, "15 min"], [30, "30 min"]])}</div>
     <div class="row"><label for="caller">Fake caller name</label><input id="caller" class="input" style="width:50%" maxlength="30" value="${esc(store.get("caller", "Mom"))}"></div>
     <div class="row"><span>Fake call</span><button class="btn" id="fakeIn10">Ring me in 10 s</button></div>
@@ -1074,6 +1087,7 @@ function openSettings() {
   $("#myName").onchange = (e) => store.set("myName", e.target.value.trim());
   $("#caller").onchange = (e) => store.set("caller", e.target.value.trim() || "Mom");
   $("#buffer").onchange = (e) => store.set("buffer", +e.target.value);
+  MEDICAL.forEach(([k]) => ($(`#med_${k}`).onchange = (e) => store.set("medical", { ...store.get("medical", {}), [k]: e.target.value.trim() })));
   $("#theme").onchange = (e) => { store.set("theme", e.target.value); applyTheme(); setBaseMap(); };
   $("#extra").onchange = (e) => { store.set("extra", e.target.value); if (state.to) maybeRoute(); };
   const LEVEL = ["Don't mind", "A little", "More", "Most"];
