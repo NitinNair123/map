@@ -324,7 +324,7 @@ async function maybeRoute() {
     const q = routeQuery(from, whenParam(), 0);
     const res = await api("/api/route?" + q);
     if (seq !== routeSeq) return; // the user picked something else meanwhile
-    state.routes = res.routes; state.rain = res.rain; state.area = res.area || []; state.routeFrom = from; state.sources = res.sources || {};
+    state.routes = res.routes; state.rain = res.rain; state.routeFrom = from; state.sources = res.sources || {};
     state.sel = "safest";
     renderRoutes();
     drawRoutes(true);  // after the sheet is drawn, so the route is fitted into the map left above it
@@ -477,8 +477,8 @@ function renderRoutes() {
       <div class="compare"><table><thead><tr><th>#</th><th>Score</th><th>Time</th><th>Lit</th><th>Open</th><th>Unrated</th></tr></thead><tbody>
       ${r.compared.map((c) => `<tr class="${c.rank === r.rank ? "this" : ""}" data-kind="${state.routes.find((x) => x.rank === c.rank && !x.same_as)?.kind || ""}"><td>${c.rank}</td><td><b class="${c.confidence_level === "none" ? "" : scoreClass(c.score)}">${c.confidence_level === "none" ? "–" : c.score}</b></td><td>${c.minutes} min</td><td>${c.stats.lit_pct || c.stats.dark_pct ? `${c.stats.lit_pct}%` : "–"}</td><td>${c.stats.open_now ?? 0}</td><td>${c.unrated_pct}%</td></tr>`).join("")}
       </tbody></table><p class="muted" style="margin:6px 0 0">Tap a row to see that route on the map.</p></div></details>` : ""}
-    ${(state.area || []).map((a) => `<details class="why"><summary>Past crime in ${esc(a.district)} · ${a.year}</summary>
-      <p style="margin:0 0 8px">Police recorded <b>${a.assault}</b> cases of assault on women (IPC 354, BNS 74-78) and <b>${a.insult}</b> of insulting a woman's modesty (IPC 509, BNS 79) across the whole district in ${a.year}${a.previous ? `, against ${a.previous.assault} and ${a.previous.insult} in ${a.previous.year}` : ""}.</p>
+    ${(r.area || []).map((a) => `<details class="why"><summary>Past crime in ${esc(a.district)} · ${a.year}</summary>
+      <p style="margin:0 0 8px">Police recorded <b>${a.assault}</b> cases of assault on women (IPC 354, BNS 74-78) and <b>${a.insult}</b> of insulting a woman's modesty (IPC 509, BNS 79) across the whole of ${esc(a.district)} district in ${a.year}${a.previous ? `, against ${a.previous.assault} and ${a.previous.insult} in ${a.previous.year}` : ""}.</p>
       ${a.year >= 2024 ? `<p class="muted" style="margin:0 0 8px">NCRB warns that ${a.year} isn't directly comparable with earlier years: the new criminal law (BNS) replaced the IPC on 1 July 2024.</p>` : ""}
       <p class="muted" style="margin:0 0 12px">Background only, it doesn't change the score: it covers the whole district, only counts cases reported to police, and says nothing about a single street tonight. Source: ${esc(a.source)}.</p></details>`).join("")}
     <details class="why"><summary>Directions · ${r.steps.length - 1} ${r.steps.length === 2 ? "step" : "steps"}</summary><ol class="steps-list">${r.steps.map((st) =>
