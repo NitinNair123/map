@@ -53,14 +53,3 @@ test('informal settlement penalty follows the toggle', () => {
   assert.ok(on.score < off.score);
   assert.ok(on.warnings.some((w) => w.includes('informal')));
 });
-
-test('hazards from external signals lower the score and explain why', () => {
-  const R = { line: [[28.600, 77.200], [28.602, 77.200]], distance: 222, duration: 160 };
-  const date = at('2026-10-26T14:00');
-  const plain = scoreRoutes([R], [], date)[0];
-  const hit = scoreRoutes([R], [], date, { hazards: [{ pt: [28.601, 77.200], r: 100, what: 'VIP convoy barricades' }] })[0];
-  assert.ok(hit.score < plain.score || plain.score === 0);
-  assert.ok(hit.warnings.includes('⚠ VIP convoy barricades'));
-  const far = scoreRoutes([R], [], date, { hazards: [{ pt: [28.7, 77.3], r: 100, what: 'far away' }] })[0];
-  assert.equal(far.warnings.length, plain.warnings.length);
-});

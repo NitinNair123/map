@@ -171,18 +171,14 @@ function pointScore(p, f, night, opts, seen) {
   const isolated = f.isolated.some((x) => nearPoly(p, x.geom, 30)) || (night && f.parks.some((x) => nearPoly(p, x.geom, 20)))
     || f.tunnels.some((x) => distToLine(p, x.geom) <= 15);
   const nightlife = night && near(f.nightlife, 50).length > 0;
-  const informal = !!opts.avoidInformal && f.informal.some((x) => inPoly(p, x.geom));
+  const informal = opts.avoidInformal && f.informal.some((x) => inPoly(p, x.geom));
   if (isolated) seen.isolated++;
   if (nightlife) seen.nightlife++;
   if (informal) seen.informal++;
-  // Pluggable external signals (e.g. live event intel): [{pt, r, what, penalty}].
-  const hazards = (opts.hazards || []).filter((h) => dist(p, h.pt) <= h.r);
-  hazards.forEach((h) => seen.hazards.add(h));
-  const hazard = Math.max(0, ...hazards.map((h) => h.penalty ?? 30));
 
   const w = WEIGHTS[night ? 'night' : 'day'];
   const base = 100 * (w.light * light + w.active * active + w.security * security + w.transit * transit);
-  return Math.max(0, Math.min(100, base - 25 * isolated - 15 * nightlife - 30 * informal - hazard));
+  return Math.max(0, Math.min(100, base - 25 * isolated - 15 * nightlife - 30 * informal));
 }
 
 // routes: [{line:[[lat,lon],...], distance (m), duration (s)}]
@@ -192,7 +188,7 @@ export function scoreRoutes(routes, elements, date, opts = { avoidInformal: true
   const STEP = 25;
   const fastest = Math.min(...routes.map((r) => r.distance));
   const scored = routes.map((r) => {
-    const seen = { lamps: new Set(), open: new Set(), police: new Set(), cctv: new Set(), unknownLight: 0, dark: 0, isolated: 0, nightlife: 0, informal: 0, hazards: new Set() };
+    const seen = { lamps: new Set(), open: new Set(), police: new Set(), cctv: new Set(), unknownLight: 0, dark: 0, isolated: 0, nightlife: 0, informal: 0 };
     const pts = sample(r.line, STEP);
     const scores = pts.map((p) => pointScore(p, f, night, opts, seen));
     const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
@@ -217,11 +213,10 @@ export function scoreRoutes(routes, elements, date, opts = { avoidInformal: true
     if (seen.isolated) warnings.push(`${seen.isolated * STEP} m past isolated land / park / tunnel`);
     if (seen.nightlife) warnings.push(`${seen.nightlife * STEP} m past bars / liquor shops`);
     if (seen.informal) warnings.push(`${seen.informal * STEP} m through informal settlement`);
-    seen.hazards.forEach((h) => warnings.push(`⚠ ${h.what}`));
     const lowData = night ? seen.unknownLight / pts.length > 0.6 : seen.open.size === 0;
 
     return { ...r, score, avg: Math.round(avg), weakest: Math.round(weakest), samples: pts.map((p, i) => [p, scores[i]]),
-      reasons, warnings, lowData, havens: [...seen.open, ...seen.police], hazards: [...seen.hazards] };
+      reasons, warnings, lowData, havens: [...seen.open, ...seen.police] };
   });
 
   const bySafe = [...scored].sort((a, b) => b.score - a.score);
