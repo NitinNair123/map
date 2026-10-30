@@ -118,11 +118,25 @@ def load(path=DATA):
         return json.load(f)
 
 
+def box(shape):
+    """(south, west, north, east) of a district outline, worked out once."""
+    polys = shape["coordinates"] if shape["type"] == "MultiPolygon" else [shape["coordinates"]] if shape["type"] == "Polygon" else []
+    xs, ys = [x for p in polys for r in p for x, _ in r] or [0], [y for p in polys for r in p for _, y in r] or [0]
+    return min(ys), min(xs), max(ys), max(xs)
+
+
+def along(coords, step=10):
+    """Every step-th point of a route plus its last one: OSM nodes are tens of metres apart, so this still
+    lands in every district the route crosses for more than a few hundred metres."""
+    return coords[::step] + coords[-1:]
+
+
 def around(data, pts):
     """Background figures for the districts these points fall in, latest year first, or [] without the file."""
     out = []
     for d in (data or {}).get("districts", []):
-        if any(inside(p, d["shape"]) for p in pts) and d["years"]:
+        s, w, n, e = d.get("box") or d.setdefault("box", box(d["shape"]))
+        if d["years"] and any(s <= p[0] <= n and w <= p[1] <= e and inside(p, d["shape"]) for p in pts):
             years = sorted(d["years"], reverse=True)
             out.append({"district": d["name"], "year": int(years[0]), **d["years"][years[0]],
                         "previous": {"year": int(years[1]), **d["years"][years[1]]} if len(years) > 1 else None,
