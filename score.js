@@ -109,6 +109,36 @@ export function sample(line, step = 25) {
   return out;
 }
 
+// Polyline length in metres.
+export const length = (line) => line.slice(1).reduce((s, p, i) => s + dist(line[i], p), 0);
+
+// The part of `line` still ahead of `pos`, plus how far `pos` is from the line.
+// shortcut: snaps to the nearest vertex, so a route that doubles back on itself can skip ahead; project onto segments if that bites.
+export function remaining(line, pos) {
+  let at = 0, off = Infinity;
+  line.forEach((p, i) => { const d = dist(pos, p); if (d < off) { off = d; at = i; } });
+  return { line: [pos, ...line.slice(at + 1)], off };
+}
+
+// ---------- extension hook ----------
+// Other features (event intel, crime awareness, …) plug extra signals in here.
+// fn([lat, lon], { date, night }) -> null | { delta?: number, reason?: string, warning?: string }
+// `delta` is added to that 25 m sample's 0–100 score (use 0 for awareness-only); reason/warning become chips.
+// Physical and situational conditions only: never demographics, income or area labels.
+const signals = new Set();
+export function addSignal(fn) { signals.add(fn); return () => signals.delete(fn); }
+
+// ---------- personal priorities ----------
+// Places a user may want more of on the way. Weight 0–3 each; bonus is capped so safety still dominates.
+export const PRIORITIES = {
+  pharmacy: { label: 'pharmacies', test: (t) => t.amenity === 'pharmacy' || t.shop === 'chemist' },
+  medical: { label: 'hospitals / clinics', test: (t) => /^(hospital|clinic|doctors)$/.test(t.amenity || '') },
+  atm: { label: 'ATMs / banks', test: (t) => /^(atm|bank)$/.test(t.amenity || '') },
+  food: { label: 'food / groceries', test: (t) => /^(restaurant|cafe|fast_food)$/.test(t.amenity || '') || /^(convenience|supermarket|bakery)$/.test(t.shop || '') },
+  police: { label: 'police', test: (t) => t.amenity === 'police' },
+  transit: { label: 'bus / metro stops', test: (t) => t.highway === 'bus_stop' || t.amenity === 'bus_station' || t.railway === 'station' },
+};
+
 // ---------- OSM features ----------
 const ISOLATED = /^(construction|brownfield|greenfield|cemetery|railway|industrial)$/;
 const NIGHTLIFE = /^(bar|pub|nightclub)$/;
@@ -146,7 +176,7 @@ const WEIGHTS = {
   night: { light: 0.4, active: 0.35, security: 0.15, transit: 0.1 },
 };
 
-function pointScore(p, f, night, opts, seen) {
+function pointScore(p, f, night, opts, seen, date) {
   const near = (list, r) => list.filter((x) => dist(p, x.pt) <= r);
 
   let light = 1;
@@ -166,31 +196,43 @@ function pointScore(p, f, night, opts, seen) {
   police.forEach((x) => seen.police.add(x));
   cctv.forEach((x) => seen.cctv.add(x));
   const security = police.length ? 1 : cctv.length ? 0.6 : 0;
-  const transit = near(f.transit, 150).length ? 1 : 0;
+  const stops = near(f.transit, 150);
+  stops.forEach((x) => seen.transit.add(x));
+  const transit = stops.length ? 1 : 0;
 
   const isolated = f.isolated.some((x) => nearPoly(p, x.geom, 30)) || (night && f.parks.some((x) => nearPoly(p, x.geom, 20)))
     || f.tunnels.some((x) => distToLine(p, x.geom) <= 15);
   const nightlife = night && near(f.nightlife, 50).length > 0;
-  const informal = opts.avoidInformal && f.informal.some((x) => inPoly(p, x.geom));
+  const informal = !!opts.avoidInformal && f.informal.some((x) => inPoly(p, x.geom));
   if (isolated) seen.isolated++;
   if (nightlife) seen.nightlife++;
   if (informal) seen.informal++;
 
   const w = WEIGHTS[night ? 'night' : 'day'];
   const base = 100 * (w.light * light + w.active * active + w.security * security + w.transit * transit);
-  return Math.max(0, Math.min(100, base - 25 * isolated - 15 * nightlife - 30 * informal));
+  let delta = 0;
+  for (const fn of signals) {
+    let s;
+    try { s = fn(p, { date, night }); } catch (e) { console.warn('signal failed', e); continue; }
+    if (!s) continue;
+    delta += s.delta || 0;
+    if (s.reason) seen.sigReasons.set(s.reason, (seen.sigReasons.get(s.reason) || 0) + 1);
+    if (s.warning) seen.sigWarnings.set(s.warning, (seen.sigWarnings.get(s.warning) || 0) + 1);
+  }
+  return Math.max(0, Math.min(100, base - 25 * isolated - 15 * nightlife - 30 * informal + delta));
 }
 
 // routes: [{line:[[lat,lon],...], distance (m), duration (s)}]
+// opts: { avoidInformal, priorities: { pharmacy: 0–3, … } }
 export function scoreRoutes(routes, elements, date, opts = { avoidInformal: true }) {
   const f = classify(elements, date);
   const night = isNight(date);
   const STEP = 25;
   const fastest = Math.min(...routes.map((r) => r.distance));
   const scored = routes.map((r) => {
-    const seen = { lamps: new Set(), open: new Set(), police: new Set(), cctv: new Set(), unknownLight: 0, dark: 0, isolated: 0, nightlife: 0, informal: 0 };
+    const seen = { lamps: new Set(), open: new Set(), police: new Set(), cctv: new Set(), transit: new Set(), unknownLight: 0, dark: 0, isolated: 0, nightlife: 0, informal: 0, sigReasons: new Map(), sigWarnings: new Map() };
     const pts = sample(r.line, STEP);
-    const scores = pts.map((p) => pointScore(p, f, night, opts, seen));
+    const scores = pts.map((p) => pointScore(p, f, night, opts, seen, date));
     const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
     let weakest = 100; // worst 100 m window: one dark alley sinks the route
     for (let i = 0; i + 4 <= scores.length || i === 0; i++) {
@@ -200,9 +242,17 @@ export function scoreRoutes(routes, elements, date, opts = { avoidInformal: true
     let run = 0, longestBad = 0;
     for (const s of scores) { run = s < 35 ? run + STEP : 0; longestBad = Math.max(longestBad, run); }
     const detour = Math.max(0, r.distance / fastest - 1.3) * 50;
-    const score = Math.round(Math.max(0, 0.6 * avg + 0.4 * weakest - detour));
-
     const reasons = [];
+    let bonus = 0;
+    const passed = [...seen.open, ...seen.police, ...seen.transit];
+    for (const [k, w] of Object.entries(opts.priorities || {})) {
+      if (!w || !PRIORITIES[k]) continue;
+      const n = passed.filter((x) => PRIORITIES[k].test(x.tags)).length;
+      if (n) { bonus += w * Math.min(n, 3) * 1.5; reasons.push(`${n} ${PRIORITIES[k].label} (your priority)`); }
+    }
+    bonus = Math.min(bonus, 15);
+    const score = Math.round(Math.max(0, Math.min(100, 0.6 * avg + 0.4 * weakest - detour + bonus)));
+
     if (seen.open.size) reasons.push(`${seen.open.size} places open on the way`);
     if (night && seen.lamps.size) reasons.push(`${seen.lamps.size} street lamps`);
     if (seen.police.size) reasons.push(`police nearby (${[...seen.police].map((x) => x.name).filter(Boolean)[0] || 'station'})`);
@@ -213,10 +263,12 @@ export function scoreRoutes(routes, elements, date, opts = { avoidInformal: true
     if (seen.isolated) warnings.push(`${seen.isolated * STEP} m past isolated land / park / tunnel`);
     if (seen.nightlife) warnings.push(`${seen.nightlife * STEP} m past bars / liquor shops`);
     if (seen.informal) warnings.push(`${seen.informal * STEP} m through informal settlement`);
+    for (const [t, n] of seen.sigReasons) reasons.push(`${t} (${n * STEP} m)`);
+    for (const [t, n] of seen.sigWarnings) warnings.push(`${n * STEP} m: ${t}`);
     const lowData = night ? seen.unknownLight / pts.length > 0.6 : seen.open.size === 0;
 
     return { ...r, score, avg: Math.round(avg), weakest: Math.round(weakest), samples: pts.map((p, i) => [p, scores[i]]),
-      reasons, warnings, lowData, havens: [...seen.open, ...seen.police] };
+      bonus: Math.round(bonus), reasons, warnings, lowData, havens: [...seen.open, ...seen.police] };
   });
 
   const bySafe = [...scored].sort((a, b) => b.score - a.score);

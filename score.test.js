@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseOpeningHours, isOpenAt, placeOpen, sample, dist, scoreRoutes } from './score.js';
+import { parseOpeningHours, isOpenAt, placeOpen, sample, dist, scoreRoutes, addSignal, remaining, length } from './score.js';
 
 const at = (iso) => new Date(iso); // local time, no Z
 // 2026-10-26 is a Monday.
@@ -52,4 +52,41 @@ test('informal settlement penalty follows the toggle', () => {
   const off = scoreRoutes([R], els, at('2026-10-26T14:00'), { avoidInformal: false })[0];
   assert.ok(on.score < off.score);
   assert.ok(on.warnings.some((w) => w.includes('informal')));
+});
+
+test('priorities favour the route with the places the user wants', () => {
+  const A = { line: [[28.600, 77.200], [28.603, 77.200]], distance: 333, duration: 240 };
+  const B = { line: [[28.600, 77.203], [28.603, 77.203]], distance: 333, duration: 240 };
+  const els = [{ type: 'node', lat: 28.6015, lon: 77.2002, tags: { amenity: 'pharmacy', opening_hours: '24/7' } },
+    { type: 'node', lat: 28.6015, lon: 77.2032, tags: { shop: 'clothes', opening_hours: '24/7' } }];
+  const when = at('2026-10-26T14:00');
+  const plain = scoreRoutes([A, B], els, when);
+  assert.equal(plain[0].score, plain[1].score);
+  const [best, other] = scoreRoutes([A, B], els, when, { priorities: { pharmacy: 3 } });
+  assert.equal(best.line, A.line);
+  assert.ok(best.score > other.score);
+  assert.ok(best.reasons.some((r) => r.includes('pharmacies')));
+});
+
+test('signal hook adjusts score, adds chips, and unsubscribes', () => {
+  const R = { line: [[28.600, 77.200], [28.602, 77.200]], distance: 222, duration: 160 };
+  const when = at('2026-10-26T14:00');
+  const before = scoreRoutes([R], [], when)[0].score;
+  const off = addSignal((p) => (p[0] > 28.601 ? { delta: -50, warning: 'road closed for event' } : null));
+  const hit = scoreRoutes([R], [], when)[0];
+  off();
+  assert.ok(hit.score < before || before === 0);
+  assert.ok(hit.warnings.some((w) => w.includes('road closed for event')));
+  assert.ok(!scoreRoutes([R], [], when)[0].warnings.some((w) => w.includes('road closed')));
+  const bad = addSignal(() => { throw new Error('boom'); });
+  assert.doesNotThrow(() => scoreRoutes([R], [], when));
+  bad();
+});
+
+test('remaining trims the walked part', () => {
+  const line = [[28.600, 77.2], [28.601, 77.2], [28.602, 77.2], [28.603, 77.2]];
+  const { line: rest, off } = remaining(line, [28.6011, 77.2]);
+  assert.equal(rest.length, 3);
+  assert.ok(off < 15);
+  assert.ok(Math.abs(length(line) - 333) < 3);
 });

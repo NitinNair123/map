@@ -1,4 +1,4 @@
-import { scoreRoutes, dist } from './score.js';
+import { scoreRoutes, dist, remaining, length, PRIORITIES } from './score.js';
 
 const OSRM = 'https://routing.openstreetmap.de/routed-foot/route/v1/foot';
 const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
@@ -33,12 +33,15 @@ async function osrm(points) {
   return j.code === 'Ok' ? j.routes.map((x) => ({ line: x.geometry.coordinates.map(([lo, la]) => [la, lo]), distance: x.distance, duration: x.duration })) : [];
 }
 
-// OSRM rarely returns walking alternatives, so also route via points pushed sideways off the midpoint.
-async function candidates(a, b) {
-  const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
-  const dLat = b[0] - a[0], dLon = b[1] - a[1];
-  const vias = [0.15, -0.15, 0.3, -0.3].map((k) => [mid[0] - dLon * k, mid[1] + dLat * k]);
-  const all = (await Promise.all([osrm([a, b]), ...vias.map((v) => osrm([a, v, b]))])).flat();
+// OSRM rarely returns walking alternatives, so also route via points pushed sideways off each leg's midpoint.
+// points: [from, ...stops, to]
+async function candidates(points) {
+  const sideways = (k) => points.flatMap((b, i) => {
+    if (!i) return [b];
+    const a = points[i - 1], dLat = b[0] - a[0], dLon = b[1] - a[1];
+    return [[(a[0] + b[0]) / 2 - dLon * k, (a[1] + b[1]) / 2 + dLat * k], b];
+  });
+  const all = (await Promise.all([osrm(points), ...[0.15, -0.15, 0.3, -0.3].map((k) => osrm(sideways(k)))])).flat();
   const uniq = [];
   for (const r of all) {
     const m = r.line[Math.floor(r.line.length / 2)];
@@ -68,8 +71,38 @@ async function overpass(routes) {
   throw lastErr;
 }
 
-let results = [];
+// ---------- stops ----------
+$('addStop').onclick = () => {
+  const row = document.createElement('div');
+  row.className = 'stop';
+  row.innerHTML = '<input placeholder="Stop" required autocomplete="off"><button type="button" aria-label="Remove stop">✕</button>';
+  row.querySelector('button').onclick = () => row.remove();
+  $('stops').append(row);
+  row.querySelector('input').focus();
+};
+
+// ---------- priorities (kept on this device) ----------
+const LEVELS = ['Don’t care', 'Nice', 'More', 'Most'];
+let priorities = {};
+try { priorities = JSON.parse(localStorage.getItem('priorities')) || {}; } catch { /* private mode */ }
+for (const [k, { label }] of Object.entries(PRIORITIES)) {
+  const row = document.createElement('label');
+  row.innerHTML = `<span>${label[0].toUpperCase() + label.slice(1)} <b class="muted"></b></span><input type="range" min="0" max="3" step="1">`;
+  const [out, input] = [row.querySelector('b'), row.querySelector('input')];
+  input.value = priorities[k] || 0;
+  out.textContent = LEVELS[input.value];
+  input.oninput = () => {
+    priorities[k] = +input.value;
+    out.textContent = LEVELS[input.value];
+    try { localStorage.setItem('priorities', JSON.stringify(priorities)); } catch { /* private mode */ }
+  };
+  $('prio').append(row);
+}
+const scoreOpts = () => ({ avoidInformal: $('avoidInformal').checked, priorities });
+
+let results = [], trip = null, selected = 0; // trip: { routes, elements } from the last search
 function show(i) {
+  selected = results[i].id;
   layer.clearLayers();
   results.forEach((r, j) => j !== i && L.polyline(r.line, { color: '#888', weight: 4, opacity: 0.5 }).addTo(layer).on('click', () => show(j)));
   const r = results[i];
@@ -81,7 +114,7 @@ function show(i) {
   document.querySelectorAll('.card').forEach((c, j) => c.classList.toggle('sel', j === i));
 }
 
-function render() {
+function render(keep) {
   $('results').innerHTML = '';
   results.forEach((r, i) => {
     const el = document.createElement('div');
@@ -95,7 +128,7 @@ function render() {
     el.onclick = () => show(i);
     $('results').append(el);
   });
-  show(0);
+  show(Math.max(0, results.findIndex((r) => r.id === keep)));
   $('tripActions').hidden = false;
 }
 
@@ -103,19 +136,64 @@ $('f').onsubmit = async (e) => {
   e.preventDefault();
   try {
     status('Finding places…');
-    const [a, b] = await Promise.all([$('from').value.trim() ? geocode($('from').value) : here(), geocode($('to').value)]);
-    if (dist(a, b) > 10000) throw new Error('Walking routes over 10 km are not supported.');
+    stopLive();
+    const stops = [...$('stops').querySelectorAll('input')].map((x) => x.value.trim()).filter(Boolean);
+    const points = await Promise.all([$('from').value.trim() ? geocode($('from').value) : here(), ...stops.map(geocode), geocode($('to').value)]);
+    if (length(points) > 10000) throw new Error('Walking routes over 10 km are not supported.');
     status('Finding routes…');
-    const routes = await candidates(a, b);
+    const routes = await candidates(points);
     if (!routes.length) throw new Error('No walking route found.');
+    routes.forEach((r, i) => { r.id = i; });
     status(`Checking lights, shops, police and more along ${routes.length} routes…`);
-    const elements = await overpass(routes);
-    results = scoreRoutes(routes, elements, new Date($('when').value), { avoidInformal: $('avoidInformal').checked });
+    trip = { routes, elements: await overpass(routes) };
+    results = scoreRoutes(routes, trip.elements, new Date($('when').value), scoreOpts());
     status('');
     render();
   } catch (err) {
     status(`⚠️ ${err.message}`);
   }
+};
+
+// ---------- live trip: re-score what's left every minute, switch if another route is now clearly safer ----------
+// Scores move with the clock (shops close, night falls) and with signals other features add via addSignal().
+// shortcut: reuses the map data fetched at search time, so walking far outside the original area isn't covered.
+let watchId = null, timer = null, pos = null;
+function stopLive() {
+  if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+  clearInterval(timer);
+  watchId = timer = pos = null;
+  $('live').textContent = 'Start live trip';
+}
+function liveCheck() {
+  if (!pos || !trip) return;
+  const left = trip.routes.map((r) => {
+    const { line, off } = remaining(r.line, pos);
+    const d = length(line);
+    return { ...r, line, off, distance: d, duration: (r.duration * d) / r.distance };
+  }).filter((r) => r.off < 150 || r.id === selected); // routes far from you would need a fresh search
+  const cur = left.find((r) => r.id === selected);
+  if (!cur || cur.distance < 50) { status('✅ You have arrived.'); return stopLive(); }
+  if (cur.off > 100) status('⚠️ You seem to be off the route. Search again from here for a fresh route.');
+  const scored = scoreRoutes(left.filter((r) => r.distance >= 50), trip.elements, new Date(), scoreOpts());
+  const mine = scored.find((r) => r.id === selected), best = scored[0];
+  const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (mine && best.id !== mine.id && best.score >= mine.score + 10) {
+    results = scored;
+    render(best.id);
+    status(`🔀 Switched to a safer route at ${time}: ${best.score} vs ${mine.score} on your old one.`);
+    navigator.vibrate?.([200, 100, 200]);
+  } else if (mine && cur.off <= 100) {
+    status(`Live: your route scores ${mine.score} from here (checked ${time}).`);
+  }
+}
+$('live').onclick = () => {
+  if (watchId !== null) return stopLive();
+  if (!navigator.geolocation) return status('⚠️ No geolocation on this device');
+  watchId = navigator.geolocation.watchPosition((p) => { const first = !pos; pos = [p.coords.latitude, p.coords.longitude]; if (first) liveCheck(); },
+    () => { status('⚠️ Location permission denied'); stopLive(); }, { enableHighAccuracy: true });
+  timer = setInterval(liveCheck, 60000);
+  $('live').textContent = 'Stop live trip';
+  status('Live trip on. Checking your route every minute.');
 };
 
 async function shareLocation(prefix) {

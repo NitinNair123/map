@@ -27,6 +27,8 @@
   #status { margin-top:8px; }
   #sos { position:fixed; right:16px; bottom:16px; z-index:1000; width:64px; height:64px; border-radius:50%; background:var(--bad); color:#fff; font-weight:800; border:0; box-shadow:0 4px 14px #0006; }
   .actions { display:flex; gap:8px; margin-top:10px; }
+  .stop { display:flex; gap:6px; } .stop button { width:auto; }
+  #prio label { display:grid; grid-template-columns:1fr 2fr; gap:8px; align-items:center; font-size:14px; margin-top:6px; }
 </style>
 </head>
 <body>
@@ -34,14 +36,18 @@
 <div id="panel">
   <form id="f">
     <input id="from" placeholder="From (blank = my location)" autocomplete="off">
+    <div id="stops"></div>
+    <button type="button" id="addStop">+ Add stop</button>
     <input id="to" placeholder="To" required autocomplete="off">
     <input id="when" type="datetime-local" aria-label="Departure time">
     <label class="row"><input id="avoidInformal" type="checkbox" checked> Avoid informal settlements</label>
+    <details id="prio"><summary class="muted">My priorities on the way</summary></details>
     <button class="primary">Find safest route</button>
   </form>
   <div id="status" class="muted"></div>
   <div id="results"></div>
   <div class="actions" id="tripActions" hidden>
+    <button id="live">Start live trip</button>
     <button id="share">Share my trip</button>
     <a id="call" href="tel:112"><button type="button">Call 112</button></a>
   </div>

@@ -26,13 +26,29 @@ The route is sampled every 25 m. Each point gets 0–100, with different weights
 | Informal settlement (toggle, on by default) | −30 | −30 | `residential=informal`, `informal=yes` |
 
 Route score = 0.6 × average + 0.4 × worst 100 m stretch − a penalty for detours over 1.3× the shortest route.
+Each **priority** you set (0–3 for pharmacies, hospitals, ATMs, food, police, transit stops) adds up to 4.5 points per category for matching places passed, capped at +15 total so safety still leads.
 Every card explains its score ("12 places open", "200 m on unlit road") and is marked "low data" when OSM coverage is too thin to trust.
 
 ## Features
 - Safest / Balanced / Fastest options, with the route coloured green, amber or red along its length
 - Pick a departure time, so open-shop and lighting checks match that time
+- Add stops; every alternative goes through them in order
+- Personal priorities, saved on the device
+- **Live trip**: follows your location and re-scores the rest of each route every minute; if another route becomes 10+ points safer (shops closed, night fell, a plug-in signal changed) it switches and vibrates
 - Open places and police stations marked as safe havens on the map
 - **Share my trip**, plus an **SOS** button that shares your location via the share sheet or SMS and offers to call 112
 
 ## Not built yet
-Live location tracking, auto check-in, community reports, crime data and income data all need a backend or city-specific datasets. `pointScore` in `score.js` is where new factors go.
+Auto check-in and community reports need a backend.
+
+## Plugging in new signals
+Other data (event closures, crime awareness, …) plugs in without touching the scorer:
+
+```js
+import { addSignal } from './score.js';
+const off = addSignal(([lat, lon], { date, night }) =>
+  inBarrierZone(lat, lon) ? { delta: -60, warning: 'VIP movement barrier' } : null);
+```
+
+`delta` is added to that 25 m sample's score (use `0` for awareness-only), `reason` / `warning` become chips with the metres affected.
+The live trip picks up new signals at its next one-minute check. Signals must describe physical or situational conditions only, never demographics, income or area labels.
