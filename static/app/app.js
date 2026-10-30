@@ -88,6 +88,18 @@ const state = {
 
 // ---------- map ----------
 const map = L.map("map", { zoomControl: false, attributionControl: true, preferCanvas: true, worldCopyJump: true });
+// Keep Leaflet and its MapLibre canvas in sync when the window, embedded app,
+// or browser viewport changes size. Without this, the canvas can stay at its
+// initial dimensions and leave most of the screen blank.
+function resizeMap() {
+  requestAnimationFrame(() => {
+    map.invalidateSize({ pan: false });
+    baseLayer?.getMaplibreMap?.()?.resize();
+  });
+}
+window.addEventListener("resize", resizeMap);
+if (window.visualViewport) window.visualViewport.addEventListener("resize", resizeMap);
+new ResizeObserver(resizeMap).observe(document.getElementById("map"));
 // Vector map from OpenFreeMap (free, no key) drawn by MapLibre; the plain OpenStreetMap tiles if WebGL or the style can't load
 let baseLayer = null;
 function rasterBase() {
