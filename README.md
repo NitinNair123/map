@@ -35,7 +35,7 @@ Copy `config.example.js` to `config.js` (gitignored) and add a Gemini API key. W
 
 Uses `gemini-2.5-flash-lite` with thinking off and capped output. If Gemini fails, routes are scored on map data alone.
 The key is visible to anyone who loads the page, so restrict it to your domain in Google Cloud.
-Other signals can plug in the same way: pass `hazards: [{pt, r, what, penalty}]` to `scoreRoutes`.
+Event alerts reach the scorer as `hazards: [{pt, r, what, penalty}]` in `scoreRoutes` options.
 
 ## Features
 - Safest / Balanced / Fastest options, with the route coloured green, amber or red along its length
