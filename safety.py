@@ -38,7 +38,19 @@ NIGHT_CELL = 0.005  # NASA night-light pixels, about 500 m
 # taps from people on the street that say how busy it is, shown on the route card
 FOOT_TAPS = {"people_around": "said it's busy", "shops_open": "saw shops open", "deserted": "said it's deserted", "shops_closed": "saw shops shut"}
 HELP_GROUPS = {"pharmacy", "hospital", "fuel", "police"}  # places to step into for help: open ones, and police at any hour
+# Places a user can ask for more of along the way (weight 0-3 each, from the app's settings). Open ones count; stops have no hours.
+PRIORITIES = {"pharmacy": "medical stores", "hospital": "hospitals", "food": "places to eat", "shop": "shops", "fuel": "petrol pumps", "transit": "bus and metro stops"}
+PRIORITY_CAP = 10  # most a route's score can gain from priorities, so safety still decides
+
+# Extra signals other features plug in (live event intel, for example): fn(pt, when) -> None or
+# {"delta": points added to that street's score, "warning" or "reason": text shown on the route}.
+# Use delta 0 for awareness only. Physical and situational conditions only: never who lives somewhere.
+SIGNALS = []
 NEAR_M = {"lamp": 20, "cctv": 50, "transit": 150, "crossing": 15, "sos_phone": 100, "blackspot": 100, "waterlogging": 50}
+
+
+def fmt_m(m):
+    return f"{round(m / 10) * 10} m" if m < 1000 else f"{m / 1000:.1f} km"
 
 
 def number(v):
@@ -585,18 +597,22 @@ class Area:
             kept.append((p, edges, lp))
         return [p for p, _, _ in kept]
 
-    def routes(self, start, end, when, rain=False, mode="walk", max_extra_min=None):
+    def routes(self, start, end, when, rain=False, mode="walk", max_extra_min=None, via=(), prefer=None):
         """Every candidate route is scored; returns the safest, a balanced one (at most 25% longer), the fastest,
         then every other scanned route by rank (kind "#4" and so on).
-        Each street is rated for the moment the trip reaches it, so a shop that shuts before you get there doesn't count."""
+        Each street is rated for the moment the trip reaches it, so a shop that shuts before you get there doesn't count.
+        via: stops visited in order. prefer: {place group: 0-3} the user wants more of on the way."""
         rated = self.ratings(when, rain, mode)
         credits = [rating.credit(s, c) for s, c in rated]
-        src, dst = self.nearest(start, mode), self.nearest(end, mode)
+        stops = [self.nearest(p, mode) for p in (start, *via, end)]
+        dst = stops[-1]
         max_extra_m = None if max_extra_min is None else max_extra_min * 60 * MODES[mode]
-        paths = self.candidates(src, dst, credits, mode, max_extra_m)
-        fastest_len = sum(self.edges[ei]["length"] for _, ei in paths[0]) or 1  # candidates come shortest first
+        legs = [self.candidates(a, b, credits, mode, max_extra_m) for a, b in zip(stops, stops[1:])]
+        # shortcut: the k-th candidate of every leg joined, not every combination; enough variety for a few stops
+        paths = [[step for leg in legs for step in leg[min(k, len(leg) - 1)]] for k in range(max(map(len, legs)))]
+        fastest_len = sum(self.edges[ei]["length"] for _, ei in paths[0]) or 1  # each leg's candidates come shortest first
         passing = {}  # (edge, 5-minute slot) -> (score, confidence), shared by all candidates
-        scored = [self._summary("", p, when, fastest_len, dst, rain, mode, passing) for p in paths]
+        scored = [self._summary("", p, when, fastest_len, dst, rain, mode, passing, prefer) for p in paths]
         ranked = sorted(scored, key=lambda r: (-r["score"], r["length_m"]))  # the score shown is the score ranked
         fastest = scored[0]
         safest = ranked[0]
@@ -614,7 +630,7 @@ class Area:
                         "same_as": next((o["kind"] for o in out if o["coords"] == r["coords"]), None)})
         return [out[0], out[2], out[1], *out[3:]]
 
-    def _summary(self, kind, path, when, fastest_len, dst, rain=False, mode="walk", passing=None):
+    def _summary(self, kind, path, when, fastest_len, dst, rain=False, mode="walk", passing=None, prefer=None):
         length = sum(self.edges[ei]["length"] for _, ei in path)
         coords = [self.nodes[n] for n, _ in path] + [self.nodes[dst]]
         light = self.light(when)
@@ -638,6 +654,21 @@ class Area:
             if key not in passing:
                 passing[key] = rating.rate(self, self.edges[ei], t, self.light(t), rain, now, mode)[:2]
             rated[ei] = passing[key]
+        signal_m = defaultdict(float)  # (field, text) -> metres of route it applies to
+        for (_, ei), t in zip(path, at):
+            for fn in SIGNALS:
+                try:
+                    s = fn(self.edges[ei]["mid"], t)
+                except Exception as err:  # one broken plug-in must not break routing
+                    print(f"signal failed: {err}", flush=True)
+                    continue
+                if not s:
+                    continue
+                if s.get("delta"):
+                    rated[ei] = (max(0, min(100, rated[ei][0] + s["delta"])), rated[ei][1])
+                for field in ("reason", "warning"):
+                    if s.get(field):
+                        signal_m[(field, s[field])] += self.edges[ei]["length"]
         rated_len = sum(self.edges[ei]["length"] for _, ei in path if rated[ei][1] >= rating.MIN_CONFIDENCE) or 0.0
         known = [(i, ei) for i, (_, ei) in enumerate(path) if rated[ei][1] >= rating.MIN_CONFIDENCE]
         avg = sum(rated[ei][0] * self.edges[ei]["length"] for _, ei in known) / (rated_len or 1)
@@ -724,6 +755,14 @@ class Area:
             score -= min(10, max(0, haven_gap - 300) / 50) if places else 0
             score -= max(0, length / fastest_len - 1.3) * 20
             score *= rated_len / length  # streets too thinly mapped to rate earn nothing, so a mostly unknown way can't top the list
+        wanted, bonus = [], 0.0
+        for group, w in (prefer or {}).items():
+            n = sum(1 for i in place_at if self.pois[i]["group"] == group and (place_open[i] or group == "transit"))
+            if w and n and group in PRIORITIES:
+                bonus += w * min(n, 3) * 1.5
+                wanted.append(f"{n} {PRIORITIES[group]} on the way (your priority)")
+        if weak_i is not None:
+            score += min(PRIORITY_CAP, bonus)
 
         steps = self._steps(path, coords)
         turns = sum(st["turn"] not in ("straight", "arrive", "depart") for st in steps)
@@ -748,7 +787,10 @@ class Area:
             reasons.append(f"{len(cctv)} CCTV cameras")
         if police_m < 800:
             reasons.append(f"Police within {round(police_m)} m")
+        reasons += wanted
         warnings = []
+        for (field, text), m in signal_m.items():
+            (reasons if field == "reason" else warnings).append(f"{text} ({fmt_m(m)})")
         taps = defaultdict(int)
         for kind in said.values():
             taps[kind] += 1

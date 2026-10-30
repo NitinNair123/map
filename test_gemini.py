@@ -65,9 +65,10 @@ class TestGemini(unittest.TestCase):
         self.assertEqual([h["local"] for h in alerts], [True, False])
         self.assertEqual(alerts[1]["r"], 3000)
         # local alerts cost points near them around that time; area-wide ones only warn
-        self.assertEqual(g.penalty((28.6281, 77.2191), when), gemini.PENALTY)
-        self.assertEqual(g.penalty((28.6281, 77.2191), datetime(2026, 10, 31, 9)), 0)
-        self.assertEqual(g.penalty((28.6130, 77.2296), when), 0)
+        self.assertEqual(g.signal((28.6281, 77.2191), when)["delta"], -gemini.PENALTY)
+        self.assertIn("VIP convoy barricades near Janpath", g.signal((28.6281, 77.2191), when)["warning"])
+        self.assertIsNone(g.signal((28.6281, 77.2191), datetime(2026, 10, 31, 9)))
+        self.assertEqual(g.signal((28.6130, 77.2296), when)["delta"], 0)
         # cached for the same area and hour
         self.assertEqual(g.find_events((28.63, 77.21), (28.61, 77.23), when, "x", found.get), alerts)
         self.assertEqual(len(g.prompts), 1)

@@ -28,7 +28,7 @@ import traffic
 from import_osm import search as offline_search
 from rating import REPORT_TYPES
 from reports import Reports
-from safety import MODES, dist, seg_dist
+from safety import MODES, SIGNALS, dist, seg_dist
 from tiles import (TileStore, TooFar, geoapify, mapillary, nightlights, overture_buildings, overture_places, overture_roads, tiles_near,
                    warm_overture)
 
@@ -110,6 +110,7 @@ traffic.LIVE.key = key_file("tomtom_key.txt", "TOMTOM_KEY")  # free key from dev
 print("Live buses:", "on (counts start after 30 min)" if buses.LIVE.key else "off (no key in data/otd_key.txt)", flush=True)
 print("Live traffic:", "on" if traffic.LIVE.key else "off (no key in data/tomtom_key.txt)", flush=True)
 gemini.LIVE = gemini.Gemini(key_file("gemini_key.txt", "GEMINI_KEY"), os.path.join(DATA_DIR, "gemini_hours.json"))
+SIGNALS.append(gemini.signal)
 print("Gemini shop hours and live events:", "on" if gemini.LIVE.key else "off (no key in data/gemini_key.txt)", flush=True)
 SURVEY = load_csv(SURVEY_PATH, REPORT_TYPES, source="Street survey")
 STOPS = gtfs.load(GTFS_DIR)
@@ -292,29 +293,28 @@ def place_name(pt):
         return f"{pt[0]:.4f},{pt[1]:.4f}"
 
 
-def ai_extras(area, a, b, when):
-    """Gemini opening hours for places along the trip and live event alerts near it; [] without a key."""
+def ai_extras(area, stops, when):
+    """Gemini opening hours for places along the trip (start, stops, end) and live event alerts near it; [] without a key."""
     if not gemini.LIVE.key:
         return []
+    a, b = stops[0], stops[-1]
     where = f"{place_name((round(a[0], 3), round(a[1], 3)))} to {place_name((round(b[0], 3), round(b[1], 3)))}"
-    mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+    legs = list(zip(stops, stops[1:]))
+    near = lambda p, m: any(seg_dist(p, x, y) <= m for x, y in legs)
 
     def locate(q):
-        hit = next((h for h in geocode(q, mid) if not h.get("big")), None)
-        return hit["pt"] if hit and seg_dist(hit["pt"], a, b) <= 3000 else None  # far away means it matched the wrong place
+        hit = next((h for h in geocode(q, ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)) if not h.get("big")), None)
+        return hit["pt"] if hit and near(hit["pt"], 3000) else None  # far away means it matched the wrong place
 
     with ThreadPoolExecutor(2) as ex:
-        jobs = [ex.submit(gemini.LIVE.fill_hours, area, lambda p: seg_dist(p, a, b) <= 300, where),
+        jobs = [ex.submit(gemini.LIVE.fill_hours, area, lambda p: near(p, 300), where),
                 ex.submit(gemini.LIVE.find_events, a, b, when, where, locate)]
     try:
         jobs[0].result()
-        alerts = jobs[1].result()
+        return jobs[1].result()
     except Exception:  # a bonus: a bug here must not cost the trip
         traceback.print_exc()
         return []
-    if any(h["local"] for h in alerts):
-        area._cache.clear()  # re-rate so the alerts count
-    return alerts
 
 
 def expire_trips():
@@ -449,16 +449,18 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json(store.around(pt).havens_near(pt, self.when(q)))
             if u.path == "/api/route":
                 a, b = latlon(q["from"][0]), latlon(q["to"][0])
+                via = [latlon(v) for v in q.get("via", [""])[0].split(";") if v][:5]  # stops, in order
+                prefer = {k: min(3, max(0, int(w))) for k, _, w in (p.partition(":") for p in q.get("prefer", [""])[0].split(",") if p)}
                 when = self.when(q)
                 rain = is_raining(a, when)
                 mode = q.get("mode", ["walk"])[0]
                 if mode not in MODES:
                     raise ValueError("mode must be walk, bike or car")
                 extra = max(0, int(q["extra"][0])) if q.get("extra", [""])[0] else None  # longest detour to consider, in minutes
-                area = store.for_trip(a, b)
+                area = store.for_trip(a, b, via)
                 traffic.LIVE.warm(traffic.sample(area, a, b) if traffic.is_now(when, time.time()) else [])
-                alerts = ai_extras(area, a, b, when)
-                return self.send_json({"routes": area.routes(a, b, when, rain, mode, extra), "rain": rain, "alerts": alerts,
+                alerts = ai_extras(area, [a, *via, b], when)
+                return self.send_json({"routes": area.routes(a, b, when, rain, mode, extra, via, prefer), "rain": rain, "alerts": alerts,
                                        "area": crime.around(CRIME, [a, b]), "sources": area.sources})
             if u.path.startswith("/api/trip/"):
                 with lock:

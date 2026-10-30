@@ -550,12 +550,14 @@ class TileStore:
                 if s <= r["lat"] <= n and w <= r["lon"] <= e:
                     area.add_report(r)
 
-    def for_trip(self, a, b):
-        """The area covering a walk from a to b, with room for safer detours."""
-        d = dist(a, b)
+    def for_trip(self, a, b, via=()):
+        """The area covering a walk from a to b through any stops, with room for safer detours."""
+        pts = [a, *via, b]
+        d = sum(dist(p, q) for p, q in zip(pts, pts[1:]))
         if d > MAX_TRIP_M:
             raise TooFar(f"That's {d / 1000:.0f} km in a straight line. SafeRoute plans trips up to {MAX_TRIP_M // 1000} km.")
-        return self.area(tiles_near(a, b, max(400, min(0.25 * d, MAX_TRIP_PAD_M))))
+        pad = max(400, min(0.25 * d, MAX_TRIP_PAD_M))
+        return self.area(set().union(*(tiles_near(p, q, pad) for p, q in zip(pts, pts[1:]))))
 
     def around(self, pt, radius_m=500):
         return self.area(tiles_near(pt, pt, radius_m))

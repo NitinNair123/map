@@ -7,7 +7,6 @@ import time
 from collections import defaultdict
 
 import buses
-import gemini
 import traffic
 
 # (full daylight, full dark) weight per factor; each column sums to 100. Twilight blends the two.
@@ -234,7 +233,6 @@ def rate(area, e, when, light, rain=False, now=None, mode="walk"):
         gap = abs(i["hour"] - when.hour)
         hits += 25 * INCIDENT_SEVERITY.get(i["type"], 0.5) * 0.5 ** ((now - i["ts"]) / 86400 / 180) * (1.0 if min(gap, 24 - gap) <= 2 else 0.4)
     s -= min(35, hits)
-    s -= gemini.LIVE.penalty(e["mid"], when)  # barricades or a VIP convoy reported on this street around then
     return max(0.0, min(100.0, s)), confidence, feats
 
 
