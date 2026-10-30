@@ -22,7 +22,7 @@ class ServerTest(unittest.TestCase):
                        mock.patch.object(server, "is_raining", lambda *a: False),
                        mock.patch.object(server, "geocode", lambda q, near: [{"name": "City Pharmacy", "pt": [28.0007, 77.0025], "kind": "pharmacy"}]),
                        mock.patch.object(server, "REPORTS", Reports(os.path.join(tempfile.mkdtemp(), "reports.db"))),
-                       mock.patch.object(server.gemini.LIVE, "key", "")]  # a real data/gemini_key.txt must not make live calls
+                       mock.patch.object(server.gemini, "LIVE", server.gemini.Gemini())]  # no key: never call Gemini from tests
         for p in cls.patches:
             p.start()
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
