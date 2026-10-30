@@ -460,8 +460,10 @@ class Handler(SimpleHTTPRequestHandler):
                 area = store.for_trip(a, b, via)
                 traffic.LIVE.warm(traffic.sample(area, a, b) if traffic.is_now(when, time.time()) else [])
                 alerts = ai_extras(area, [a, *via, b], when)
-                return self.send_json({"routes": area.routes(a, b, when, rain, mode, extra, via, prefer), "rain": rain, "alerts": alerts,
-                                       "area": crime.around(CRIME, [a, b]), "sources": area.sources})
+                routes = area.routes(a, b, when, rain, mode, extra, via, prefer)
+                for r in routes:  # the districts each route passes through, as background only (never scored)
+                    r["area"] = crime.around(CRIME, crime.along(r["coords"]))
+                return self.send_json({"routes": routes, "rain": rain, "alerts": alerts, "sources": area.sources})
             if u.path.startswith("/api/trip/"):
                 with lock:
                     expire_trips()
