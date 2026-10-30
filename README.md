@@ -4,6 +4,18 @@ Walking directions that pick the **safest** route, not just the fastest. Every s
 score for the exact time you're walking, and you choose between Safest, Balanced and Fastest routes, each
 with plain reasons behind its score. It's built for walking home at night, especially for women.
 
+## Hacktober Fest 2026: event-day work
+
+SafeRoute was an existing project before the event. Its route scoring, safety data pipeline, trip planning,
+navigation, and SOS tools are pre-event work and are not claimed as part of today's sprint contribution.
+
+**Built on 30 October 2026:** fixed the map canvas staying at its initial size after the app viewport changes.
+The app now asks Leaflet and MapLibre to recalculate map dimensions when the browser window, visual viewport,
+or map container resizes. This addresses the partially rendered map reported during the event-day demo.
+
+**AI coding assistance:** Claude and OpenAI Codex were used during project development. Project contributors
+review and take responsibility for the code, and can explain the implementation.
+
 It has three parts, all served by one small Python server:
 
 - **Website** (`/`): the landing page, with how it works, what we check, safety tools, privacy and a pitch for campuses.
