@@ -34,5 +34,11 @@ Every card explains its score ("12 places open", "200 m on unlit road") and is m
 - Open places and police stations marked as safe havens on the map
 - **Share my trip**, plus an **SOS** button that shares your location via the share sheet or SMS and offers to call 112
 
+## NCRB crime awareness (`ncrb.js`)
+Each route card shows the NCRB city-wide IPC crime rate for the metro city the route is in (hover for the source).
+It is **not** a score input. NCRB publishes state and metropolitan-city totals only, never street or incident
+locations, so the app cannot say a crime happened on a given route. Figures are Crime in India 2022 as reported
+by ORF; check them against the official NCRB table before launch.
+
 ## Not built yet
-Live location tracking, auto check-in, community reports, crime data and income data all need a backend or city-specific datasets. `pointScore` in `score.js` is where new factors go.
+Live location tracking, auto check-in, community reports, street-level crime data and income data all need a backend or city-specific datasets. `pointScore` in `score.js` is where new factors go.

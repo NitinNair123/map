@@ -1,4 +1,5 @@
 import { scoreRoutes, dist } from './score.js';
+import { awarenessText, SOURCE } from './ncrb.js';
 
 const OSRM = 'https://routing.openstreetmap.de/routed-foot/route/v1/foot';
 const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
@@ -88,7 +89,8 @@ function render() {
     el.className = 'card';
     const mins = Math.round(r.duration / 60), km = (r.distance / 1000).toFixed(1);
     el.innerHTML = `<h3><span>${r.label || 'Option'} · ${mins} min · ${km} km</span><span class="score" style="color:${color(r.score)}">${r.score}</span></h3>
-      <div class="muted">weakest stretch ${r.weakest}${r.lowData ? ' · ⚠️ low data, score is a guess' : ''}</div><div class="chips"></div>`;
+      <div class="muted">weakest stretch ${r.weakest}${r.lowData ? ' · ⚠️ low data, score is a guess' : ''}</div><div class="chips"></div>
+      <div class="muted ncrb" title="${SOURCE}">ℹ️ ${awarenessText(r.line)}</div>`;
     const chips = el.querySelector('.chips');
     for (const t of r.reasons) chips.append(Object.assign(document.createElement('span'), { textContent: `✓ ${t}` }));
     for (const t of r.warnings) chips.append(Object.assign(document.createElement('span'), { textContent: `! ${t}`, className: 'w' }));
