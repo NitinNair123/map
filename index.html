@@ -27,6 +27,14 @@
   #status { margin-top:8px; }
   #sos { position:fixed; right:16px; bottom:16px; z-index:1000; width:64px; height:64px; border-radius:50%; background:var(--bad); color:#fff; font-weight:800; border:0; box-shadow:0 4px 14px #0006; }
   .actions { display:flex; gap:8px; margin-top:10px; }
+  #sosSheet { border:0; border-radius:16px; padding:16px; width:min(420px, calc(100vw - 32px)); background:var(--bg); color:var(--fg); }
+  #sosSheet::backdrop { background:#0008; }
+  #sosSheet h2 { margin:0 0 8px; font-size:18px; display:flex; justify-content:space-between; align-items:center; }
+  #sosSheet h2 button { width:auto; padding:4px 10px; }
+  #sosSheet a { display:block; margin-top:8px; text-decoration:none; }
+  #sosSheet .big { background:var(--bad); color:#fff; border:0; font-weight:700; }
+  #sosSheet details { margin-top:12px; }
+  #sosSheet textarea { font:inherit; padding:10px; border-radius:10px; border:1px solid #8884; background:var(--card); color:var(--fg); width:100%; }
 </style>
 </head>
 <body>
@@ -47,7 +55,31 @@
   </div>
   <p class="muted">Scores come from OpenStreetMap data and can be wrong or incomplete. Treat “safest” as “safer”; trust your instincts.</p>
 </div>
-<button id="sos" aria-label="SOS: share location and call 112">SOS</button>
+<button id="sos" aria-label="SOS: emergency calls, ambulance alert and medical profile">SOS</button>
+<dialog id="sosSheet" aria-labelledby="sosTitle">
+  <h2 id="sosTitle">Emergency <button id="sosClose" type="button" aria-label="Close">✕</button></h2>
+  <a href="tel:108"><button type="button" class="big">🚑 Call ambulance (108)</button></a>
+  <a href="tel:112"><button type="button" class="big">Call emergency (112)</button></a>
+  <button id="sosAlert" type="button" style="margin-top:8px">Send ambulance alert with my medical info &amp; location</button>
+  <div id="sosMsg" class="muted"></div>
+  <a href="https://blinkit.com/" target="_blank" rel="noopener"><button type="button">Blinkit ambulance (select Gurugram areas, in the Blinkit app)</button></a>
+  <details>
+    <summary>My medical profile</summary>
+    <form id="profileForm">
+      <p class="muted">Stored only on this phone. Added to your alert so responders know your needs.</p>
+      <input id="p_name" placeholder="Name" autocomplete="name">
+      <input id="p_blood" placeholder="Blood group (e.g. O+)">
+      <textarea id="p_conditions" rows="2" placeholder="Conditions (e.g. asthma, diabetes, epilepsy)"></textarea>
+      <textarea id="p_allergies" rows="2" placeholder="Allergies (e.g. penicillin)"></textarea>
+      <textarea id="p_meds" rows="2" placeholder="Current medication"></textarea>
+      <input id="p_contacts" type="tel" placeholder="Emergency contact numbers, comma separated">
+      <input id="p_geminiKey" type="password" placeholder="Gemini API key (optional)" autocomplete="off">
+      <p class="muted">With a key, Gemini rewrites the alert so the critical facts come first. This sends your profile to Google. It never calls or messages anyone by itself; without a key or network the plain alert is used.</p>
+      <button class="primary">Save profile</button>
+      <div id="profileMsg" class="muted"></div>
+    </form>
+  </details>
+</dialog>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script type="module" src="app.js"></script>
 </body>

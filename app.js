@@ -1,8 +1,14 @@
 import { scoreRoutes, dist } from './score.js';
+import { initSOS } from './sos.js';
 
 const OSRM = 'https://routing.openstreetmap.de/routed-foot/route/v1/foot';
 const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
 const $ = (id) => document.getElementById(id);
+const here = () => new Promise((res, rej) => navigator.geolocation
+  ? navigator.geolocation.getCurrentPosition((p) => res([p.coords.latitude, p.coords.longitude]), () => rej(new Error('Location permission denied')), { enableHighAccuracy: true, timeout: 10000 })
+  : rej(new Error('No geolocation on this device')));
+// Before the map, so SOS still works when the map library or network fails.
+initSOS(here);
 
 const map = L.map('map').setView([28.6139, 77.209], 13);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
@@ -14,10 +20,6 @@ $('when').value = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.get
 
 const status = (msg) => { $('status').textContent = msg; };
 const color = (s) => (s >= 65 ? '#1a9850' : s >= 40 ? '#f39c12' : '#d73027');
-
-const here = () => new Promise((res, rej) => navigator.geolocation
-  ? navigator.geolocation.getCurrentPosition((p) => res([p.coords.latitude, p.coords.longitude]), () => rej(new Error('Location permission denied')), { enableHighAccuracy: true, timeout: 10000 })
-  : rej(new Error('No geolocation on this device')));
 
 async function geocode(q) {
   const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`);
@@ -126,7 +128,3 @@ async function shareLocation(prefix) {
 }
 
 $('share').onclick = () => shareLocation(`I'm walking to ${$('to').value} now, about ${Math.round((results.find((r) => r.label === 'Safest') || results[0]).duration / 60)} min.`);
-$('sos').onclick = async () => {
-  await shareLocation('🚨 SOS — I need help.');
-  if (confirm('Call 112 now?')) location.href = 'tel:112';
-};
