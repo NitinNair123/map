@@ -28,6 +28,15 @@ The route is sampled every 25 m. Each point gets 0–100, with different weights
 Route score = 0.6 × average + 0.4 × worst 100 m stretch − a penalty for detours over 1.3× the shortest route.
 Every card explains its score ("12 places open", "200 m on unlit road") and is marked "low data" when OSM coverage is too thin to trust.
 
+## Optional: Gemini (`gemini.js`)
+Copy `config.example.js` to `config.js` (gitignored) and add a Gemini API key. With it, each search also:
+- **Fills missing shop hours**: named shops/amenities within 60 m of the routes that OSM has no `opening_hours` for are sent in one batched request (max 15), and each answer is cached in the browser so a place is asked about once.
+- **Checks live events**: one Google-Search-grounded request for VIP movement, barricades, closures and protests along the trip, cached per area per hour. Each alert lowers scores within its radius (−30), shows on the map and as a warning on the card.
+
+Uses `gemini-2.5-flash-lite` with thinking off and capped output. If Gemini fails, routes are scored on map data alone.
+The key is visible to anyone who loads the page, so restrict it to your domain in Google Cloud.
+Other signals can plug in the same way: pass `hazards: [{pt, r, what, penalty}]` to `scoreRoutes`.
+
 ## Features
 - Safest / Balanced / Fastest options, with the route coloured green, amber or red along its length
 - Pick a departure time, so open-shop and lighting checks match that time

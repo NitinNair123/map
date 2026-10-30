@@ -1,4 +1,5 @@
 import { scoreRoutes, dist } from './score.js';
+import { hasGemini, fillShopHours, eventHazards } from './gemini.js';
 
 const OSRM = 'https://routing.openstreetmap.de/routed-foot/route/v1/foot';
 const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
@@ -77,6 +78,7 @@ function show(i) {
     L.polyline([r.samples[k - 1][0], r.samples[k][0]], { color: color(r.samples[k][1]), weight: 7 }).addTo(layer);
   }
   r.havens.forEach((h) => L.circleMarker(h.pt, { radius: 5, color: h.tags.amenity === 'police' ? '#1f4e9c' : '#1a9850', fillOpacity: 0.9 }).bindPopup(h.name || 'Open place').addTo(layer));
+  (r.hazards || []).forEach((h) => L.circle(h.pt, { radius: h.r, color: '#d73027', weight: 1, fillOpacity: 0.12 }).bindPopup(`⚠ ${h.what} (AI, verify)`).addTo(layer));
   map.fitBounds(L.polyline(r.line).getBounds(), { padding: [20, 20] });
   document.querySelectorAll('.card').forEach((c, j) => c.classList.toggle('sel', j === i));
 }
@@ -110,8 +112,19 @@ $('f').onsubmit = async (e) => {
     if (!routes.length) throw new Error('No walking route found.');
     status(`Checking lights, shops, police and more along ${routes.length} routes…`);
     const elements = await overpass(routes);
-    results = scoreRoutes(routes, elements, new Date($('when').value), { avoidInformal: $('avoidInformal').checked });
-    status('');
+    const when = new Date($('when').value);
+    let hazards = [], aiNote = '';
+    if (hasGemini()) {
+      status('Checking shop hours and live events…');
+      const area = [$('from').value, $('to').value].filter(Boolean).join(' to ');
+      // AI is a bonus: if it fails, score on map data alone.
+      const [hours, events] = await Promise.allSettled([fillShopHours(elements, routes, area), eventHazards(a, b, when, area)]);
+      if (events.status === 'fulfilled') hazards = events.value;
+      aiNote = [hours.value && `AI filled hours for ${hours.value} places`, hazards.length && `${hazards.length} live alerts`,
+        (hours.status === 'rejected' || events.status === 'rejected') && 'AI check failed'].filter(Boolean).join(' · ');
+    }
+    results = scoreRoutes(routes, elements, when, { avoidInformal: $('avoidInformal').checked, hazards });
+    status(aiNote);
     render();
   } catch (err) {
     status(`⚠️ ${err.message}`);
