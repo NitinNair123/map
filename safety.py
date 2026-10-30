@@ -342,7 +342,7 @@ class Area:
                     cells[self._cell(pt)] += int(tags.get("building_count", 1))
                 elif kind:
                     self.grid[self._cell(pt)].append(len(self.pois))
-                    self.pois.append({"kind": kind, "pt": pt, "hours": tags.get("opening_hours"), "group": place_group(tags, kind),
+                    self.pois.append({"kind": kind, "pt": pt, "hours": tags.get("opening_hours"), "group": place_group(tags, kind), "named": bool(tags.get("name")),
                                       "source": tags.get("layer") or {"mapillary": "Mapillary", "geoapify": "Geoapify"}.get(tags.get("source"))
                                       or ("Overture" if "overture" in tags else "OpenStreetMap"),
                                       "name": tags.get("name") or (tags.get("shop") or tags.get("amenity") or tags.get("overture") or kind).replace("_", " ")})

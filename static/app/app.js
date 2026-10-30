@@ -324,7 +324,7 @@ async function maybeRoute() {
     const q = routeQuery(from, whenParam(), 0);
     const res = await api("/api/route?" + q);
     if (seq !== routeSeq) return; // the user picked something else meanwhile
-    state.routes = res.routes; state.rain = res.rain; state.routeFrom = from; state.sources = res.sources || {};
+    state.routes = res.routes; state.rain = res.rain; state.alerts = res.alerts || []; state.routeFrom = from; state.sources = res.sources || {};
     state.sel = "safest";
     renderRoutes();
     drawRoutes(true);  // after the sheet is drawn, so the route is fitted into the map left above it
@@ -353,6 +353,7 @@ function drawRoutes(fit) {
       drawPlaces(r);
     }
   }
+  (state.alerts || []).forEach((h) => L.circle(h.pt, { radius: h.r, color: COLOR.bad, weight: 1, fillOpacity: 0.12, interactive: false }).addTo(routeLayer));
   if (fit) {
     const all = state.routes.filter(isMain).flatMap((r) => r.coords);
     const desk = innerWidth >= 900; // keep the route clear of the search card and the sheet

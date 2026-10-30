@@ -72,6 +72,12 @@ and open the https link on the phone. Then use "Add to Home Screen".
 - **Live traffic** (free TomTom key from https://developer.tomtom.com, in `data/tomtom_key.txt` or `TOMTOM_KEY`):
   up to 6 main roads near each route are looked up (cached 10 minutes, at most 2,000 calls a day). Slow, heavy
   traffic counts as a weak sign the road isn't deserted; free-flowing traffic counts as nothing.
+- **Gemini** (key from https://aistudio.google.com, in `data/gemini_key.txt` or `GEMINI_KEY`; it stays on the
+  server): for each trip, named shops within 300 m of it that publish no opening hours are looked up in one
+  Google-Search-grounded call (at most 15 places), and the answers are kept in `data/gemini_hours.json` for 30 days.
+  A second call per area and hour looks for VIP movement, barricades, closures and protests. Each alert must name a
+  street or landmark that place search finds near the trip, or it is dropped. Alerts plug in through `safety.SIGNALS`:
+  ones within 400 m take 20 points off those streets around that time, wider ones only show a warning. At most 300 calls a day.
 - **Busy / empty taps**: while navigating, one tap reports "people around", "deserted", "shops open" or
   "shops shut" at your spot. The route card shows how many people said so at this time of day.
 - **Street survey**: `data/survey.csv` with columns `lat,lon,type,when`, one row per thing you checked on a
