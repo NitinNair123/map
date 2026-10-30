@@ -36,7 +36,10 @@ test('fills hours only for named, untimed places near the route, in one request'
 
 test('event hazards are validated and clamped', async () => {
   globalThis.SAFEROUTE_CONFIG = { geminiKey: 'k' };
-  globalThis.fetch = reply('[{"lat":28.61,"lon":77.21,"radius_m":99999,"what":"VIP convoy"},{"lat":"x","what":"bad"}]');
+  globalThis.fetch = reply('[{"lat":28.61,"lon":77.21,"radius_m":99999,"what":"Marathon"},{"lat":28.6,"lon":77.2,"radius_m":200,"what":"VIP convoy"},{"lat":"x","what":"bad"}]');
   const hz = await eventHazards([28.6, 77.2], [28.62, 77.22], new Date('2026-10-30T18:00'), 'Delhi');
-  assert.deepEqual(hz, [{ pt: [28.61, 77.21], r: 1500, what: 'VIP convoy', penalty: 30 }]);
+  assert.deepEqual(hz, [
+    { pt: [28.61, 77.21], r: 1500, what: 'Marathon', penalty: 0 },
+    { pt: [28.6, 77.2], r: 200, what: 'VIP convoy', penalty: -20 },
+  ]);
 });

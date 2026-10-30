@@ -66,7 +66,7 @@ Reply only JSON {"index":"OSM opening_hours like Mo-Sa 10:00-21:00"}; use "" whe
 // Cached per ~1 km area per hour of departure.
 export async function eventHazards(a, b, date, area) {
   if (!hasGemini()) return [];
-  const k = `e:${[...a, ...b].map((x) => x.toFixed(2)).join(',')}:${date.toISOString().slice(0, 13)}`;
+  const k = `e2:${[...a, ...b].map((x) => x.toFixed(2)).join(',')}:${date.toISOString().slice(0, 13)}`;
   const hit = cache.get(k);
   if (hit) return hit;
   const when = date.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
@@ -76,7 +76,11 @@ Reply only JSON [{"lat":0,"lon":0,"radius_m":300,"what":"under 8 words"}] for it
   const out = (Array.isArray(ans) ? ans : [])
     .filter((h) => Number.isFinite(h?.lat) && Number.isFinite(h?.lon))
     .slice(0, 8)
-    .map((h) => ({ pt: [h.lat, h.lon], r: Math.min(Math.max(+h.radius_m || 300, 100), 1500), what: String(h.what || 'Reported disruption').slice(0, 60), penalty: 30 }));
+    .map((h) => {
+      const r = Math.min(Math.max(+h.radius_m || 300, 50), 1500);
+      // Local blockages steer routes; area-wide events can't be walked around, so they only warn.
+      return { pt: [h.lat, h.lon], r, what: String(h.what || 'Reported disruption').slice(0, 60), penalty: r <= 400 ? -20 : 0 };
+    });
   cache.set(k, out);
   return out;
 }

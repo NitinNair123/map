@@ -26,22 +26,38 @@ The route is sampled every 25 m. Each point gets 0–100, with different weights
 | Informal settlement (toggle, on by default) | −30 | −30 | `residential=informal`, `informal=yes` |
 
 Route score = 0.6 × average + 0.4 × worst 100 m stretch − a penalty for detours over 1.3× the shortest route.
+Each **priority** you set (0–3 for pharmacies, hospitals, ATMs, food, police, transit stops) adds up to 4.5 points per category for matching places passed, capped at +15 total so safety still leads.
 Every card explains its score ("12 places open", "200 m on unlit road") and is marked "low data" when OSM coverage is too thin to trust.
 
 ## Optional: Gemini (`gemini.js`)
 Copy `config.example.js` to `config.js` (gitignored) and add a Gemini API key. With it, each search also:
 - **Fills missing shop hours**: named shops/amenities within 60 m of the routes that OSM has no `opening_hours` for are sent in one batched request (max 15), and each answer is cached in the browser so a place is asked about once.
-- **Checks live events**: one Google-Search-grounded request for VIP movement, barricades, closures and protests along the trip, cached per area per hour. Each alert lowers scores within its radius (−30), shows on the map and as a warning on the card.
+- **Checks live events**: one Google-Search-grounded request for VIP movement, barricades, closures and protests along the trip, cached per area per hour. Local alerts (radius ≤ 400 m) take 20 off each sample inside them; area-wide ones only warn, since every route would cross them. All show on the map and as a card warning.
 
 Uses `gemini-2.5-flash-lite` with thinking off and capped output. If Gemini fails, routes are scored on map data alone.
 The key is visible to anyone who loads the page, so restrict it to your domain in Google Cloud.
-Event alerts reach the scorer as `hazards: [{pt, r, what, penalty}]` in `scoreRoutes` options.
+Alerts reach the scorer through one `addSignal` registered in `app.js`, so the live trip re-checks them too.
 
 ## Features
 - Safest / Balanced / Fastest options, with the route coloured green, amber or red along its length
 - Pick a departure time, so open-shop and lighting checks match that time
+- Add stops; every alternative goes through them in order
+- Personal priorities, saved on the device
+- **Live trip**: follows your location and re-scores the rest of each route every minute; if another route becomes 10+ points safer (shops closed, night fell, a plug-in signal changed) it switches and vibrates
 - Open places and police stations marked as safe havens on the map
 - **Share my trip**, plus an **SOS** button that shares your location via the share sheet or SMS and offers to call 112
 
 ## Not built yet
-Live location tracking, auto check-in, community reports, crime data and income data all need a backend or city-specific datasets. `pointScore` in `score.js` is where new factors go.
+Auto check-in and community reports need a backend.
+
+## Plugging in new signals
+Other data (event closures, crime awareness, …) plugs in without touching the scorer:
+
+```js
+import { addSignal } from './score.js';
+const off = addSignal(([lat, lon], { date, night }) =>
+  inBarrierZone(lat, lon) ? { delta: -60, warning: 'VIP movement barrier' } : null);
+```
+
+`delta` is added to that 25 m sample's score (use `0` for awareness-only), `reason` / `warning` become chips with the metres affected.
+The live trip picks up new signals at its next one-minute check. Signals must describe physical or situational conditions only, never demographics, income or area labels.
