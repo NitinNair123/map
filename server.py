@@ -410,15 +410,17 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json(store.around(pt).havens_near(pt, self.when(q)))
             if u.path == "/api/route":
                 a, b = latlon(q["from"][0]), latlon(q["to"][0])
+                via = [latlon(v) for v in q.get("via", [""])[0].split(";") if v][:5]  # stops, in order
+                prefer = {k: min(3, max(0, int(w))) for k, _, w in (p.partition(":") for p in q.get("prefer", [""])[0].split(",") if p)}
                 when = self.when(q)
                 rain = is_raining(a, when)
                 mode = q.get("mode", ["walk"])[0]
                 if mode not in MODES:
                     raise ValueError("mode must be walk, bike or car")
                 extra = max(0, int(q["extra"][0])) if q.get("extra", [""])[0] else None  # longest detour to consider, in minutes
-                area = store.for_trip(a, b)
+                area = store.for_trip(a, b, via)
                 traffic.LIVE.warm(traffic.sample(area, a, b) if traffic.is_now(when, time.time()) else [])
-                routes = area.routes(a, b, when, rain, mode, extra)
+                routes = area.routes(a, b, when, rain, mode, extra, via, prefer)
                 for r in routes:  # the districts each route passes through, as background only (never scored)
                     r["area"] = crime.around(CRIME, crime.along(r["coords"]))
                 return self.send_json({"routes": routes, "rain": rain, "sources": area.sources})

@@ -129,6 +129,29 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(r["steps"][-1]["turn"], "arrive")
         self.assertEqual(r["turns"], 1)
 
+    def test_stop_on_the_way(self):
+        r = {x["kind"]: x for x in self.area.routes(A, B, NIGHT, via=[(28.0005, 77.0015)])}
+        self.assertGreater(r["fastest"]["length_m"], 350)  # the short footway skips the stop, so every route goes north
+        self.assertTrue(any(dist(c, (28.0005, 77.0015)) < 60 for c in r["fastest"]["coords"]))
+
+    def test_priorities_raise_routes_with_wanted_places(self):
+        plain = self.kinds(NIGHT)["safest"]
+        keen = {r["kind"]: r for r in self.area.routes(A, B, NIGHT, prefer={"pharmacy": 3})}["safest"]
+        self.assertGreater(keen["score"], plain["score"])
+        self.assertTrue(any("medical stores" in x for x in keen["reasons"]))
+
+    def test_signals_plug_in(self):
+        import safety
+        before = self.kinds(NIGHT)["safest"]
+        hit = lambda pt, when: {"delta": -60, "warning": "Road closed for an event"} if pt[0] > 28.0003 else None
+        safety.SIGNALS += [hit, lambda pt, when: 1 / 0]  # a broken signal is skipped
+        try:
+            after = next(r for r in self.area.routes(A, B, NIGHT) if r["coords"] == before["coords"])
+        finally:
+            del safety.SIGNALS[-2:]
+        self.assertLess(after["score"], before["score"] - 20)
+        self.assertTrue(any(w.startswith("Road closed for an event (") for w in after["warnings"]))
+
     def test_havens(self):
         h = self.area.havens_near((28.0007, 77.0024), LATE)
         self.assertEqual(h[0]["name"], "City Pharmacy")  # the only place open at 2 am
