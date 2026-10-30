@@ -143,6 +143,16 @@ Weights blend from day to night with the real sun position, so dusk counts as du
   by bike and 25 km/h by car in city traffic. The same evidence is weighed differently: day / dark weights are
   bike lighting 0/30, people 30/25, buildings 20/15, police 10/10, footpath 40/20; car lighting 0/15, people
   45/40, buildings 20/15, police 25/20, footpath 10/10 (in a car, help points that are open matter most).
+- **Stops.** Up to 5 stops, visited in order. Each leg is searched on its own and the k-th way of every leg is joined into
+  the k-th candidate, so the whole trip is scored and ranked like a trip without stops.
+- **Your priorities.** Settings let you ask for more medical stores, hospitals, places to eat, shops, petrol pumps or
+  bus and metro stops on the way (0–3 each, kept on the phone). Every open one of those passed adds 1.5 points × its
+  weight, at most 3 counted per kind and at most +10 in all, so safety still decides. The card says what was counted.
+- **Plug-in signals.** Other features add evidence without touching the rating: append `fn(pt, when)` to
+  `safety.SIGNALS`, returning `None` or `{"delta": points, "warning": text}` (or `"reason"`). `delta` is added to
+  that street's score for the moment the trip gets there (0 for awareness only), and the text shows on the route
+  card with how much of the route it covers. A signal that raises an error is skipped. Physical and situational
+  conditions only, never who lives somewhere.
 - **Detour limit.** Settings can cap candidates at 5, 10, 15 or 20 minutes longer than the fastest way.
 - **A closer look.** Every route lists the medical stores, hospitals, petrol pumps, shops, stops and cameras
   along it, how many are open as you pass, the longest stretch without an open help point (medical store,
@@ -155,6 +165,10 @@ No rating is 100% accurate. Scores compare routes and mean *safer*, never *safe*
 ## App features
 
 - Live navigation: next-turn banner, spoken directions, map follows you, automatic re-route when you go off route, and a Simulate walk demo.
+- **Live re-scoring.** Every 3 minutes while navigating, the way ahead is scored again for the current time (shops shut,
+  night falls, new reports, live buses and traffic, plug-in signals). If another way from where you are is now 10 or more
+  points safer than the rest of your route, the app switches to it, says so and vibrates.
+- Stops between start and destination (the + button), announced as you reach each one.
 - Place search anywhere, biased towards where you're looking, or a pin dropped on the map.
 - A departure time picker, because a 1 am walk scores differently from a 7 pm one.
 - A safety map overlay for the chosen hour.

@@ -76,6 +76,7 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { ap
 // ---------- state ----------
 const state = {
   from: null, fromLabel: "", // null start means "my location"
+  stops: [], // [{pt, label}] visited in order between start and destination
   to: null, toLabel: "",
   when: null, // null means now
   here: null,
@@ -224,6 +225,7 @@ async function choose(r) {
   maybeRoute();
 }
 function setPlace(which, pt, label) {
+  if (which.startsWith("stop")) { state.stops[+which.slice(4)] = { pt, label }; return renderStops(); }
   state[which] = pt; state[which + "Label"] = label;
   $(which === "from" ? "#fromInput" : "#toInput").value = label;
   setMarker(which, pt);
@@ -231,10 +233,31 @@ function setPlace(which, pt, label) {
 $("#swapBtn").onclick = () => {
   const f = [state.from, state.fromLabel], t = [state.to, state.toLabel];
   if (!t[0]) return;
+  state.stops.reverse(); renderStops();
   setPlace("from", t[0], t[1]);
   if (f[0]) setPlace("to", f[0], f[1]);
   else if (state.here) setPlace("to", state.here, "Your location");
   maybeRoute();
+};
+
+// ---------- stops ----------
+const stopLayer = L.layerGroup().addTo(map);
+const viaParam = (from = 0) => state.stops.slice(from).filter((s) => s.pt).map((s) => s.pt.join(",")).join(";");
+function renderStops() {
+  $("#stopFields").innerHTML = state.stops.map((s, i) => `<div class="field"><span class="dot stop" aria-hidden="true"></span>
+    <input data-stop="${i}" placeholder="Add a stop" autocomplete="off" aria-label="Stop ${i + 1}" value="${esc(s.label)}">
+    <button class="stop-del" data-del-stop="${i}" aria-label="Remove stop ${i + 1}">${icon("close")}</button></div>`).join("");
+  document.querySelectorAll("[data-stop]").forEach((input) => bindSearch(input, "stop" + input.dataset.stop));
+  document.querySelectorAll("[data-del-stop]").forEach((b) => (b.onclick = () => { state.stops.splice(+b.dataset.delStop, 1); renderStops(); maybeRoute(); }));
+  stopLayer.clearLayers();
+  state.stops.forEach((s) => s.pt && L.marker(s.pt, { icon: divIcon("pin stop", 16), keyboard: false }).addTo(stopLayer));
+  $("#addStopBtn").hidden = state.stops.length >= 5;  // the server takes up to 5
+}
+$("#addStopBtn").onclick = () => {
+  if (state.trip) return;
+  state.stops.push({ pt: null, label: "" });
+  renderStops();
+  $(`[data-stop="${state.stops.length - 1}"]`).focus();
 };
 
 let pickMode = null, reportType = null;
@@ -277,6 +300,11 @@ function afterTime() {
 const whenParam = () => isoLocal(state.when || new Date());
 
 // ---------- routing ----------
+// Places the user wants more of on the way, 0-3 each (settings); the server adds at most 10 points for them.
+const PRIORITY = { pharmacy: "Medical stores", hospital: "Hospitals", food: "Places to eat", shop: "Shops", fuel: "Petrol pumps", transit: "Bus and metro stops" };
+const preferParam = () => Object.entries(store.get("prefer", {})).filter(([, w]) => w > 0).map(([k, w]) => `${k}:${w}`).join(",");
+const routeQuery = (from, at, stopFrom) => new URLSearchParams({ from: from.join(","), to: state.to.join(","), at, mode: state.mode,
+  extra: store.get("extra", ""), via: viaParam(stopFrom), prefer: preferParam() });
 async function maybeRoute() {
   if (!state.to) return renderIdle();
   let from = state.from;
@@ -293,7 +321,7 @@ async function maybeRoute() {
   renderSheet(`<div class="empty"><div class="badge">${icon("shield")}</div><div><h3>Checking every street…</h3><p class="muted" id="routeWait">Lighting, open shops, police, CCTV and reports for ${esc(timeLabel().toLowerCase())}.</p></div></div>`);
   const slow = setTimeout(() => { const w = $("#routeWait"); if (w) w.textContent = "First trip in this area: downloading and scoring its streets. This can take up to a minute."; }, 6000);
   try {
-    const q = new URLSearchParams({ from: from.join(","), to: state.to.join(","), at: whenParam(), mode: state.mode, extra: store.get("extra", "") });
+    const q = routeQuery(from, whenParam(), 0);
     const res = await api("/api/route?" + q);
     if (seq !== routeSeq) return; // the user picked something else meanwhile
     state.routes = res.routes; state.rain = res.rain; state.area = res.area || []; state.routeFrom = from; state.sources = res.sources || {};
@@ -541,7 +569,7 @@ async function startTrip(opts = {}) {
   if (opts.shareOnly) { await shared; return; }
   startWatching();
   state.trip = { ...t, route: r, started: Date.now(), offCount: 0, lastMovePt: state.here, lastMoveAt: Date.now(), lastPost: 0, nextCheck: 0,
-    spoken: {}, lastReroute: 0 };
+    spoken: {}, lastReroute: 0, nextStop: 0, lastRecheck: Date.now() };
   state.follow = true;
   document.body.classList.add("navigating");
   $("#navBanner").hidden = false;
@@ -610,8 +638,7 @@ async function reroute(pt) {
   speak("Off route. Finding the safest way from here.");
   toast("Off route. Finding the safest way from here…");
   try {
-    const q = new URLSearchParams({ from: pt.join(","), to: state.to.join(","), at: whenParam(), mode: state.mode, extra: store.get("extra", "") });
-    const res = await api("/api/route?" + q, null, 60000);
+    const res = await api("/api/route?" + routeQuery(pt, whenParam(), t.nextStop), null, 60000);
     if (state.trip !== t) return;
     t.route = res.routes.find((x) => x.kind === state.sel) || res.routes[0];
     t.spoken = { start: 1 };
@@ -619,6 +646,30 @@ async function reroute(pt) {
     renderTrip();
     updateGuidance(pt);
   } catch (e) { toast(e.message); }
+}
+
+// Every few minutes while moving, re-score the way ahead for right now: shops shut, night falls, people report things.
+// If another way from here is now clearly safer than the rest of the current route, switch to it.
+const RECHECK_MS = 3 * 60000, SWITCH_BY = 10;
+async function recheck(pt) {
+  const t = state.trip;
+  t.lastRecheck = Date.now();
+  try {
+    const res = await api("/api/route?" + routeQuery(pt, isoLocal(new Date()), t.nextStop), null, 60000);
+    if (state.trip !== t) return;
+    // the current route from here is the scanned way that stays on it (nearly every point within 25 m)
+    const onRoute = (r) => r.coords.filter((c) => routeProgress(c, t.route.coords).off < 25).length >= 0.9 * r.coords.length;
+    const mine = res.routes.find(onRoute), best = res.routes[0];
+    if (!mine || mine === best || best.score < mine.score + SWITCH_BY) return;
+    t.route = best;
+    t.spoken = { start: 1 };
+    drawTripRoute();
+    renderTrip();
+    updateGuidance(pt);
+    speak("A safer way is available now. Switching your route.");
+    toast(`Safer way found: ${best.score} vs ${mine.score} on your route now`, 5000);
+    vibrate([200, 100, 200]);
+  } catch {}  // keep the current route; the next check tries again
 }
 
 // Demo: walk the route at 4x walking speed so the trip can be shown without GPS
@@ -691,6 +742,9 @@ function onTripPosition(pt) {
     api(`/api/trip/${t.id}`, { key: t.key, lat: pt[0], lon: pt[1] }).catch(() => {});
   }
   if (metres(pt, r.coords[r.coords.length - 1]) < 40) return endTrip(true, true);
+  const stop = state.stops.filter((s) => s.pt)[t.nextStop];
+  if (stop && metres(pt, stop.pt) < 40) { t.nextStop++; speak(`You've reached ${stop.label || "your stop"}.`); toast(`Reached ${stop.label || "your stop"}`); }
+  if (Date.now() - t.lastRecheck > RECHECK_MS) recheck(pt);
   t.offCount = p.off > 40 ? t.offCount + 1 : 0;
   if (t.offCount >= 3) { t.offCount = 0; reroute(pt); checkIn("You seem to have left your route."); }
   renderTrip();
@@ -1008,6 +1062,9 @@ function openSettings() {
     <div class="row"><label for="caller">Fake caller name</label><input id="caller" class="input" style="width:50%" maxlength="30" value="${esc(store.get("caller", "Mom"))}"></div>
     <div class="row"><span>Fake call</span><button class="btn" id="fakeIn10">Ring me in 10 s</button></div>
     <div class="row"><label for="extra">Consider routes up to</label>${sel("extra", store.get("extra", ""), [["", "Any reasonable detour"], [5, "5 min longer"], [10, "10 min longer"], [15, "15 min longer"], [20, "20 min longer"]])}</div>
+    <h3 style="font-size:16px;margin-top:6px">More of these on my way</h3>
+    ${Object.entries(PRIORITY).map(([k, l]) => `<div class="row prio-row"><label for="prio-${k}">${l} <span class="muted" id="prio-${k}-v"></span></label>
+      <input type="range" id="prio-${k}" data-prio="${k}" min="0" max="3" step="1" value="${store.get("prefer", {})[k] || 0}"></div>`).join("")}
     <div class="row"><label for="theme">Appearance</label>${sel("theme", store.get("theme", "system"), [["system", "Automatic"], ["light", "Light"], ["dark", "Dark"]])}</div>
     <div class="row"><span>Your data</span><button class="btn" id="wipe">Delete everything</button></div>
     <p class="muted">Your contacts and settings stay on this phone. Trip locations are deleted from the server when a trip ends, and 12 hours after it started at the latest. We never sell location data.</p>`);
@@ -1018,6 +1075,13 @@ function openSettings() {
   $("#buffer").onchange = (e) => store.set("buffer", +e.target.value);
   $("#theme").onchange = (e) => { store.set("theme", e.target.value); applyTheme(); setBaseMap(); };
   $("#extra").onchange = (e) => { store.set("extra", e.target.value); if (state.to) maybeRoute(); };
+  const LEVEL = ["Don't mind", "A little", "More", "Most"];
+  document.querySelectorAll("[data-prio]").forEach((input) => {
+    const show = () => { $(`#prio-${input.dataset.prio}-v`).textContent = LEVEL[input.value]; };
+    show();
+    input.oninput = show;
+    input.onchange = () => { store.set("prefer", { ...store.get("prefer", {}), [input.dataset.prio]: +input.value }); if (state.to && !state.trip) maybeRoute(); };
+  });
   $("#fakeIn10").onclick = () => { closeDrawer(); toast("Fake call in 10 seconds. You can lock your screen."); setTimeout(fakeCall, 10000); };
   $("#wipe").onclick = () => { if (confirm("Delete your contacts and settings from this phone?")) { try { Object.keys(localStorage).filter((k) => k.startsWith("sr.")).forEach((k) => localStorage.removeItem(k)); } catch {} location.reload(); } };
 }

@@ -95,3 +95,48 @@ test("friend's viewer follows a live trip and shows when it ends", async () => {
   await page.waitForSelector("text=Asha ended the trip");
   await ctx.close();
 });
+
+test("stops and priorities go with the route request", async () => {
+  const { ctx, page, errors } = await phone();
+  await routeToPharmacy(page);
+  await page.click("#settingsBtn");
+  await page.locator("#prio-pharmacy").fill("3");
+  await page.locator("#prio-pharmacy").dispatchEvent("change");
+  assert.match(await page.textContent("#prio-pharmacy-v"), /Most/);
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => document.querySelector("#drawer").hidden = true);
+  const asked = page.waitForRequest((r) => r.url().includes("/api/route?") && r.url().includes("via="), { timeout: 15000 });
+  await page.click("#addStopBtn");
+  await page.fill("[data-stop='0']", "city");
+  await page.click("#results li >> text=City Pharmacy");
+  const url = new URL((await asked).url());
+  assert.equal(url.searchParams.get("via"), "28.0007,77.0025");
+  assert.equal(url.searchParams.get("prefer"), "pharmacy:3");
+  await page.waitForSelector("#startBtn", { timeout: 15000 });
+  await page.click("[data-del-stop='0']");
+  assert.equal(await page.locator("[data-stop]").count(), 0);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("live trip switches when another way becomes clearly safer", async () => {
+  const { ctx, page, errors } = await phone();
+  await routeToPharmacy(page);
+  await page.click("#startBtn");
+  await page.waitForSelector("text=Sharing live");
+  const before = await page.evaluate(() => state.trip.route.coords);
+  // the next check finds the other way 50 points better than the rest of this one
+  await page.route("**/api/route?*", async (r) => {
+    const res = await (await r.fetch()).json();
+    const mine = res.routes.find((x) => JSON.stringify(x.coords) === JSON.stringify(before));
+    const other = res.routes.find((x) => JSON.stringify(x.coords) !== JSON.stringify(before));
+    mine.score = 40; other.score = 90;
+    res.routes = [other, ...res.routes.filter((x) => x !== other)];
+    r.fulfill({ json: res });
+  });
+  await page.evaluate(() => { state.trip.lastRecheck = 0; onPosition({ coords: { latitude: 28.0, longitude: 77.0 } }, true); });
+  await page.waitForSelector("text=Safer way found");
+  assert.notDeepEqual(await page.evaluate(() => state.trip.route.coords), before);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
