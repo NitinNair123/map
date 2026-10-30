@@ -96,7 +96,7 @@ and open the https link on the phone. Then use "Add to Home Screen".
   tiles as the fallback when a phone has no WebGL or the style can't load.
 - **Past crime, as background** (`python crime.py`, once a year): NCRB's district tables of crimes against women
   (India Data Portal mirror) and the district outlines from OpenStreetMap, saved to `data/crime/districts.json`.
-  The route card then shows the district's police-recorded cases of assault on women (IPC 354) and insulting a
+  Each route card then shows, for every district that route crosses, the police-recorded cases of assault on women (IPC 354) and insulting a
   woman's modesty (IPC 509) for the latest year. It never changes a score: the figures are yearly, district-wide,
   only count reported cases and say nothing about one street tonight. In Delhi they are per Delhi Police district.
 
