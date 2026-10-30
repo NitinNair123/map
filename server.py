@@ -418,8 +418,10 @@ class Handler(SimpleHTTPRequestHandler):
                 extra = max(0, int(q["extra"][0])) if q.get("extra", [""])[0] else None  # longest detour to consider, in minutes
                 area = store.for_trip(a, b)
                 traffic.LIVE.warm(traffic.sample(area, a, b) if traffic.is_now(when, time.time()) else [])
-                return self.send_json({"routes": area.routes(a, b, when, rain, mode, extra), "rain": rain,
-                                       "area": crime.around(CRIME, [a, b]), "sources": area.sources})
+                routes = area.routes(a, b, when, rain, mode, extra)
+                for r in routes:  # districts each route actually crosses, not just its two ends
+                    r["area"] = crime.around(CRIME, crime.along(r["coords"]))
+                return self.send_json({"routes": routes, "rain": rain, "area": crime.around(CRIME, [a, b]), "sources": area.sources})
             if u.path.startswith("/api/trip/"):
                 with lock:
                     expire_trips()

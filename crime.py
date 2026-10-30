@@ -130,5 +130,10 @@ def around(data, pts):
     return out
 
 
+def along(coords, every=20):
+    """Every 20th point plus the end: districts are kilometres wide, so this misses none worth naming."""
+    return coords[::every] + coords[-1:]
+
+
 if __name__ == "__main__":
     fetch()
