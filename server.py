@@ -1,5 +1,6 @@
 """Website, app and JSON API. Usage: python server.py [port]"""
 import csv
+import functools
 import importlib.util
 import ipaddress
 import json
@@ -21,12 +22,13 @@ from urllib.request import Request, urlopen
 
 import buses
 import crime
+import gemini
 import gtfs
 import traffic
 from import_osm import search as offline_search
 from rating import REPORT_TYPES
 from reports import Reports
-from safety import MODES, dist
+from safety import MODES, dist, seg_dist
 from tiles import (TileStore, TooFar, geoapify, mapillary, nightlights, overture_buildings, overture_places, overture_roads, tiles_near,
                    warm_overture)
 
@@ -107,6 +109,8 @@ if buses.LIVE.key:
 traffic.LIVE.key = key_file("tomtom_key.txt", "TOMTOM_KEY")  # free key from developer.tomtom.com
 print("Live buses:", "on (counts start after 30 min)" if buses.LIVE.key else "off (no key in data/otd_key.txt)", flush=True)
 print("Live traffic:", "on" if traffic.LIVE.key else "off (no key in data/tomtom_key.txt)", flush=True)
+gemini.LIVE = gemini.Gemini(key_file("gemini_key.txt", "GEMINI_KEY"), os.path.join(DATA_DIR, "gemini_hours.json"))
+print("Gemini shop hours and live events:", "on" if gemini.LIVE.key else "off (no key in data/gemini_key.txt)", flush=True)
 SURVEY = load_csv(SURVEY_PATH, REPORT_TYPES, source="Street survey")
 STOPS = gtfs.load(GTFS_DIR)
 print(f"Street survey: {len(SURVEY)} observations. Timetables: {len(STOPS)} stops (put GTFS zips in data/gtfs).", flush=True)
@@ -278,6 +282,41 @@ def rank(q, near, found, limit=8):
     return out[:limit]
 
 
+@functools.lru_cache(512)
+def place_name(pt):
+    """"Connaught Place, New Delhi" style name for a point (rounded to ~100 m), for Gemini prompts."""
+    try:
+        hit = photon_get("reverse", {"lat": pt[0], "lon": pt[1], "limit": 1, "lang": "en"})
+        return f"{hit[0]['name']}, {hit[0]['kind']}" if hit else f"{pt[0]:.4f},{pt[1]:.4f}"
+    except (OSError, ValueError, KeyError):
+        return f"{pt[0]:.4f},{pt[1]:.4f}"
+
+
+def ai_extras(area, a, b, when):
+    """Gemini opening hours for places along the trip and live event alerts near it; [] without a key."""
+    if not gemini.LIVE.key:
+        return []
+    where = f"{place_name((round(a[0], 3), round(a[1], 3)))} to {place_name((round(b[0], 3), round(b[1], 3)))}"
+    mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+
+    def locate(q):
+        hit = next((h for h in geocode(q, mid) if not h.get("big")), None)
+        return hit["pt"] if hit and seg_dist(hit["pt"], a, b) <= 3000 else None  # far away means it matched the wrong place
+
+    with ThreadPoolExecutor(2) as ex:
+        jobs = [ex.submit(gemini.LIVE.fill_hours, area, lambda p: seg_dist(p, a, b) <= 300, where),
+                ex.submit(gemini.LIVE.find_events, a, b, when, where, locate)]
+    try:
+        jobs[0].result()
+        alerts = jobs[1].result()
+    except Exception:  # a bonus: a bug here must not cost the trip
+        traceback.print_exc()
+        return []
+    if any(h["local"] for h in alerts):
+        area._cache.clear()  # re-rate so the alerts count
+    return alerts
+
+
 def expire_trips():
     now = time.time()
     for k in [k for k, t in trips.items() if now - t["started"] > TRIP_TTL or t["ended"] and now - t["updated"] > ENDED_TTL]:
@@ -418,7 +457,8 @@ class Handler(SimpleHTTPRequestHandler):
                 extra = max(0, int(q["extra"][0])) if q.get("extra", [""])[0] else None  # longest detour to consider, in minutes
                 area = store.for_trip(a, b)
                 traffic.LIVE.warm(traffic.sample(area, a, b) if traffic.is_now(when, time.time()) else [])
-                return self.send_json({"routes": area.routes(a, b, when, rain, mode, extra), "rain": rain,
+                alerts = ai_extras(area, a, b, when)
+                return self.send_json({"routes": area.routes(a, b, when, rain, mode, extra), "rain": rain, "alerts": alerts,
                                        "area": crime.around(CRIME, [a, b]), "sources": area.sources})
             if u.path.startswith("/api/trip/"):
                 with lock:

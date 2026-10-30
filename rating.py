@@ -7,6 +7,7 @@ import time
 from collections import defaultdict
 
 import buses
+import gemini
 import traffic
 
 # (full daylight, full dark) weight per factor; each column sums to 100. Twilight blends the two.
@@ -150,7 +151,8 @@ def factors(area, e, when, light, now=None):
     places = near["place"] + near["haven"]
     known = [o for o in (area.is_place_open(area.pois[i], when) for i in places) if o is not None]
     if known:
-        activity.append((min(1, sum(known) / 3), QUALITY["hours"], "Opening hours (OpenStreetMap)"))
+        ai = any(area.pois[i].get("ai_hours") for i in places)
+        activity.append((min(1, sum(known) / 3), QUALITY["hours"], "Opening hours (OpenStreetMap, some found by Gemini)" if ai else "Opening hours (OpenStreetMap)"))
     served = [area.stops[i]["deps"][when.weekday()][when.hour] for i in e.get("stops", ())]
     if served:
         activity.append((min(1, sum(served) / 6), QUALITY["gtfs"], "Bus and metro timetables"))
@@ -232,6 +234,7 @@ def rate(area, e, when, light, rain=False, now=None, mode="walk"):
         gap = abs(i["hour"] - when.hour)
         hits += 25 * INCIDENT_SEVERITY.get(i["type"], 0.5) * 0.5 ** ((now - i["ts"]) / 86400 / 180) * (1.0 if min(gap, 24 - gap) <= 2 else 0.4)
     s -= min(35, hits)
+    s -= gemini.LIVE.penalty(e["mid"], when)  # barricades or a VIP convoy reported on this street around then
     return max(0.0, min(100.0, s)), confidence, feats
 
 

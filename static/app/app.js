@@ -296,7 +296,7 @@ async function maybeRoute() {
     const q = new URLSearchParams({ from: from.join(","), to: state.to.join(","), at: whenParam(), mode: state.mode, extra: store.get("extra", "") });
     const res = await api("/api/route?" + q);
     if (seq !== routeSeq) return; // the user picked something else meanwhile
-    state.routes = res.routes; state.rain = res.rain; state.area = res.area || []; state.routeFrom = from; state.sources = res.sources || {};
+    state.routes = res.routes; state.rain = res.rain; state.area = res.area || []; state.alerts = res.alerts || []; state.routeFrom = from; state.sources = res.sources || {};
     state.sel = "safest";
     renderRoutes();
     drawRoutes(true);  // after the sheet is drawn, so the route is fitted into the map left above it
@@ -325,6 +325,7 @@ function drawRoutes(fit) {
       drawPlaces(r);
     }
   }
+  (state.alerts || []).forEach((h) => L.circle(h.pt, { radius: h.r, color: COLOR.bad, weight: 1, fillOpacity: 0.12, interactive: false }).addTo(routeLayer));
   if (fit) {
     const all = state.routes.filter(isMain).flatMap((r) => r.coords);
     const desk = innerWidth >= 900; // keep the route clear of the search card and the sheet
@@ -408,6 +409,7 @@ function renderRoutes() {
   if (r.confidence_level === "none") notes.push(["", "There isn't enough real data on these streets to rate this route yet. Grey dashes mark the unrated parts. Reports and the street survey fill this in."]);
   else if (r.unrated_pct >= 10) notes.push(["", `${r.unrated_pct}% of this route is too thinly mapped to rate. It's shown in grey dashes, and those streets earn no points, which pulls the score down.`]);
   if (state.rain) notes.push(["", "It's raining, so streets may be emptier than usual."]);
+  for (const h of state.alerts || []) notes.push(["", `Reported near ${h.place}: ${h.what}${h.source ? ` (${h.source})` : ""}. Found by Gemini from news, so check before you go.${h.local ? " Routes avoid it where they can." : ""}`]);
   if (r.weakest && r.weakest.score < 45) notes.push(["", `Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because of ${r.weakest.why.toLowerCase()}. It's dashed on the map.`]);
   const unknown = (r.places || []).filter((pl) => pl.open === null).length;
   if (unknown) notes.push(["info", `Faded pins on the map are ${unknown} places with no published hours, so we can't say if they're open. Bright pins are open when you pass. Tap "Report" and "Shops open now" to fix that for everyone.`]);
