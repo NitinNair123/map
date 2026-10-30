@@ -24,7 +24,7 @@ routes. With `pip install pyarrow` the streets come from Overture Maps (OSM plus
 area). OSM detail such as lamps, `lit` tags and opening hours then loads from Overpass in the background
 and is used from the next trip. Without pyarrow, everything comes from Overpass, which can take minutes. It fetches the area as about 1 km tiles along the trip, in one or two
 requests, and caches them in `data/tiles/` for 7 days (Overture and Mapillary 30 days; Mapillary loads in the background). It tries three Overpass mirrors in turn, so one busy
-server doesn't break a trip. Place search uses the offline index first, then Photon (komoot), and walks are capped at 10 km.
+server doesn't break a trip. Place search uses the offline index first, then Photon (komoot), and trips are capped at 50 km.
 
 Run the tests with `python -m unittest test_safety test_server` (scoring, routing and every API endpoint, offline).
 The browser tests drive the app on a phone-sized screen against `fixture_server.py`:

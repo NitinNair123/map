@@ -27,8 +27,9 @@ LAYERS = {  # data/layers/<name>.csv (lat,lon[,name]) from official lists or RTI
     "streetlights": {"highway": "street_lamp"}, "cctv": {"man_made": "surveillance"}, "police": {"amenity": "police"},
     "hospitals": {"amenity": "hospital"}, "blackspots": {"hazard": "blackspot"}, "waterlogging": {"hazard": "waterlogging"},
 }
-MAX_TRIP_M = 10000
-MAX_TILES = 300  # a 10 km trip needs about 90 tiles in Delhi; more is a request that would download a whole region
+MAX_TRIP_M = 50000  # covers Delhi NCR end to end
+MAX_TRIP_PAD_M = 2500  # detour room either side of the line; capped so tiles grow with trip length, not its square
+MAX_TILES = 400  # a 50 km diagonal trip needs about 330 tiles; more is a request that would download a whole region
 MIRRORS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -532,7 +533,8 @@ class TileStore:
             # newer data arrived while building, or Overture was down: don't cache, rebuild next time
             if version == self.version and roads == bool(self.roads):
                 self.areas[key] = area
-                while len(self.areas) > self.cache_size:
+                # also cap cached tiles in total, so a few long trips can't hold several big street graphs in memory
+                while len(self.areas) > 1 and (len(self.areas) > self.cache_size or sum(map(len, self.areas)) > MAX_TILES):
                     self.areas.popitem(last=False)
         # slow sources start only now, so when they finish they can drop this cached area and the next trip rebuilds it
         for name in self._background - {main}:
@@ -553,7 +555,7 @@ class TileStore:
         d = dist(a, b)
         if d > MAX_TRIP_M:
             raise TooFar(f"That's {d / 1000:.0f} km in a straight line. SafeRoute plans trips up to {MAX_TRIP_M // 1000} km.")
-        return self.area(tiles_near(a, b, max(400, 0.25 * d)))
+        return self.area(tiles_near(a, b, max(400, min(0.25 * d, MAX_TRIP_PAD_M))))
 
     def around(self, pt, radius_m=500):
         return self.area(tiles_near(pt, pt, radius_m))

@@ -77,7 +77,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.call("/api/trip", [1, 2])[0], 400)
 
     def test_far_walk_and_map_service_down(self):
-        self.assertIn("up to 10 km", self.call("/api/route?from=28,77&to=28.5,77")[1]["error"])
+        self.assertIn("up to 50 km", self.call("/api/route?from=28,77&to=28.5,77")[1]["error"])
         def down(*a):
             raise ConnectionError("Map data servers are busy, please try again in a minute")
         with mock.patch.object(server, "store", TileStore(tempfile.mkdtemp(), fetch=down)):
@@ -137,7 +137,7 @@ class ServerTest(unittest.TestCase):
     def test_huge_areas_and_negative_detours_are_refused(self):
         self.assertEqual(self.call("/api/havens?near=89.99,0")[0], 400)
         with self.assertRaises(TooFar):  # a request spanning a whole region would download all of it
-            server.store.area({(i, 0) for i in range(301)})
+            server.store.area({(i, 0) for i in range(401)})
         self.assertEqual(self.call(f"/api/route?from={A[0]},{A[1]}&to={B[0]},{B[1]}&extra=-5")[0], 200)
 
     def test_bad_lengths_and_values(self):
