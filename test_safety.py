@@ -6,8 +6,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 import rating
-from safety import classify, Area, daylight, is_open
-from tiles import TILE, TileStore, TooFar, png_pixels, tiles_near
+from safety import classify, Area, daylight, dist, is_open
+from tiles import MAX_TILES, MAX_TRIP_M, MAX_TRIP_PAD_M, TILE, TileStore, TooFar, png_pixels, tiles_near
 
 IST = timezone(timedelta(hours=5, minutes=30))
 NIGHT, LATE, NOON = (datetime(2026, 10, 25, h, 0, tzinfo=IST) for h in (22, 2, 12))
@@ -179,6 +179,11 @@ class TileTest(unittest.TestCase):
     def test_too_far(self):
         with self.assertRaises(TooFar):
             self.store.for_trip(A, (28.5, 77.5))
+
+    def test_longest_trip_fits_the_tile_cap(self):
+        a, b = (28.4, 77.0), (28.72, 77.35)  # just under 50 km, diagonal
+        self.assertLess(dist(a, b), MAX_TRIP_M)
+        self.assertLessEqual(len(tiles_near(a, b, MAX_TRIP_PAD_M)), MAX_TILES)
 
     def test_tiles_follow_the_line(self):
         diag = tiles_near((28.0, 77.0), (28.1, 77.1), 800)
