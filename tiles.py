@@ -447,7 +447,7 @@ class TileStore:
                 print(f"{source} {box}: failed ({err})", flush=True)  # an optional source being down must not block trips
                 return
             write_tiles(self.folder, osm["elements"], tiles, source)
-        if source in self._background:
+        if source in self._background or source in self.extras:
             with self.lock:  # rebuild cached areas so the next trip sees the new data
                 self.version += 1
                 for key in [k for k in self.areas if k & set(tiles)]:
@@ -486,9 +486,11 @@ class TileStore:
                 self.areas.move_to_end(key)
                 return self.areas[key]
         # imported OSM streets when the whole area is imported; otherwise one street source for every tile, so the network stays connected
-        main = "" if key <= self.extracted else self._main
+        imported = key <= self.extracted
+        main = "" if imported else self._main
+        slow = self._background | (set(self.extras) if imported else set())  # imported OSM already has shops, so extras can wait
         jobs = [(c, main) for c in self._missing(key, main)]
-        jobs += [(c, name) for name in self.extras if name not in self.background for c in self._missing(key, name)]
+        jobs += [(c, name) for name in self.extras if name not in slow for c in self._missing(key, name)]
         roads = main == "roads"
         try:
             with ThreadPoolExecutor(3 if roads else 2) as ex:  # Overpass allows about 2 requests at once per IP
@@ -537,7 +539,7 @@ class TileStore:
                 while len(self.areas) > 1 and (len(self.areas) > self.cache_size or sum(map(len, self.areas)) > MAX_TILES):
                     self.areas.popitem(last=False)
         # slow sources start only now, so when they finish they can drop this cached area and the next trip rebuilds it
-        for name in self._background - {main}:
+        for name in slow - {main}:
             for c in self._missing(key, name):
                 self.pool.submit(self._fetch_chunk, c, name)
         return area
