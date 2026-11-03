@@ -871,7 +871,7 @@ async function alertContacts(medical = false) {
   const med = store.get("medical", {});
   const facts = MEDICAL.filter(([k]) => med[k]).map(([k, l]) => `${l}: ${med[k]}.`).join(" ");
   const body = medical
-    ? await reword(`Medical emergency: ${who} needs an ambulance. ${facts} ${where}`.replace(/\s+/g, " ").trim())
+    ? await reword(`Medical emergency: ${who === "me" ? "I need" : who + " needs"} an ambulance. ${facts} ${where}`.replace(/\s+/g, " ").trim())
     : `SOS from ${who}: I need help. ${where}`.trim();
   // a web page can't send a text or call by itself: it opens the messages app or share sheet, and the user presses Send
   $("#sosTitle").textContent = contacts.length ? "Press Send in your messages app" : "Choose who to send it to";

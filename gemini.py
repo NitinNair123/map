@@ -46,7 +46,7 @@ class Gemini:
             with open(path) as f:
                 self.hours = json.load(f)
 
-    def ask(self, prompt, max_tokens):
+    def ask(self, prompt, max_tokens, timeout=15):
         """Parsed JSON from one grounded call, or None. Counts against the daily cap."""
         now = time.time()
         with self.lock:
@@ -58,7 +58,7 @@ class Gemini:
                 "generationConfig": {"temperature": 0, "maxOutputTokens": max_tokens, "thinkingConfig": {"thinkingBudget": 0}}}
         req = urllib.request.Request(URL, json.dumps(body).encode(), {"Content-Type": "application/json", "x-goog-api-key": self.key})
         try:
-            with urllib.request.urlopen(req, timeout=15) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 parts = (json.load(r).get("candidates") or [{}])[0].get("content", {}).get("parts", [])
         except Exception as err:  # a bonus: never break a trip
             print("Gemini:", type(err).__name__, flush=True)
@@ -92,7 +92,7 @@ class Gemini:
 Lines are index|name|type.
 {lines}
 Reply with only a JSON object mapping each index to OpenStreetMap opening_hours, like {{"0":"Mo-Sa 10:00-21:00; Su 11:00-20:00"}}.
-Use "" only if you can't find the place.""", 60 * len(todo) + 100)
+Use "" only if you can't find the place.""", 60 * len(todo) + 100, timeout=120)  # a grounded batch of 15 took 67 s
             if isinstance(ans, dict):  # a failed or garbled call is not cached, so it is asked again next time
                 for i, p in enumerate(todo):
                     oh = str(ans.get(str(i)) or "").strip()

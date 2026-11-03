@@ -15,7 +15,7 @@ import threading
 import time
 import traceback
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -24,6 +24,7 @@ from urllib.request import Request, urlopen
 import buses
 import crime
 import gemini
+import places
 import gtfs
 import traffic
 from import_osm import search as offline_search
@@ -113,6 +114,8 @@ print("Live traffic:", "on" if traffic.LIVE.key else "off (no key in data/tomtom
 gemini.LIVE = gemini.Gemini(key_file("gemini_key.txt", "GEMINI_KEY"), os.path.join(DATA_DIR, "gemini_hours.json"))
 SIGNALS.append(gemini.signal)
 print("Gemini shop hours and live events:", "on" if gemini.LIVE.key else "off (no key in data/gemini_key.txt)", flush=True)
+places.LIVE = places.Places(key_file("google_places_key.txt", "GOOGLE_PLACES_KEY"), os.path.join(DATA_DIR, "places_hours.json"))
+print("Google Places shop hours:", "on" if places.LIVE.key else "off (no key in data/google_places_key.txt)", flush=True)
 SURVEY = load_csv(SURVEY_PATH, REPORT_TYPES, source="Street survey")
 STOPS = gtfs.load(GTFS_DIR)
 print(f"Street survey: {len(SURVEY)} observations. Timetables: {len(STOPS)} stops (put GTFS zips in data/gtfs).", flush=True)
@@ -294,6 +297,9 @@ def place_name(pt):
         return f"{pt[0]:.4f},{pt[1]:.4f}"
 
 
+HOURS_JOBS = ThreadPoolExecutor(1)
+
+
 def ai_extras(area, stops, when):
     """Gemini opening hours for places along the trip (start, stops, end) and live event alerts near it; [] without a key."""
     if not gemini.LIVE.key:
@@ -307,15 +313,15 @@ def ai_extras(area, stops, when):
         hit = next((h for h in geocode(q, ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)) if not h.get("big")), None)
         return hit["pt"] if hit and near(hit["pt"], 3000) else None  # far away means it matched the wrong place
 
-    with ThreadPoolExecutor(2) as ex:
-        jobs = [ex.submit(gemini.LIVE.fill_hours, area, lambda p: near(p, 300), where),
-                ex.submit(gemini.LIVE.find_events, a, b, when, where, locate)]
+    # a new street's hours take Gemini about a minute: the trip doesn't wait (cached hours apply at once), later trips get them
+    hours = HOURS_JOBS.submit(gemini.LIVE.fill_hours, area, lambda p: near(p, 300), where)
     try:
-        jobs[0].result()
-        return jobs[1].result()
+        alerts = gemini.LIVE.find_events(a, b, when, where, locate)
+        wait([hours], timeout=2)
     except Exception:  # a bonus: a bug here must not cost the trip
         traceback.print_exc()
         return []
+    return alerts
 
 
 def expire_trips():
@@ -484,6 +490,10 @@ class Handler(SimpleHTTPRequestHandler):
                 traffic.LIVE.warm(traffic.sample(area, a, b) if traffic.is_now(when, time.time()) else [])
                 alerts = ai_extras(area, [a, *via, b], when)
                 routes = area.routes(a, b, when, rain, mode, extra, via, prefer)
+                # Google hours for the shops these routes actually pass; new hours change the scores, so score again
+                pts = [c for r in routes[:3] for c in r["coords"][::4]]  # safest, balanced, fastest: the ones people pick
+                if places.LIVE.fill_hours(area, lambda p: any(dist(p, c) <= 80 for c in pts)):
+                    routes = area.routes(a, b, when, rain, mode, extra, via, prefer)
                 for r in routes:  # the districts each route passes through, as background only (never scored)
                     r["area"] = crime.around(CRIME, crime.along(r["coords"]))
                 return self.send_json({"routes": routes, "rain": rain, "alerts": alerts, "sources": area.sources})
