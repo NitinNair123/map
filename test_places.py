@@ -10,18 +10,18 @@ def poi(name, pt=(28.6315, 77.2167), hours=None, group="food", named=True):
     return {"name": name, "pt": pt, "hours": hours, "group": group, "named": named}
 
 
-def hit(lat=28.6315, lon=77.2167, periods=None):
-    return {"location": {"latitude": lat, "longitude": lon}, "regularOpeningHours": {"periods": periods or []}}
+def hit(lat=28.6315, lon=77.2167, periods=None, name="Wenger's"):
+    return {"displayName": {"text": name}, "location": {"latitude": lat, "longitude": lon}, "regularOpeningHours": {"periods": periods or []}}
 
 
 class Fake(places.Places):
-    def __init__(self, *answers):
+    def __init__(self, **answers):
         super().__init__("key")
-        self.answers, self.asked = list(answers), []
+        self.answers, self.asked = answers, []  # name -> list of replies, one per call (calls run in parallel)
 
     def search(self, p):
         self.asked.append(p["name"])
-        return self.answers.pop(0)
+        return (self.answers.get(p["name"]) or [None]).pop(0)
 
 
 P = lambda d, oh, om, cd, ch, cm=0: {"open": {"day": d, "hour": oh, "minute": om}, "close": {"day": cd, "hour": ch, "minute": cm}}
@@ -42,18 +42,41 @@ class TestPlaces(unittest.TestCase):
         self.assertEqual(places.Places().fill_hours(area, lambda p: True), 0)
 
     def test_fills_only_named_untimed_nearby_places_and_rejects_far_matches(self):
-        g = Fake(hit(periods=[P(1, 10, 0, 1, 22)]), hit(lat=28.64))  # second match is ~1 km away
+        g = Fake(**{"Wenger's": [hit(periods=[P(1, 10, 0, 1, 22)])], "Saravana Bhavan": [hit(lat=28.64)]})  # ~1 km away
         pois = [poi("Wenger's"), poi("Saravana Bhavan"), poi("Has hours", hours="24/7"), poi("shop", named=False),
                 poi("Far away", pt=(28.7, 77.3)), poi("Bus stop", group="transit")]
         area = SimpleNamespace(pois=pois, _cache={"old": 1})
         self.assertEqual(g.fill_hours(area, lambda p: p[0] < 28.65), 1)
-        self.assertEqual(g.asked, ["Wenger's", "Saravana Bhavan"])
+        self.assertEqual(sorted(g.asked), ["Saravana Bhavan", "Wenger's"])
         self.assertEqual((pois[0]["hours"], pois[0]["google_hours"]), ("Mo 10:00-22:00", True))
         self.assertIsNone(pois[1]["hours"])
         self.assertEqual(area._cache, {})
 
+    def test_a_different_business_nearby_is_not_used(self):
+        self.assertTrue(places.same_name("Cottage Emporium", "Central Cottage Industries Emporium"))
+        self.assertFalse(places.same_name("Nepal Excursions", "Hotel Alka Premier"))
+        g = Fake(**{"Wenger's": [hit(periods=[P(1, 10, 0, 1, 22)], name="Hotel Alka")]})
+        self.assertEqual(g.lookup(poi("Wenger's")), "")
+
+    def test_quota_exhausted_stops_calls_for_the_day(self):
+        import urllib.error
+        from unittest import mock
+        g = places.Places("key")
+        err = urllib.error.HTTPError(places.URL, 429, "Too Many Requests", {}, None)
+        with mock.patch.object(places.urllib.request, "urlopen", mock.Mock(side_effect=err)) as call:
+            self.assertIsNone(g.search(poi("Wenger's")))
+            self.assertIsNone(g.search(poi("Wenger's")))
+        self.assertEqual(call.call_count, 1)
+
+    def test_calls_are_spread_along_the_trip(self):
+        g = Fake()
+        pois = [poi(f"Shop {i}", pt=(28.6 + i * 0.001, 77.2167)) for i in range(40)]
+        g.fill_hours(SimpleNamespace(pois=pois, _cache={}), lambda p: True)
+        got = sorted(int(n[5:]) for n in g.asked)
+        self.assertEqual((len(got), len(set(got)), got[0], got[-1] >= 35), (15, 15, 0, True))  # 15 calls from one end to the other
+
     def test_cache_is_reused_and_failed_calls_are_retried(self):
-        g = Fake(None, hit(periods=[P(1, 10, 0, 1, 22)]))
+        g = Fake(**{"Wenger's": [None, hit(periods=[P(1, 10, 0, 1, 22)])]})
         area = lambda: SimpleNamespace(pois=[poi("Wenger's")], _cache={})
         self.assertEqual(g.fill_hours(area(), lambda p: True), 0)  # call failed: not cached
         self.assertEqual(g.fill_hours(area(), lambda p: True), 1)

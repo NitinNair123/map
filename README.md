@@ -92,7 +92,7 @@ and open the https link on the phone. Then use "Add to Home Screen".
   ones within 400 m take 20 points off those streets around that time, wider ones only show a warning. At most 300 calls a day.
 - **Google Places hours** (key from Google Cloud with the Places API (New) on, in `data/google_places_key.txt` or
   `GOOGLE_PLACES_KEY`; it stays on the server): named shops near a trip with no opening hours in OpenStreetMap are
-  looked up first, one Text Search each (at most 15 a trip, 300 a day), used only when Google's match is within 150 m,
+  looked up first, one Text Search each (at most 15 a trip, spread along it, 300 a day), limited to 150 m around the place and used only when the names share a word,
   and kept in `data/places_hours.json` for 30 days. Gemini then guesses only the ones Google didn't know. Google data
   only feeds the score and is never drawn on the map; its terms limit caching, so shorten that before a real launch.
 - **SOS ambulance alert**: "Ambulance alert with my medical info" on the SOS screen. With the Gemini key above, the

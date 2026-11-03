@@ -6,6 +6,7 @@ Nothing from Google is drawn on the map; it only feeds the "places open" part of
 """
 import json
 import os
+import re
 import threading
 import time
 import urllib.request
@@ -35,6 +36,12 @@ def to_osm(periods):
     return "; ".join(f"{DAYS[d]} {','.join(h)}" for d, h in sorted(days.items()))
 
 
+def same_name(a, b):
+    """Share a real word: the search box can return whatever business is nearest when the name isn't there."""
+    words = lambda s: {w for w in re.findall(r"\w+", s.lower()) if len(w) > 2}
+    return bool(words(a) & words(b))
+
+
 class Places:
     def __init__(self, key="", path=None):
         self.key = key
@@ -54,15 +61,21 @@ class Places:
             if not self.key or len(self.calls) >= DAILY_CAP:
                 return None
             self.calls.append(now)
+        # a restriction, not a bias: a bias still returns the same name across town
+        d = MATCH_M / 111000
         body = {"textQuery": p["name"], "maxResultCount": 1,
-                "locationBias": {"circle": {"center": {"latitude": p["pt"][0], "longitude": p["pt"][1]}, "radius": float(MATCH_M)}}}
+                "locationRestriction": {"rectangle": {"low": {"latitude": p["pt"][0] - d, "longitude": p["pt"][1] - d},
+                                                      "high": {"latitude": p["pt"][0] + d, "longitude": p["pt"][1] + d}}}}
         req = urllib.request.Request(URL, json.dumps(body).encode(),
                                      {"Content-Type": "application/json", "X-Goog-Api-Key": self.key, "X-Goog-FieldMask": FIELDS})
         try:
             with urllib.request.urlopen(req, timeout=8) as r:
                 return (json.load(r).get("places") or [{}])[0]
         except Exception as err:  # a bonus: never break a trip
-            print("Google Places:", type(err).__name__, flush=True)
+            print("Google Places:", type(err).__name__, getattr(err, "code", ""), flush=True)
+            if getattr(err, "code", 0) == 429:  # the Google project's own daily quota is spent: stop asking for a day
+                with self.lock:
+                    self.calls = [now] * DAILY_CAP
             return None
 
     def lookup(self, p):
@@ -71,7 +84,7 @@ class Places:
         if hit is None:
             return None
         loc = hit.get("location") or {}
-        if not loc or dist(p["pt"], (loc["latitude"], loc["longitude"])) > MATCH_M:
+        if not loc or dist(p["pt"], (loc["latitude"], loc["longitude"])) > MATCH_M or not same_name(p["name"], (hit.get("displayName") or {}).get("text", "")):
             return ""
         return to_osm((hit.get("regularOpeningHours") or {}).get("periods"))
 
@@ -92,8 +105,10 @@ class Places:
                 if got[0]:
                     p["hours"], p["google_hours"] = got[0], True
                     filled += 1
-            elif len(todo) < MAX_PLACES:
+            else:
                 todo.append(p)
+        # spread the calls along the trip: the first 15 in map order all sit at one end of it
+        todo = [todo[i * len(todo) // MAX_PLACES] for i in range(MAX_PLACES)] if len(todo) > MAX_PLACES else todo
         with ThreadPoolExecutor(5) as pool:
             answers = list(pool.map(self.lookup, todo))
         for p, oh in zip(todo, answers):
