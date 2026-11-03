@@ -1,30 +1,37 @@
 import unittest
+import urllib.error
+from datetime import datetime
 from types import SimpleNamespace
+from unittest import mock
 
 import places
 from safety import is_open
-from datetime import datetime
 
 
 def poi(name, pt=(28.6315, 77.2167), hours=None, group="food", named=True):
     return {"name": name, "pt": pt, "hours": hours, "group": group, "named": named}
 
 
-def hit(lat=28.6315, lon=77.2167, periods=None, name="Wenger's"):
+def hit(name, lat=28.6315, lon=77.2167, periods=None):
     return {"displayName": {"text": name}, "location": {"latitude": lat, "longitude": lon}, "regularOpeningHours": {"periods": periods or []}}
 
 
 class Fake(places.Places):
-    def __init__(self, **answers):
+    """Answers every circle with the same Google places, or with None (a failed call) while fail > 0."""
+    def __init__(self, found, fail=0):
         super().__init__("key")
-        self.answers, self.asked = answers, []  # name -> list of replies, one per call (calls run in parallel)
+        self.found, self.fail, self.centers = found, fail, []
 
-    def search(self, p):
-        self.asked.append(p["name"])
-        return (self.answers.get(p["name"]) or [None]).pop(0)
+    def nearby(self, center):
+        self.centers.append(center)
+        if self.fail:
+            self.fail -= 1
+            return None
+        return self.found
 
 
 P = lambda d, oh, om, cd, ch, cm=0: {"open": {"day": d, "hour": oh, "minute": om}, "close": {"day": cd, "hour": ch, "minute": cm}}
+WEEKDAYS = [P(1, 10, 0, 1, 22)]
 
 
 class TestPlaces(unittest.TestCase):
@@ -37,51 +44,61 @@ class TestPlaces(unittest.TestCase):
         self.assertEqual(places.to_osm([{"open": {"day": 0, "hour": 0, "minute": 0}}]), "24/7")
         self.assertEqual(places.to_osm(None), "")
 
+    def test_same_name(self):
+        self.assertTrue(places.same_name("Cottage Emporium", "Central Cottage Industries Emporium"))
+        self.assertFalse(places.same_name("Nepal Excursions", "Hotel Alka Premier"))
+
     def test_no_key_does_nothing(self):
         area = SimpleNamespace(pois=[poi("Wenger's")], _cache={})
         self.assertEqual(places.Places().fill_hours(area, lambda p: True), 0)
 
-    def test_fills_only_named_untimed_nearby_places_and_rejects_far_matches(self):
-        g = Fake(**{"Wenger's": [hit(periods=[P(1, 10, 0, 1, 22)])], "Saravana Bhavan": [hit(lat=28.64)]})  # ~1 km away
-        pois = [poi("Wenger's"), poi("Saravana Bhavan"), poi("Has hours", hours="24/7"), poi("shop", named=False),
-                poi("Far away", pt=(28.7, 77.3)), poi("Bus stop", group="transit")]
+    def test_one_call_answers_every_place_in_its_circle(self):
+        g = Fake([hit("Wenger's", periods=WEEKDAYS), hit("Saravana Bhavan Restaurant", lat=28.6318, periods=WEEKDAYS),
+                  hit("Hotel Alka", lat=28.6316, periods=WEEKDAYS)])
+        pois = [poi("Wenger's"), poi("Saravana Bhavan", pt=(28.6317, 77.2167)), poi("Kwality", pt=(28.6316, 77.2168)),
+                poi("Has hours", hours="24/7"), poi("shop", named=False), poi("Far away", pt=(28.7, 77.3)), poi("Bus stop", group="transit")]
         area = SimpleNamespace(pois=pois, _cache={"old": 1})
-        self.assertEqual(g.fill_hours(area, lambda p: p[0] < 28.65), 1)
-        self.assertEqual(sorted(g.asked), ["Saravana Bhavan", "Wenger's"])
+        self.assertEqual(g.fill_hours(area, lambda p: p[0] < 28.65), 2)
+        self.assertEqual(len(g.centers), 1)
         self.assertEqual((pois[0]["hours"], pois[0]["google_hours"]), ("Mo 10:00-22:00", True))
-        self.assertIsNone(pois[1]["hours"])
+        self.assertEqual(pois[1]["hours"], "Mo 10:00-22:00")
+        self.assertIsNone(pois[2]["hours"], "Kwality isn't in Google's answer; Hotel Alka next door doesn't count")
+        self.assertEqual(g.hours["Kwality|28.6316|77.2168"][0], "")
         self.assertEqual(area._cache, {})
 
-    def test_a_different_business_nearby_is_not_used(self):
-        self.assertTrue(places.same_name("Cottage Emporium", "Central Cottage Industries Emporium"))
-        self.assertFalse(places.same_name("Nepal Excursions", "Hotel Alka Premier"))
-        g = Fake(**{"Wenger's": [hit(periods=[P(1, 10, 0, 1, 22)], name="Hotel Alka")]})
-        self.assertEqual(g.lookup(poi("Wenger's")), "")
-
-    def test_quota_exhausted_stops_calls_for_the_day(self):
-        import urllib.error
-        from unittest import mock
-        g = places.Places("key")
-        err = urllib.error.HTTPError(places.URL, 429, "Too Many Requests", {}, None)
-        with mock.patch.object(places.urllib.request, "urlopen", mock.Mock(side_effect=err)) as call:
-            self.assertIsNone(g.search(poi("Wenger's")))
-            self.assertIsNone(g.search(poi("Wenger's")))
-        self.assertEqual(call.call_count, 1)
-
-    def test_calls_are_spread_along_the_trip(self):
-        g = Fake()
-        pois = [poi(f"Shop {i}", pt=(28.6 + i * 0.001, 77.2167)) for i in range(40)]
+    def test_a_far_match_is_not_used(self):
+        g = Fake([hit("Wenger's", lat=28.6325, periods=WEEKDAYS)])  # ~110 m away
+        pois = [poi("Wenger's")]
         g.fill_hours(SimpleNamespace(pois=pois, _cache={}), lambda p: True)
-        got = sorted(int(n[5:]) for n in g.asked)
-        self.assertEqual((len(got), len(set(got)), got[0], got[-1] >= 35), (15, 15, 0, True))  # 15 calls from one end to the other
+        self.assertIsNone(pois[0]["hours"])
+
+    def test_circles_cover_the_trip_and_are_capped(self):
+        g = Fake([])
+        pois = [poi(f"Shop {i}", pt=(28.6 + i * 0.0005, 77.2167)) for i in range(200)]  # every 55 m for 11 km
+        g.fill_hours(SimpleNamespace(pois=pois, _cache={}), lambda p: True)
+        self.assertEqual(len(g.centers), places.MAX_CALLS)
+        self.assertTrue(all(places.dist(a, b) > places.RADIUS_M for a, b in zip(g.centers, g.centers[1:])))
+
+    def test_full_answers_leave_unmatched_places_for_later(self):
+        g = Fake([hit(f"Other {i}") for i in range(20)])
+        g.fill_hours(SimpleNamespace(pois=[poi("Wenger's")], _cache={}), lambda p: True)
+        self.assertNotIn("Wenger's|28.6315|77.2167", g.hours)
 
     def test_cache_is_reused_and_failed_calls_are_retried(self):
-        g = Fake(**{"Wenger's": [None, hit(periods=[P(1, 10, 0, 1, 22)])]})
+        g = Fake([hit("Wenger's", periods=WEEKDAYS)], fail=1)
         area = lambda: SimpleNamespace(pois=[poi("Wenger's")], _cache={})
         self.assertEqual(g.fill_hours(area(), lambda p: True), 0)  # call failed: not cached
         self.assertEqual(g.fill_hours(area(), lambda p: True), 1)
         self.assertEqual(g.fill_hours(area(), lambda p: True), 1)  # from the cache, no third call
-        self.assertEqual(len(g.asked), 2)
+        self.assertEqual(len(g.centers), 2)
+
+    def test_quota_exhausted_stops_calls_for_the_day(self):
+        g = places.Places("key")
+        err = urllib.error.HTTPError(places.URL, 429, "Too Many Requests", {}, None)
+        with mock.patch.object(places.urllib.request, "urlopen", mock.Mock(side_effect=err)) as call:
+            self.assertIsNone(g.nearby((28.6, 77.2)))
+            self.assertIsNone(g.nearby((28.6, 77.2)))
+        self.assertEqual(call.call_count, 1)
 
 
 if __name__ == "__main__":

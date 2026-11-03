@@ -1,7 +1,8 @@
 """Opening hours from Google Places (key in data/google_places_key.txt or GOOGLE_PLACES_KEY, never sent to browsers).
 
-For named places along a trip that publish no opening_hours: one Text Search per place (at most 15 a trip, 300 a day),
-used only when Google's match is within 150 m. Runs before Gemini, so Gemini only guesses what Google didn't know.
+For named places along a trip that publish no opening_hours: Nearby Search circles along the trip, each returning the
+20 nearest Google places (at most 40 calls a trip, 300 a day). A place takes Google's hours only when a result within
+80 m shares a word of its name. Runs on the shops the scanned routes pass, then the routes are scored again.
 Nothing from Google is drawn on the map; it only feeds the "places open" part of the score.
 """
 import json
@@ -14,11 +15,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 from safety import DAYS, dist
 
-URL = "https://places.googleapis.com/v1/places:searchText"
+URL = "https://places.googleapis.com/v1/places:searchNearby"
 FIELDS = "places.displayName,places.location,places.regularOpeningHours.periods"
-DAILY_CAP = 300  # Text Search with hours is a paid tier past the monthly free calls
-MAX_PLACES = 15
-MATCH_M = 150
+DAILY_CAP = 300  # Nearby Search with hours is a paid tier past the monthly free calls
+MAX_CALLS = 40  # per trip; each covers a 50 m circle (busy streets have more than 20 places in 100 m)
+RADIUS_M = 50
+MATCH_M = 80  # map data and Google can place the same shop a few doors apart
 # shortcut: Google's terms limit caching Places content; 30 days suits a demo, cut to a day (or none) before a real launch
 HOURS_DAYS = 30
 
@@ -53,40 +55,27 @@ class Places:
             with open(path) as f:
                 self.hours = json.load(f)
 
-    def search(self, p):
-        """Google's best match for a place near p, or None when the call fails or the daily cap is spent."""
+    def nearby(self, center):
+        """Up to 20 Google places nearest to center (within RADIUS_M), or None when the call fails or the cap is spent."""
         now = time.time()
         with self.lock:
             self.calls = [t for t in self.calls if now - t < 86400]
             if not self.key or len(self.calls) >= DAILY_CAP:
                 return None
             self.calls.append(now)
-        # a restriction, not a bias: a bias still returns the same name across town
-        d = MATCH_M / 111000
-        body = {"textQuery": p["name"], "maxResultCount": 1,
-                "locationRestriction": {"rectangle": {"low": {"latitude": p["pt"][0] - d, "longitude": p["pt"][1] - d},
-                                                      "high": {"latitude": p["pt"][0] + d, "longitude": p["pt"][1] + d}}}}
+        body = {"maxResultCount": 20, "rankPreference": "DISTANCE",
+                "locationRestriction": {"circle": {"center": {"latitude": center[0], "longitude": center[1]}, "radius": float(RADIUS_M)}}}
         req = urllib.request.Request(URL, json.dumps(body).encode(),
                                      {"Content-Type": "application/json", "X-Goog-Api-Key": self.key, "X-Goog-FieldMask": FIELDS})
         try:
             with urllib.request.urlopen(req, timeout=8) as r:
-                return (json.load(r).get("places") or [{}])[0]
+                return json.load(r).get("places") or []
         except Exception as err:  # a bonus: never break a trip
             print("Google Places:", type(err).__name__, getattr(err, "code", ""), flush=True)
             if getattr(err, "code", 0) == 429:  # the Google project's own daily quota is spent: stop asking for a day
                 with self.lock:
                     self.calls = [now] * DAILY_CAP
             return None
-
-    def lookup(self, p):
-        """OSM hours for p, "" if Google has none or matched something too far away, None if the call failed."""
-        hit = self.search(p)
-        if hit is None:
-            return None
-        loc = hit.get("location") or {}
-        if not loc or dist(p["pt"], (loc["latitude"], loc["longitude"])) > MATCH_M or not same_name(p["name"], (hit.get("displayName") or {}).get("text", "")):
-            return ""
-        return to_osm((hit.get("regularOpeningHours") or {}).get("periods"))
 
     @staticmethod
     def _key(p):
@@ -98,26 +87,39 @@ class Places:
             return 0
         now, filled, todo = time.time(), 0, []
         for p in area.pois:
-            if p["hours"] or not p.get("named") or p["group"] in ("transit", "cctv", "police") or not near(p["pt"]):
+            # Google's hours replace a Gemini guess
+            if p["hours"] and not p.get("ai_hours") or not p.get("named") or p["group"] in ("transit", "cctv", "police") or not near(p["pt"]):
                 continue
             got = self.hours.get(self._key(p))
             if got and now - got[1] < HOURS_DAYS * 86400:
                 if got[0]:
-                    p["hours"], p["google_hours"] = got[0], True
+                    p["hours"], p["google_hours"], p["ai_hours"] = got[0], True, False
                     filled += 1
             else:
                 todo.append(p)
-        # spread the calls along the trip: the first 15 in map order all sit at one end of it
-        todo = [todo[i * len(todo) // MAX_PLACES] for i in range(MAX_PLACES)] if len(todo) > MAX_PLACES else todo
+        # cover the places with circles: each call answers for every place within RADIUS_M of its centre
+        circles = []
+        for p in todo:
+            c = next((c for c in circles if dist(c[0], p["pt"]) <= RADIUS_M), None)
+            if c:
+                c[1].append(p)
+            elif len(circles) < MAX_CALLS:
+                circles.append((p["pt"], [p]))
         with ThreadPoolExecutor(5) as pool:
-            answers = list(pool.map(self.lookup, todo))
-        for p, oh in zip(todo, answers):
-            if oh is None:
+            answers = list(pool.map(lambda c: self.nearby(c[0]), circles))
+        for (_, group), found in zip(circles, answers):
+            if found is None:
                 continue  # a failed call is not cached, so it is asked again next time
-            self.hours[self._key(p)] = [oh, now]
-            if oh:
-                p["hours"], p["google_hours"] = oh, True
-                filled += 1
+            for p in group:
+                hit = next((h for h in found if h.get("location") and same_name(p["name"], (h.get("displayName") or {}).get("text", ""))
+                            and dist(p["pt"], (h["location"]["latitude"], h["location"]["longitude"])) <= MATCH_M), None)
+                if not hit and len(found) == 20:
+                    continue  # a full answer may have left it out: ask again on a later trip, from another centre
+                oh = to_osm((hit.get("regularOpeningHours") or {}).get("periods")) if hit else ""
+                self.hours[self._key(p)] = [oh, now]
+                if oh:
+                    p["hours"], p["google_hours"], p["ai_hours"] = oh, True, False
+                    filled += 1
         if todo:
             self._save()
         if filled:

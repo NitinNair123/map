@@ -91,10 +91,12 @@ and open the https link on the phone. Then use "Add to Home Screen".
   street or landmark that place search finds near the trip, or it is dropped. Alerts plug in through `safety.SIGNALS`:
   ones within 400 m take 20 points off those streets around that time, wider ones only show a warning. At most 300 calls a day.
 - **Google Places hours** (key from Google Cloud with the Places API (New) on, in `data/google_places_key.txt` or
-  `GOOGLE_PLACES_KEY`; it stays on the server): named shops near a trip with no opening hours in OpenStreetMap are
-  looked up first, one Text Search each (at most 15 a trip, spread along it, 300 a day), limited to 150 m around the place and used only when the names share a word,
-  and kept in `data/places_hours.json` for 30 days. Gemini then guesses only the ones Google didn't know. Google data
-  only feeds the score and is never drawn on the map; its terms limit caching, so shorten that before a real launch.
+  `GOOGLE_PLACES_KEY`; it stays on the server): after the routes are found, the shops the top three pass that have no
+  opening hours are covered with Nearby Search circles (50 m, the 20 nearest Google places each, at most 40 calls a
+  trip and 300 a day). A shop takes Google's hours when a result within 80 m shares a word of its name, then the
+  routes are scored again. Answers are kept in `data/places_hours.json` for 30 days, so a street costs calls once.
+  Google data only feeds the score and is never drawn on the map; its terms limit caching, so shorten that before a
+  real launch. Google projects have their own per-day request quota: raise "SearchNearbyRequest per day" in Cloud Console.
 - **SOS ambulance alert**: "Ambulance alert with my medical info" on the SOS screen. With the Gemini key above, the
   text is reworded so allergies and conditions come first (no search, no thinking, 4 s timeout). It only rewords;
   the user still presses Send. With no key, a slow or failed call, or a reply that drops a location link, the plain

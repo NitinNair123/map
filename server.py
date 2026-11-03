@@ -298,9 +298,8 @@ def place_name(pt):
 
 
 def ai_extras(area, stops, when):
-    """Opening hours for places along the trip (start, stops, end), from Google Places then Gemini, and Gemini's live
-    event alerts near it; [] without a key."""
-    if not (gemini.LIVE.key or places.LIVE.key):
+    """Gemini opening hours for places along the trip (start, stops, end) and live event alerts near it; [] without a key."""
+    if not gemini.LIVE.key:
         return []
     a, b = stops[0], stops[-1]
     where = f"{place_name((round(a[0], 3), round(a[1], 3)))} to {place_name((round(b[0], 3), round(b[1], 3)))}"
@@ -311,12 +310,8 @@ def ai_extras(area, stops, when):
         hit = next((h for h in geocode(q, ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)) if not h.get("big")), None)
         return hit["pt"] if hit and near(hit["pt"], 3000) else None  # far away means it matched the wrong place
 
-    def hours():
-        places.LIVE.fill_hours(area, lambda p: near(p, 300))  # first, so Gemini only guesses what Google didn't know
-        gemini.LIVE.fill_hours(area, lambda p: near(p, 300), where)
-
     with ThreadPoolExecutor(2) as ex:
-        jobs = [ex.submit(hours),
+        jobs = [ex.submit(gemini.LIVE.fill_hours, area, lambda p: near(p, 300), where),
                 ex.submit(gemini.LIVE.find_events, a, b, when, where, locate)]
     try:
         jobs[0].result()
@@ -492,6 +487,10 @@ class Handler(SimpleHTTPRequestHandler):
                 traffic.LIVE.warm(traffic.sample(area, a, b) if traffic.is_now(when, time.time()) else [])
                 alerts = ai_extras(area, [a, *via, b], when)
                 routes = area.routes(a, b, when, rain, mode, extra, via, prefer)
+                # Google hours for the shops these routes actually pass; new hours change the scores, so score again
+                pts = [c for r in routes[:3] for c in r["coords"][::4]]  # safest, balanced, fastest: the ones people pick
+                if places.LIVE.fill_hours(area, lambda p: any(dist(p, c) <= 80 for c in pts)):
+                    routes = area.routes(a, b, when, rain, mode, extra, via, prefer)
                 for r in routes:  # the districts each route passes through, as background only (never scored)
                     r["area"] = crime.around(CRIME, crime.along(r["coords"]))
                 return self.send_json({"routes": routes, "rain": rain, "alerts": alerts, "sources": area.sources})
