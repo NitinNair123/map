@@ -150,8 +150,8 @@ def factors(area, e, when, light, now=None):
     places = near["place"] + near["haven"]
     known = [o for o in (area.is_place_open(area.pois[i], when) for i in places) if o is not None]
     if known:
-        ai = any(area.pois[i].get("ai_hours") for i in places)
-        activity.append((min(1, sum(known) / 3), QUALITY["hours"], "Opening hours (OpenStreetMap, some found by Gemini)" if ai else "Opening hours (OpenStreetMap)"))
+        extra = [s for s, k in (("Google", "google_hours"), ("Gemini", "ai_hours")) if any(area.pois[i].get(k) for i in places)]
+        activity.append((min(1, sum(known) / 3), QUALITY["hours"], f"Opening hours (OpenStreetMap, some from {' and '.join(extra)})" if extra else "Opening hours (OpenStreetMap)"))
     served = [area.stops[i]["deps"][when.weekday()][when.hour] for i in e.get("stops", ())]
     if served:
         activity.append((min(1, sum(served) / 6), QUALITY["gtfs"], "Bus and metro timetables"))

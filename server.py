@@ -24,6 +24,7 @@ from urllib.request import Request, urlopen
 import buses
 import crime
 import gemini
+import places
 import gtfs
 import traffic
 from import_osm import search as offline_search
@@ -113,6 +114,8 @@ print("Live traffic:", "on" if traffic.LIVE.key else "off (no key in data/tomtom
 gemini.LIVE = gemini.Gemini(key_file("gemini_key.txt", "GEMINI_KEY"), os.path.join(DATA_DIR, "gemini_hours.json"))
 SIGNALS.append(gemini.signal)
 print("Gemini shop hours and live events:", "on" if gemini.LIVE.key else "off (no key in data/gemini_key.txt)", flush=True)
+places.LIVE = places.Places(key_file("google_places_key.txt", "GOOGLE_PLACES_KEY"), os.path.join(DATA_DIR, "places_hours.json"))
+print("Google Places shop hours:", "on" if places.LIVE.key else "off (no key in data/google_places_key.txt)", flush=True)
 SURVEY = load_csv(SURVEY_PATH, REPORT_TYPES, source="Street survey")
 STOPS = gtfs.load(GTFS_DIR)
 print(f"Street survey: {len(SURVEY)} observations. Timetables: {len(STOPS)} stops (put GTFS zips in data/gtfs).", flush=True)
@@ -295,8 +298,9 @@ def place_name(pt):
 
 
 def ai_extras(area, stops, when):
-    """Gemini opening hours for places along the trip (start, stops, end) and live event alerts near it; [] without a key."""
-    if not gemini.LIVE.key:
+    """Opening hours for places along the trip (start, stops, end), from Google Places then Gemini, and Gemini's live
+    event alerts near it; [] without a key."""
+    if not (gemini.LIVE.key or places.LIVE.key):
         return []
     a, b = stops[0], stops[-1]
     where = f"{place_name((round(a[0], 3), round(a[1], 3)))} to {place_name((round(b[0], 3), round(b[1], 3)))}"
@@ -307,8 +311,12 @@ def ai_extras(area, stops, when):
         hit = next((h for h in geocode(q, ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)) if not h.get("big")), None)
         return hit["pt"] if hit and near(hit["pt"], 3000) else None  # far away means it matched the wrong place
 
+    def hours():
+        places.LIVE.fill_hours(area, lambda p: near(p, 300))  # first, so Gemini only guesses what Google didn't know
+        gemini.LIVE.fill_hours(area, lambda p: near(p, 300), where)
+
     with ThreadPoolExecutor(2) as ex:
-        jobs = [ex.submit(gemini.LIVE.fill_hours, area, lambda p: near(p, 300), where),
+        jobs = [ex.submit(hours),
                 ex.submit(gemini.LIVE.find_events, a, b, when, where, locate)]
     try:
         jobs[0].result()
