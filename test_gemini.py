@@ -14,7 +14,7 @@ class Fake(gemini.Gemini):
         super().__init__("key")
         self.answers, self.prompts = list(answers), []
 
-    def ask(self, prompt, max_tokens):
+    def ask(self, prompt, max_tokens, timeout=15):
         self.prompts.append(prompt)
         return self.answers.pop(0)
 

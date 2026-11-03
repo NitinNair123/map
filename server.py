@@ -15,7 +15,7 @@ import threading
 import time
 import traceback
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -297,6 +297,9 @@ def place_name(pt):
         return f"{pt[0]:.4f},{pt[1]:.4f}"
 
 
+HOURS_JOBS = ThreadPoolExecutor(1)
+
+
 def ai_extras(area, stops, when):
     """Gemini opening hours for places along the trip (start, stops, end) and live event alerts near it; [] without a key."""
     if not gemini.LIVE.key:
@@ -310,15 +313,15 @@ def ai_extras(area, stops, when):
         hit = next((h for h in geocode(q, ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)) if not h.get("big")), None)
         return hit["pt"] if hit and near(hit["pt"], 3000) else None  # far away means it matched the wrong place
 
-    with ThreadPoolExecutor(2) as ex:
-        jobs = [ex.submit(gemini.LIVE.fill_hours, area, lambda p: near(p, 300), where),
-                ex.submit(gemini.LIVE.find_events, a, b, when, where, locate)]
+    # a new street's hours take Gemini about a minute: the trip doesn't wait (cached hours apply at once), later trips get them
+    hours = HOURS_JOBS.submit(gemini.LIVE.fill_hours, area, lambda p: near(p, 300), where)
     try:
-        jobs[0].result()
-        return jobs[1].result()
+        alerts = gemini.LIVE.find_events(a, b, when, where, locate)
+        wait([hours], timeout=2)
     except Exception:  # a bonus: a bug here must not cost the trip
         traceback.print_exc()
         return []
+    return alerts
 
 
 def expire_trips():
