@@ -17,6 +17,7 @@ import csv
 import gzip
 import importlib.util
 import os
+import random
 import sys
 import threading
 import time
@@ -137,6 +138,7 @@ def main():
     ap.add_argument("--world", action="store_true")
     ap.add_argument("--radius", type=float, default=1500)
     ap.add_argument("--redo", action="store_true", help="rebuild blocks already written (new data since)")
+    ap.add_argument("--hours", type=float, default=0, help="stop starting new blocks after this many hours (0 = no limit); blocks come in random order, so any stop point is a fair spread of the area")
     args = ap.parse_args()
     ts = store(args.world)
     if args.all:
@@ -155,7 +157,13 @@ def main():
     os.makedirs(folder, exist_ok=True)
     todo = blocks(tiles)
     edges = slots = 0
-    for n, (b, group) in enumerate(sorted(todo.items()), 1):
+    order = sorted(todo.items())
+    random.Random(0).shuffle(order)  # the same shuffle every run, so a stopped and resumed run carries on through the same order
+    began = time.time()
+    for n, (b, group) in enumerate(order, 1):
+        if args.hours and time.time() - began > args.hours * 3600:
+            print(f"Time limit of {args.hours} h reached after {n - 1} of {len(order)} blocks; run again to continue", flush=True)
+            break
         name = os.path.join(folder, f"{b[0]}_{b[1]}")
         if os.path.exists(name + ".slots.csv.gz") and not args.redo:
             continue

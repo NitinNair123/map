@@ -70,6 +70,13 @@ class Surroundings(unittest.TestCase):
         self.assertTrue(all(r["road_km_300"] > 0 and 0 <= r["dead_end_share_300"] <= 1 for r in rows))
         self.assertTrue(any(r["d_main"] == 500 for r in rows))  # the fixture has no main road
 
+    def test_buildings_not_loaded_are_unknown_not_zero(self):
+        import math
+        from test_safety import node
+        self.assertTrue(all(math.isnan(r["bld_100"]) and math.isnan(r["buildings_ha"]) for r in features.static_rows(Area(fixture()))))
+        els = fixture()["elements"] + [node("b1", (28.0004, 77.0005), building="yes")]
+        self.assertTrue(any(r["bld_500"] >= 1 for r in features.static_rows(Area({"elements": els}))))
+
     def test_extra_osm_objects_near_a_street(self):
         import math
         import osm_extra

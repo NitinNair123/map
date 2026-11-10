@@ -107,6 +107,9 @@ def static_rows(area):
         r["nb_places"] = sum(rows[j]["places_total"] for j in nb)
         r["nb_main_share"] = round(sum(area.edges[j]["highway"] in rating.MAIN_ROADS for j in nb) / len(nb), 3) if nb else NAN
     context.add(area, rows)
+    for e, r in zip(area.edges, rows):
+        if not area.building_cells or "overlooked" in e.get("unloaded", ()):  # buildings not loaded there: unknown, as in rating.py
+            r.update(buildings_ha=NAN, bld_100=NAN, bld_500=NAN)
     return rows
 
 
