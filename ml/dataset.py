@@ -25,6 +25,7 @@ from collections import defaultdict
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import gtfs  # noqa: E402
+import features  # noqa: E402
 from features import NCR, STATIC, load_bus_logs, load_traffic_logs, slot_rows, static_rows  # noqa: E402
 from rating import REPORT_TYPES  # noqa: E402
 from reports import Reports  # noqa: E402
@@ -81,6 +82,7 @@ def store(world=False):
         threading.Thread(target=warm_overture, daemon=True).start()
         used.append("Overture places and buildings")
     stops = gtfs.load(os.path.join(DATA, "gtfs"))
+    features.TIMETABLES = bool(stops)
     reports = Reports(os.path.join(DATA, "reports.db")).all() if os.path.exists(os.path.join(DATA, "reports.db")) else []
     survey = []
     if os.path.exists(os.path.join(DATA, "survey.csv")):
@@ -152,16 +154,18 @@ def main():
             print(f"[{n}/{len(todo)}] block {b}: skipped ({err})", flush=True)
             continue
         e_rows, s_rows = static_rows(area), slot_rows(area, bus, tr)
+        used = ", ".join(sorted(area.sources))
         for r in e_rows:
+            r["sources"] = used  # which downloads this block really has: a source that failed leaves a gap, and the log shows it
             r["region"] = region(r["lat"], r["lon"])
             if r["region"] != "ncr":
                 r["gtfs_stops"] = float("nan")  # only Delhi timetables are loaded: unknown elsewhere, not zero
-        write(name + ".edges.csv.gz", e_rows, ["edge_id", "tile", "lat", "lon", "region", *STATIC, "lit", "lit_source"])
+        write(name + ".edges.csv.gz", e_rows, ["edge_id", "tile", "lat", "lon", "region", "sources", *STATIC, "lit", "lit_source"])
         write(name + ".slots.csv.gz", s_rows, ["edge_id", "hour", "weekend", "daylight", "gtfs_deps", "open_share", "open_known", "bus_per_hour", "traffic_ratio"])
         ts.areas.clear()  # one block at a time in memory
         edges, slots = edges + len(e_rows), slots + len(s_rows)
         print(f"[{n}/{len(todo)}] block {b}: {len(e_rows)} streets, {sum(r['lit'] is not None for r in e_rows)} with a lit label, "
-              f"{len(s_rows)} hour rows ({time.time() - started:.0f} s)", flush=True)
+              f"{len(s_rows)} hour rows, sources: {used} ({time.time() - started:.0f} s)", flush=True)
     print(f"Done: {edges} streets and {slots} hour rows written this run", flush=True)
 
 

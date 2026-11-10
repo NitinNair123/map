@@ -28,6 +28,7 @@ STATIC = (["highway", "sidewalk", "length", "lanes", "maxspeed", "unpaved", "und
           + [f"zone_{z}" for z in ZONES] + ["nb_lamps_per_100m", "nb_places", "nb_main_share", "degree"])
 TIME = ["hour", "weekend", "daylight", "gtfs_deps"]
 NAN = float("nan")
+TIMETABLES = False  # set by dataset.py when GTFS zips are loaded; without them departures are unknown, not zero
 NCR = (28.2, 76.8, 28.95, 77.75)  # Delhi NCR box (same as crime.py): the only place the OTD bus feed and logs cover
 
 
@@ -68,7 +69,7 @@ def static_rows(area):
              "dead_ends": e["dead_ends"], "buildings_ha": round(e["buildings_ha"], 2),
              "nightlight": NAN if e.get("nightlight") is None else e["nightlight"],
              "police_m": min(5000, round(min(e["police_m"], 5000))), "places_mapped_500m": int(e["places_mapped"]),
-             "gtfs_stops": len(e.get("stops", ()))}
+             "gtfs_stops": len(e.get("stops", ())) if TIMETABLES else NAN}
         for k in NEAR_KINDS:
             r[f"n_{k}"] = len(near[k])
         r["lamps_per_100m"] = round(100 * len(near["lamp"]) / max(e["length"], 10), 3)
@@ -130,7 +131,7 @@ def slot_rows(area, bus=None, tr=None):
                 if not known and b is None and t is None:
                     continue
                 rows.append({"edge_id": edge_id(e), "hour": hour, "weekend": weekend, "daylight": light,
-                             "gtfs_deps": sum(area.stops[i]["deps"][wd][hour] for i in e.get("stops", ())),
+                             "gtfs_deps": sum(area.stops[i]["deps"][wd][hour] for i in e.get("stops", ())) if TIMETABLES else NAN,
                              "open_share": round(sum(known) / len(known), 3) if known else NAN, "open_known": len(known),
                              "bus_per_hour": NAN if b is None else round(b, 3), "traffic_ratio": NAN if t is None else round(t, 3)})
     return rows

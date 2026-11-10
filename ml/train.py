@@ -46,6 +46,7 @@ MIN_ROWS, MIN_BLOCKS = 200, 6
 LOCKED = 0.2            # share of blocks kept out of every decision
 TRIALS = 25             # parameter sets tried per head
 BUDGET_S = 1500         # most time spent tuning one head; a few trials always run
+MAX_ROWS = 3_000_000    # street-hour rows kept per hourly head, so the full NCR build fits in a laptop's memory
 MAX_TUNE_ROWS = 300_000  # tuning looks at a random subset of blocks beyond this; the final fit uses everything
 SEEDS = 5
 SPACE = {"learning_rate": [0.03, 0.06, 0.1], "max_leaf_nodes": [15, 31, 63, 127], "max_iter": [300, 600, 1000],
@@ -273,6 +274,9 @@ def train_hourly(e, s, target, trials=None, budget=None):
     if s.empty or target not in s:
         return None, {"head": target, "rows": 0, "skipped": "no rows"}
     d = s[s[target].notna()].merge(e, on="edge_id")
+    if len(d) > MAX_ROWS:
+        d = d.sample(n=MAX_ROWS, random_state=0)  # a random sample of rows; blocks are still held out whole
+    d[[c for c in STATIC + TIME if c not in CATEGORICAL and c in d]] = d[[c for c in STATIC + TIME if c not in CATEGORICAL and c in d]].astype("float32")
     return run_head(target, "reg", d, STATIC + TIME, target, trials, budget)
 
 
