@@ -1,4 +1,5 @@
 numpy
 pandas
-scikit-learn
+scipy
+scikit-learn>=1.4
 pyarrow  # Overture places and buildings

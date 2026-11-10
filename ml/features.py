@@ -28,6 +28,7 @@ STATIC = (["highway", "sidewalk", "length", "lanes", "maxspeed", "unpaved", "und
           + [f"zone_{z}" for z in ZONES] + ["nb_lamps_per_100m", "nb_places", "nb_main_share", "degree"])
 TIME = ["hour", "weekend", "daylight", "gtfs_deps"]
 NAN = float("nan")
+NCR = (28.2, 76.8, 28.95, 77.75)  # Delhi NCR box (same as crime.py): the only place the OTD bus feed and logs cover
 
 
 def edge_id(e):
@@ -96,8 +97,8 @@ def static_rows(area):
 def bus_rate(bus, mid, weekend, hour):
     """Buses an hour that moved through the cells around this point at this hour, averaged over the hours the
     logger watched; None when it never watched that hour."""
-    if not bus or not bus["watched"].get((weekend, hour)):
-        return None
+    if not bus or not bus["watched"].get((weekend, hour)) or not (NCR[0] <= mid[0] <= NCR[2] and NCR[1] <= mid[1] <= NCR[3]):
+        return None  # outside the area the feed covers, no count is not zero buses
     ci, cj = int(mid[0] // 0.001), int(mid[1] // 0.001)  # same ~110 m cells as buses.py
     total = sum(bus["counts"].get((ci + di, cj + dj, weekend, hour), 0) for di in (-1, 0, 1) for dj in (-1, 0, 1))
     return total / bus["watched"][(weekend, hour)]

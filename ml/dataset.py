@@ -8,6 +8,8 @@ Usage:
   py ml/dataset.py                 the default spots across Delhi NCR, 1.5 km around each
   py ml/dataset.py --all           every tile of the OSM import (py import_osm.py first); hours, can be stopped and resumed
   py ml/dataset.py --points 28.47,77.50;28.63,77.22 --radius 2000
+  py ml/dataset.py --world         ~40 areas of other Indian and world cities (OSM lit tags are plentiful there), marked
+                                   region=other so training can test whether they help Delhi NCR (they are never scored)
 Writes ml/data/blocks/<block>.edges.csv.gz and .slots.csv.gz; blocks already written are skipped.
 """
 import argparse
@@ -23,7 +25,7 @@ from collections import defaultdict
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import gtfs  # noqa: E402
-from features import STATIC, load_bus_logs, load_traffic_logs, slot_rows, static_rows  # noqa: E402
+from features import NCR, STATIC, load_bus_logs, load_traffic_logs, slot_rows, static_rows  # noqa: E402
 from rating import REPORT_TYPES  # noqa: E402
 from reports import Reports  # noqa: E402
 from tiles import (CHUNK, TileStore, geoapify, mapillary, nightlights, overture_buildings, overture_places, tiles_near,  # noqa: E402
@@ -37,12 +39,31 @@ SPOTS = [(28.4741, 77.4998), (28.6315, 77.2167), (28.5355, 77.3910), (28.4595, 7
          (28.6129, 77.2295), (28.4950, 77.0890), (28.5800, 77.3200), (28.6400, 77.3000), (28.4700, 77.5400)]
 
 
+# Cities whose OSM has many street-light tags, to learn what a lit street looks like. Real map data, no estimates.
+WORLD = [
+    ("Mumbai", 19.0760, 72.8777), ("Bengaluru", 12.9716, 77.5946), ("Chennai", 13.0827, 80.2707), ("Kolkata", 22.5726, 88.3639),
+    ("Hyderabad", 17.3850, 78.4867), ("Pune", 18.5204, 73.8567), ("Jaipur", 26.9124, 75.7873), ("Lucknow", 26.8467, 80.9462),
+    ("Chandigarh", 30.7333, 76.7794), ("Ahmedabad", 23.0225, 72.5714), ("Kochi", 9.9312, 76.2673), ("Bhopal", 23.2599, 77.4126),
+    ("London", 51.5074, -0.1278), ("Manchester", 53.4808, -2.2426), ("Edinburgh", 55.9533, -3.1883), ("Dublin", 53.3498, -6.2603),
+    ("Berlin", 52.5200, 13.4050), ("Hamburg", 53.5511, 9.9937), ("Munich", 48.1351, 11.5820), ("Vienna", 48.2082, 16.3738),
+    ("Amsterdam", 52.3676, 4.9041), ("Rotterdam", 51.9244, 4.4777), ("Copenhagen", 55.6761, 12.5683), ("Stockholm", 59.3293, 18.0686),
+    ("Paris", 48.8566, 2.3522), ("Lyon", 45.7640, 4.8357), ("Barcelona", 41.3874, 2.1686), ("Madrid", 40.4168, -3.7038),
+    ("Rome", 41.9028, 12.4964), ("Warsaw", 52.2297, 21.0122), ("Prague", 50.0755, 14.4378), ("Zurich", 47.3769, 8.5417),
+    ("New York", 40.7128, -74.0060), ("Chicago", 41.8781, -87.6298), ("Toronto", 43.6532, -79.3832), ("Melbourne", -37.8136, 144.9631),
+    ("Sydney", -33.8688, 151.2093), ("Tokyo", 35.6762, 139.6503), ("Seoul", 37.5665, 126.9780), ("Singapore", 1.3521, 103.8198),
+]
+
+
+def region(lat, lon):
+    return "ncr" if NCR[0] <= lat <= NCR[2] and NCR[1] <= lon <= NCR[3] else "other"
+
+
 def key(name, env):
     path = os.path.join(DATA, name)
     return os.environ.get(env) or (open(path).read().strip() if os.path.exists(path) else "")
 
 
-def store():
+def store(world=False):
     """A TileStore set up like server.py's, except that every source loads before an area is built (no background)
     and streets come from OpenStreetMap, which carries the lit tags."""
     extras = {"nightlights": nightlights}
@@ -51,7 +72,7 @@ def store():
         os.environ["MAPILLARY_TOKEN"] = key("mapillary_token.txt", "MAPILLARY_TOKEN")
         extras["mapillary"] = mapillary
         used.append("Mapillary")
-    if key("geoapify_key.txt", "GEOAPIFY_KEY"):
+    if key("geoapify_key.txt", "GEOAPIFY_KEY") and not world:  # its free daily quota is kept for Delhi NCR
         os.environ["GEOAPIFY_KEY"] = key("geoapify_key.txt", "GEOAPIFY_KEY")
         extras["geoapify"] = geoapify
         used.append("Geoapify")
@@ -99,16 +120,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--points")
+    ap.add_argument("--world", action="store_true")
     ap.add_argument("--radius", type=float, default=1500)
     ap.add_argument("--redo", action="store_true", help="rebuild blocks already written (new data since)")
     args = ap.parse_args()
-    ts = store()
+    ts = store(args.world)
     if args.all:
         if not ts.extracted:
             sys.exit("No OSM import found: run py import_osm.py first, or leave out --all")
         tiles = ts.extracted
     else:
-        pts = [tuple(map(float, p.split(","))) for p in args.points.split(";")] if args.points else SPOTS
+        pts = [(la, lo) for _, la, lo in WORLD] if args.world else \
+            [tuple(map(float, p.split(","))) for p in args.points.split(";")] if args.points else SPOTS
         tiles = set().union(*(tiles_near(p, p, args.radius) for p in pts))
     bus = load_bus_logs(os.path.join(OUT, "bus_counts.csv"), os.path.join(OUT, "bus_hours.csv"))
     tr = load_traffic_logs(os.path.join(OUT, "traffic.csv"))
@@ -129,7 +152,11 @@ def main():
             print(f"[{n}/{len(todo)}] block {b}: skipped ({err})", flush=True)
             continue
         e_rows, s_rows = static_rows(area), slot_rows(area, bus, tr)
-        write(name + ".edges.csv.gz", e_rows, ["edge_id", "tile", "lat", "lon", *STATIC, "lit", "lit_source"])
+        for r in e_rows:
+            r["region"] = region(r["lat"], r["lon"])
+            if r["region"] != "ncr":
+                r["gtfs_stops"] = float("nan")  # only Delhi timetables are loaded: unknown elsewhere, not zero
+        write(name + ".edges.csv.gz", e_rows, ["edge_id", "tile", "lat", "lon", "region", *STATIC, "lit", "lit_source"])
         write(name + ".slots.csv.gz", s_rows, ["edge_id", "hour", "weekend", "daylight", "gtfs_deps", "open_share", "open_known", "bus_per_hour", "traffic_ratio"])
         ts.areas.clear()  # one block at a time in memory
         edges, slots = edges + len(e_rows), slots + len(s_rows)

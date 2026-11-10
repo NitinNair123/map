@@ -37,31 +37,65 @@ class Features(unittest.TestCase):
         self.assertTrue(all("open" not in c for c in features.STATIC + features.TIME))
 
     def test_bus_rate_averages_watched_hours_only(self):
-        bus = {"counts": {(28000, 77001, 0, 22): 6}, "watched": {(0, 22): 2}}
-        self.assertEqual(features.bus_rate(bus, (28.0005, 77.0015), 0, 22), 3.0)
-        self.assertIsNone(features.bus_rate(bus, (28.0005, 77.0015), 0, 9))  # never watched: unknown, not zero
+        bus = {"counts": {(28600, 77201, 0, 22): 6}, "watched": {(0, 22): 2}}
+        self.assertEqual(features.bus_rate(bus, (28.6005, 77.2015), 0, 22), 3.0)
+        self.assertIsNone(features.bus_rate(bus, (28.6005, 77.2015), 0, 9))  # never watched: unknown, not zero
+        self.assertIsNone(features.bus_rate(bus, (51.5, -0.12), 0, 22))  # London: the feed doesn't cover it, so no count is not zero
 
 
 class Training(unittest.TestCase):
-    def test_trains_and_checks_on_held_out_tiles(self):
+    def setUp(self):
         try:
             import numpy as np
             import pandas as pd
             import train
         except ImportError:
             self.skipTest("pip install -r ml/requirements.txt")
+        self.np, self.pd, self.train = np, pd, train
         rng = np.random.default_rng(0)
-        n = 1200
+        n = 4000
         e = pd.DataFrame({c: rng.random(n) for c in features.STATIC})
         e["highway"], e["sidewalk"] = rng.integers(0, 5, n), rng.integers(0, 3, n)
-        e["edge_id"], e["tile"] = [str(i) for i in range(n)], [str(i % 20) for i in range(n)]
+        e["edge_id"], e["tile"] = [str(i) for i in range(n)], [f"{i % 40}_0" for i in range(n)]
+        e["block"] = e["tile"].map(train.block_of)
+        e["region"] = "ncr"
         e["lit"] = (e["n_lamp"] + 0.2 * rng.random(n) > 0.6).astype(float)  # lamps decide it, as on a real street
         e["lit_source"] = "osm"
-        model, m = train.train_lit(e)
-        self.assertGreater(m["auroc"], 0.9)
-        self.assertEqual(m["tiles"], 20)
-        with tempfile.TemporaryDirectory():
-            self.assertIsNotNone(model.predict_proba(e[features.STATIC])[:, 1])
+        self.e, self.rng = e, rng
+
+    def test_lit_head_is_scored_once_on_locked_blocks(self):
+        saved, m = self.train.train_lit(self.e, trials=2, budget=60)
+        t = m["locked_test"]
+        self.assertGreater(t["auroc"], 0.9)
+        self.assertLess(t["error_rate"], t["always_guess_majority_error"])
+        locked = set(self.e["block"][self.train.locked(self.e["block"])])
+        self.assertTrue(locked and locked.isdisjoint(set(self.e["block"][~self.train.locked(self.e["block"])])))
+        self.assertEqual(m["chosen"], "ncr_only")
+        p = saved["calibrator"].predict(saved["model"].predict_proba(self.e[features.STATIC])[:, 1])
+        self.assertTrue(((p >= 0) & (p <= 1)).all())
+
+    def test_other_regions_can_help_but_are_never_scored(self):
+        np, pd = self.np, self.pd
+        other = self.e.copy()
+        other["region"], other["edge_id"] = "other", "o" + other["edge_id"]
+        other["tile"] = [f"{900 + i % 40}_0" for i in range(len(other))]
+        other["block"] = other["tile"].map(self.train.block_of)
+        _, m = self.train.train_lit(pd.concat([self.e, other]), trials=2, budget=60)
+        self.assertEqual(set(m["variants_cv_score_on_ncr (lower is better)"]), {"ncr_only", "ncr_plus_other_regions"})
+        self.assertEqual(m["locked_test"]["rows"], int(self.train.locked(self.e["block"]).sum()))
+
+    def test_hourly_head_beats_the_hour_average(self):
+        np, pd = self.np, self.pd
+        e = self.e
+        s = pd.DataFrame({"edge_id": np.repeat(e["edge_id"].to_numpy(), 2), "hour": np.tile([9, 22], len(e)), "weekend": 0,
+                          "daylight": 0.5, "gtfs_deps": 0.0})
+        s["open_share"] = np.where(s["hour"] == 9, 1.0, 0.0) * np.repeat(e["places_shop"].to_numpy() > 0.5, 2)
+        _, m = self.train.train_hourly(e, s, "open_share", trials=2, budget=60)
+        self.assertTrue(m["beats_baseline"])
+
+    def test_too_little_data_is_reported_not_guessed(self):
+        _, m = self.train.train_lit(self.e.head(50), trials=1)
+        self.assertIn("skipped", m)
 
 
 if __name__ == "__main__":
