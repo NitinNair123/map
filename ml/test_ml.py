@@ -52,6 +52,24 @@ class Features(unittest.TestCase):
         self.assertTrue(any(r["report_points"] <= -39 for r in rows))
         self.assertTrue(all(r["report_points"] == 0 for r in rows if r["incident_hits"] == 0))
 
+    def test_a_source_that_keeps_failing_is_skipped(self):
+        import dataset
+        calls = []
+
+        def down(*a):
+            calls.append(a)
+            raise OSError("timed out")
+        f = dataset.breaker(down, "Test", limit=3)
+        for _ in range(5):
+            with self.assertRaises(OSError):
+                f(1, 2, 3, 4)
+        self.assertEqual(len(calls), 3)  # the last two never waited on the network
+
+    def test_studio_groups_cover_every_input_once(self):
+        import studio
+        cols = [c for g in studio.GROUPS.values() for c in g.split()]
+        self.assertEqual(sorted(cols), sorted(features.STATIC + features.TIME))
+
     def test_bus_rate_averages_watched_hours_only(self):
         bus = {"counts": {(28600, 77201, 0, 22): 6}, "watched": {(0, 22): 2}}
         self.assertEqual(features.bus_rate(bus, (28.6005, 77.2015), 0, 22), 3.0)
@@ -93,6 +111,41 @@ class Routes(unittest.TestCase):
         self.assertLess(saved["weights"]["isolated_m"], 0)
         self.assertGreater(rank.score(saved, {**pl[0]["B"], "lit_pct": 100, "isolated_m": 0}, {**pl[0]["B"], "lit_pct": 0, "isolated_m": 100}, 0), 0)
         self.assertIn("skipped", rank.train(pl[:20], labels)[1])  # too few answers: says so, learns nothing
+
+
+class Simulation(unittest.TestCase):
+    def test_dark_footway_is_more_dangerous_and_safest_route_meets_fewer_events(self):
+        import random
+        import sim
+        from test_safety import A, B, NIGHT
+        area = Area(fixture())
+        footway = next(e for e in area.edges if e["highway"] == "footway")
+        market = next(e for e in area.edges if e["highway"] == "residential")
+        self.assertGreater(sim.danger(area, footway, NIGHT)[0], sim.danger(area, market, NIGHT)[0])
+        res = sim.simulate(area, [(A, B, NIGHT)] * 50, random.Random(0))
+        self.assertEqual(res["safest"]["trips"], 50)
+        self.assertLess(res["safest"]["expected_per_1000"], res["fastest"]["expected_per_1000"])
+        self.assertGreater(res["safest"]["extra_minutes"], 0)
+
+    def test_stage_two_uses_base_training_outputs(self):
+        import random
+        import pairs
+        import sim
+        from test_safety import A, B, NIGHT
+        area = Area(fixture())
+        footway = next(e for e in area.edges if e["highway"] == "footway")
+        lane = next(e for e in area.edges if e["highway"] == "service")
+        lane["near"]["lamp"] = []  # no lit tag and no lamps: lighting unknown
+        key = lambda e: "-".join(sorted((str(e["a"]), str(e["b"]))))
+        bare = sim.danger(area, lane, NIGHT)
+        filled = sim.danger(area, lane, NIGHT, {key(lane): 1.0})
+        self.assertLess(filled[1], bare[1])  # an estimate fills the gap
+        self.assertLess(filled[0], bare[0])  # and "likely lit" lowers the danger
+        self.assertEqual(sim.danger(area, footway, NIGHT, {key(footway): 1.0}), sim.danger(area, footway, NIGHT))  # never overrules a tag
+        zero = {k: 0.0 for k in pairs.FEATURES + [f"{k}_dark" for k in pairs.FEATURES]}
+        shortest = {"features": pairs.FEATURES, "weights": {**zero, "length_m": -1.0, "length_m_dark": -1.0}}
+        res = sim.simulate(area, [(A, B, NIGHT)] * 10, random.Random(0), ranker=shortest)
+        self.assertEqual(res["learned"]["expected_per_1000"], res["fastest"]["expected_per_1000"])  # learned "shorter is better" walks the fastest way
 
 
 class Surroundings(unittest.TestCase):

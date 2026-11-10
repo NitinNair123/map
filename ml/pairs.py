@@ -1,7 +1,7 @@
 """Route pairs for learning what people judge safer: two real routes between the same two points at the same hour,
 each described only by what was measured along it (never by SafeRoute's own score, or the model would just copy it).
 
-Usage: py ml/pairs.py --n 5000     appends to ml/data/pairs.jsonl; run again to add more
+Usage: py ml/pairs.py --n 5000     makes ml/data/pairs.jsonl up to 5000 pairs; stopped early, it carries on next time
 Then:  py ml/label_llm.py          a local Qwen picks the safer route of each pair (free, overnight)
        py ml/rate_pairs.py         a page where people answer the same question
        py ml/rank.py               learns how much each measure matters from those answers
@@ -69,7 +69,7 @@ def main():
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     made = tries = 0
     with open(OUT, "a") as f:
-        while made < args.n and tries < args.n * 5:
+        while have + made < args.n and tries < args.n * 5:
             tries += 1
             c = rng.choice(dataset.SPOTS)
             a = (c[0] + rng.uniform(-0.02, 0.02), c[1] + rng.uniform(-0.02, 0.02))
@@ -87,7 +87,7 @@ def main():
                 f.write(json.dumps({"id": have + made, **pair}) + "\n")
                 f.flush()
                 if made % 50 == 0:
-                    print(f"{made} of {args.n} pairs", flush=True)
+                    print(f"{have + made} of {args.n} pairs", flush=True)
     print(f"{made} pairs added, {have + made} in {OUT}", flush=True)
 
 

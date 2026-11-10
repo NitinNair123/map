@@ -86,6 +86,26 @@ def rows(path, types=None, **extra):
     return out
 
 
+def breaker(fetch, name, limit=3):
+    """A source that failed `limit` times in a row is skipped for the rest of the run instead of timing out on every
+    tile (Mapillary timing out made one block take an hour). Its tiles stay without it, so its columns are unknown."""
+    fails = [0]
+
+    def call(*a):
+        if fails[0] >= limit:
+            raise OSError(f"{name} skipped for this run after {limit} failures in a row")
+        try:
+            out = fetch(*a)
+        except Exception:
+            fails[0] += 1
+            if fails[0] == limit:
+                print(f"{name}: {limit} failures in a row, skipped for the rest of this run", flush=True)
+            raise
+        fails[0] = 0
+        return out
+    return call
+
+
 def store(world=False):
     """A TileStore set up like server.py's, except that every source loads before an area is built (no background)
     and streets come from OpenStreetMap, which carries the lit tags."""
@@ -93,11 +113,11 @@ def store(world=False):
     used = ["OpenStreetMap", "NASA night lights"]
     if key("mapillary_token.txt", "MAPILLARY_TOKEN"):
         os.environ["MAPILLARY_TOKEN"] = key("mapillary_token.txt", "MAPILLARY_TOKEN")
-        extras["mapillary"] = mapillary
+        extras["mapillary"] = breaker(mapillary, "Mapillary")
         used.append("Mapillary")
     if key("geoapify_key.txt", "GEOAPIFY_KEY") and not world:  # its free daily quota is kept for Delhi NCR
         os.environ["GEOAPIFY_KEY"] = key("geoapify_key.txt", "GEOAPIFY_KEY")
-        extras["geoapify"] = geoapify
+        extras["geoapify"] = breaker(geoapify, "Geoapify")
         used.append("Geoapify")
     if importlib.util.find_spec("pyarrow"):
         extras.update(places=overture_places, buildings=overture_buildings)
