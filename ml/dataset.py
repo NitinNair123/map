@@ -117,6 +117,8 @@ def store(world=False):
     used = ["OpenStreetMap", "NASA night lights"]
     if key("mapillary_token.txt", "MAPILLARY_TOKEN"):
         os.environ["MAPILLARY_TOKEN"] = key("mapillary_token.txt", "MAPILLARY_TOKEN")
+        if key("mapillary_token_2.txt", "MAPILLARY_TOKEN_2"):  # optional second token, used when the first is refused or rate-limited
+            os.environ["MAPILLARY_TOKEN_2"] = key("mapillary_token_2.txt", "MAPILLARY_TOKEN_2")
         extras["mapillary"] = breaker(mapillary, "Mapillary")
         used.append("Mapillary")
     if key("geoapify_key.txt", "GEOAPIFY_KEY") and not world:  # its free daily quota is kept for Delhi NCR

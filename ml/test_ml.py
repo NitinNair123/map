@@ -92,6 +92,50 @@ class Features(unittest.TestCase):
             finally:
                 studio.LOGS = old
 
+    def test_mapillary_asks_one_tile_at_a_time(self):
+        import json
+        import tiles
+        asked = []
+
+        def fake(req, timeout):
+            box = req.full_url.split("bbox=")[1].split("&")[0]
+            asked.append(box)
+            w, s, e, n = map(float, box.replace("%2C", ",").split(","))
+            return json.dumps({"data": [{"id": "same", "object_value": "object--street-light",
+                                         "geometry": {"coordinates": [(w + e) / 2, (s + n) / 2]}, "last_seen_at": None}]}).encode()
+        real, token = tiles._read, os.environ.get("MAPILLARY_TOKEN")
+        tiles._read, os.environ["MAPILLARY_TOKEN"] = fake, "x"
+        try:
+            out = tiles.mapillary(28.0, 77.0, 28.03, 77.03)
+        finally:
+            tiles._read = real
+            os.environ.pop("MAPILLARY_TOKEN") if token is None else os.environ.__setitem__("MAPILLARY_TOKEN", token)
+        self.assertEqual(len(set(asked)), 9)  # a 3x3 block is nine one-tile requests
+        self.assertEqual(len(out["elements"]), 1)  # the same id from every tile counts once
+
+    def test_mapillary_second_token_takes_over_when_refused(self):
+        import io
+        import json
+        import urllib.error
+        import tiles
+        used = []
+
+        def fake(req, timeout):
+            used.append(req.full_url)
+            if "first%7Ctoken" in req.full_url:
+                raise urllib.error.HTTPError(req.full_url, 429, "rate limited", {}, io.BytesIO(b""))
+            return json.dumps({"data": []}).encode()
+        real, saved = tiles._read, {k: os.environ.get(k) for k in ("MAPILLARY_TOKEN", "MAPILLARY_TOKEN_2")}
+        tiles._read, os.environ["MAPILLARY_TOKEN"], os.environ["MAPILLARY_TOKEN_2"] = fake, "first|token", "second|token"
+        try:
+            tiles._mapillary_cell(28.0, 77.0, 28.01, 77.01)
+        finally:
+            tiles._read = real
+            for k, v in saved.items():
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        self.assertEqual(len(used), 2)
+        self.assertIn("second%7Ctoken", used[1])
+
     def test_downloads_are_counted_as_they_happen(self):
         import dataset
         import tiles

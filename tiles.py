@@ -7,6 +7,7 @@ import os
 import struct
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
@@ -138,13 +139,24 @@ def seen_years_ago(v):
     return (time.time() - t) / (365.25 * 86400)
 
 
-def mapillary(s, w, n, e):
-    """Street lights and CCTV cameras that Mapillary found in street-level photos of one tile."""
-    q = urllib.parse.urlencode({"access_token": os.environ["MAPILLARY_TOKEN"], "fields": "id,object_value,geometry,last_seen_at",
+def _mapillary_page(url, token):
+    try:
+        return json.loads(_read(urllib.request.Request(url, headers={"User-Agent": "SafeRoute/1.0"}), 20))
+    except urllib.error.HTTPError as err:
+        spare = os.environ.get("MAPILLARY_TOKEN_2")  # a second token (data/mapillary_token_2.txt) takes over when the first is refused or rate-limited
+        if err.code in (401, 403, 429) and spare and spare != token:
+            return json.loads(_read(urllib.request.Request(url.replace(urllib.parse.quote(token, safe=""), urllib.parse.quote(spare, safe="")),
+                                                           headers={"User-Agent": "SafeRoute/1.0"}), 20))
+        raise
+
+
+def _mapillary_cell(s, w, n, e):
+    token = os.environ["MAPILLARY_TOKEN"]
+    q = urllib.parse.urlencode({"access_token": token, "fields": "id,object_value,geometry,last_seen_at",
                                 "bbox": f"{w},{s},{e},{n}", "object_values": ",".join(MAPILLARY_KINDS), "limit": 2000})
     url, out = f"https://graph.mapillary.com/map_features?{q}", []
     for _ in range(5):  # at most 10,000 objects per tile
-        page = json.loads(_read(urllib.request.Request(url, headers={"User-Agent": "SafeRoute/1.0"}), 20))
+        page = _mapillary_page(url, token)
         for f in page.get("data", []):
             age = seen_years_ago(f.get("last_seen_at"))
             if f.get("object_value") in MAPILLARY_KINDS and (age is None or age <= MAPILLARY_MAX_AGE_Y):
@@ -154,7 +166,21 @@ def mapillary(s, w, n, e):
         url = page.get("paging", {}).get("next")
         if not url:
             break
-    return {"elements": out}
+    return out
+
+
+def mapillary(s, w, n, e):
+    """Street lights and CCTV cameras that Mapillary found in street-level photos. A box of several tiles is asked for one
+    tile at a time, 3 in parallel: a 3x3 box in one request took 30 s and failed with HTTP 500, one tile takes about 3 s."""
+    cells = [(round(s + i * TILE, 5), round(w + j * TILE, 5)) for i in range(max(1, round((n - s) / TILE))) for j in range(max(1, round((e - w) / TILE)))]
+    src = getattr(_now, "source", None)
+
+    def one(c):
+        _now.source = src  # the byte count of this download belongs to the same source
+        return _mapillary_cell(c[0], c[1], min(n, c[0] + TILE), min(e, c[1] + TILE))
+    with ThreadPoolExecutor(3) as ex:
+        found = [x for part in ex.map(one, cells) for x in part]  # one tile failing fails the box: the caller counts and logs it
+    return {"elements": list({x["id"]: x for x in found}.values())}
 
 
 # Geoapify place categories -> the OSM tags the scorer already understands (for places that didn't come from OSM)
