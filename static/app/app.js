@@ -787,7 +787,16 @@ async function endTrip(safe, auto) {
   renderSheet(`<div class="empty"><div class="badge" style="background:var(--safe-soft);color:var(--safe)">${icon("check")}</div>
     <div><h3>${safe ? (auto ? "You've arrived" : "Glad you're safe") : "Trip ended"}</h3><p class="muted">Live sharing has stopped.</p></div></div>
     ${safe && contacts.length ? `<a class="btn btn-primary btn-block" style="margin-top:12px" href="${esc(smsLink(contacts, "I've reached safely 🙂 (sent from SafeRoute)"))}">Tell my contacts I'm safe</a>` : ""}
+    <div id="feel" style="margin-top:12px"><p class="muted">How did this route feel?</p>
+      <div style="display:flex;gap:8px">${[["safe", "Safe"], ["uneasy", "Uneasy"], ["unsafe", "Unsafe"]].map(([k, v]) => `<button class="btn" style="flex:1" data-feel="${k}">${v}</button>`).join("")}</div></div>
     <button class="btn btn-block" style="margin-top:8px" id="newTrip">Plan another trip</button>`);
+  // one tap teaches the route model: only the route's measures, the hour and the rough area are sent, never the trip itself
+  document.querySelectorAll("[data-feel]").forEach((b) => b.onclick = () => {
+    const r = t.route, when = new Date(t.started);
+    api("/api/route-feel", { feel: b.dataset.feel, mid: r.coords[Math.floor(r.coords.length / 2)], hour: when.getHours(),
+      weekend: [0, 6].includes(when.getDay()), measures: { ...r.stats, length_m: r.length_m, unrated_pct: r.unrated_pct } }).catch(() => {});
+    $("#feel").innerHTML = '<p class="muted">Thanks, that helps SafeRoute learn.</p>';
+  });
   $("#newTrip").onclick = () => { state.to = null; $("#toInput").value = ""; setMarker("to", null); renderIdle(); };
 }
 

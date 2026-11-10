@@ -48,6 +48,9 @@ ENDED_TTL = 30 * 60  # an ended trip keeps only "ended" (no locations) so friend
 MAX_TRIPS = 20000
 # requests allowed per network address in a window of seconds, so one script can't flood reports or fill the trip table.
 # One address can be many phones (mobile carriers share them), so reports are also limited per device in reports.py.
+FEELS = ("safe", "uneasy", "unsafe")
+FEEL_MEASURES = ("length_m", "lit_pct", "dark_pct", "main_pct", "open_now", "isolated_m", "nothing_open_m", "help_gap_m", "cctv",
+                 "police_m", "unrated_pct")
 LIMITS = {"report": (60, 3600), "trip": (60, 3600), "update": (120, 600), "read": (300, 600)}
 # map-building requests running at once; the rest wait, so a burst of users can't run a small server out of memory
 BUSY = threading.BoundedSemaphore(6)
@@ -529,11 +532,13 @@ class Handler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             body = self.read_json()
-            kind = "report" if path == "/api/report" else "trip" if path == "/api/trip" else "update"
+            kind = "report" if path in ("/api/report", "/api/route-feel") else "trip" if path == "/api/trip" else "update"
             if not allowed(kind, self.address()):
                 return self.send_json({"error": "Too many requests from this network, please try again later."}, 429)
             if path == "/api/report":
                 return self.report(body)
+            if path == "/api/route-feel":
+                return self.route_feel(body)
             if path == "/api/trip":
                 return self.start_trip(body)
             if path.startswith("/api/trip/"):
@@ -559,6 +564,28 @@ class Handler(SimpleHTTPRequestHandler):
         if not r:
             return self.send_json({"error": "Thanks! You've sent a lot of reports this hour, please try again later."}, 429)
         store.add_report(r)
+        self.send_json({"ok": True})
+
+    def route_feel(self, body):
+        """One answer to "How did this route feel?" after a trip: the route's measures, the hour and the ~3 km area of its
+        middle, for the route model in ml/. The position itself, the trip's ends and who answered are not kept."""
+        if body["feel"] not in FEELS:
+            raise ValueError("unknown answer")
+        lat, lon = latlon(body["mid"])
+        hour = int(body["hour"])
+        if not 0 <= hour <= 23:
+            raise ValueError("bad hour")
+        m = [float(body["measures"][k]) if body["measures"].get(k) is not None else "" for k in FEEL_MEASURES]
+        if any(x != "" and not 0 <= x <= 1e6 for x in m):
+            raise ValueError("bad measure")
+        path = os.path.join(DATA_DIR, "route_feels.csv")
+        with lock:
+            new = not os.path.exists(path)
+            with open(path, "a", newline="") as f:
+                w = csv.writer(f)
+                if new:
+                    w.writerow(["block", "hour", "weekend", "feel", *FEEL_MEASURES])
+                w.writerow([f"{int(lat // 0.03)}_{int(lon // 0.03)}", hour, int(bool(body.get("weekend"))), body["feel"], *m])
         self.send_json({"ok": True})
 
     def start_trip(self, body):

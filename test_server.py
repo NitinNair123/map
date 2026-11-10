@@ -100,6 +100,17 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(code, 500)
         self.assertIn("our side", out["error"])
 
+    def test_route_feel_keeps_measures_and_area_but_no_position(self):
+        import server
+        body = {"feel": "uneasy", "mid": [28.4741, 77.4998], "hour": 22, "weekend": False, "measures": {"lit_pct": 40, "length_m": 900, "police_m": None}}
+        with mock.patch.object(server, "DATA_DIR", tempfile.mkdtemp()):
+            self.assertEqual(self.call("/api/route-feel", body)[0], 200)
+            self.assertEqual(self.call("/api/route-feel", {**body, "feel": "great"})[0], 400)
+            self.assertEqual(self.call("/api/route-feel", {**body, "hour": 30})[0], 400)
+            saved = open(os.path.join(server.DATA_DIR, "route_feels.csv")).read()
+        self.assertIn("949_2583,22,0,uneasy,900.0,40.0", saved)
+        self.assertNotIn("28.47", saved)
+
     def test_report_is_saved_and_limited(self):
         self.assertEqual(self.call("/api/report", {"lat": 28.0005, "lon": 77.0015, "type": "harassment"})[0], 200)
         self.assertEqual(server.REPORTS.all()[-1]["type"], "harassment")
