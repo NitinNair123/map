@@ -49,14 +49,20 @@ def load_base(folder=OUT):
     return lit, ranker
 
 
-def danger(area, e, when, lit=None):
-    """0 (good on every factor) to 1 (poor on every factor) for one street at one moment, and how much of it was unknown.
+def known_factors(area, e, when, lit=None):
+    """{factor: 0-1 value} for the factors something measured on one street at one moment.
     lit: the base stage's lit estimates, used only where nothing measured the lighting (scaled by how dark it is)."""
     f = rating.factors(area, e, when, area.light(when))
     known = {k: v["value"] for k, v in f.items() if v and k in HAZARD}
     key = "-".join(sorted((str(e["a"]), str(e["b"]))))  # the street id of ml/features.py
     if "lighting" not in known and lit and key in lit:
         known["lighting"] = 1 - (1 - lit[key]) * (1 - area.light(when))
+    return known
+
+
+def danger(area, e, when, lit=None):
+    """0 (good on every factor) to 1 (poor on every factor) for one street at one moment, and how much of it was unknown."""
+    known = known_factors(area, e, when, lit)
     return sum(w * (1 - known.get(k, 0.5)) for k, w in HAZARD.items()), sum(w for k, w in HAZARD.items() if k not in known)
 
 

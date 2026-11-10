@@ -32,8 +32,10 @@ STAGES = [  # id, name, command, what it does
     ("ab", "A/B answers page", ["ml/rate_pairs.py"], "People answer the same pairs at http://localhost:8765."),
     ("rank", "Base training: routes", ["ml/rank.py"], "Learns how much each measure matters from the answers."),
     ("sim", "Stage 2: simulated walks", ["ml/sim.py", "--trips", "500"], "Races the route choices through simulated trips."),
+    ("world", "Stage 2: virtual world", ["ml/world.py", "--episodes", "3000"],
+     "A walker is rewarded for arriving and punished for events on the real street graph. Event chances are assumptions. Resumes."),
 ]
-CHAIN = ["build", "train", "pairs", "qwen", "rank", "sim"]  # the A/B page is a server, started on its own
+CHAIN = ["build", "train", "pairs", "qwen", "rank", "sim", "world"]  # the A/B page is a server, started on its own
 GROUPS = {  # the parameter groups of the spec; a test checks every model input sits in exactly one
     "Street itself": "highway sidewalk length lanes maxspeed unpaved rough underpass overbridge gap_m dead_ends n_crossing degree",
     "Lighting and cameras": "n_lamp lamps_per_100m n_cctv lamps_100 lamps_250 cctv_250 cctv_500 d_cctv d_lamp nb_lamps_per_100m nightlight",
@@ -217,6 +219,7 @@ def network():
 
 BLOCK = re.compile(r"\[(\d+)/(\d+)\] block \S+: (\d+) streets, (\d+) with a lit label")
 TRIAL = re.compile(r"^(\w+) trial (\d+) of (\d+): score ([\d.]+)")
+WORLD = re.compile(r"^\[(\d+)/(\d+)\] episodes: mean reward (-?[\d.]+)")
 PROBLEM = re.compile(r"Traceback|Error|failures in a row|skipped \(")
 
 
@@ -244,13 +247,18 @@ def activity():
         if m and m[1] == train["head"]:
             train["curve"].append(float(m[4]))
             train["of"] = int(m[3])
+    world = {"curve": [], "of": 0}
+    for line in this_run("world"):
+        m = WORLD.match(line)
+        if m:
+            world = {"curve": world["curve"] + [float(m[3])], "of": int(m[2]), "done": int(m[1])}
     problems = {sid: [l for l in this_run(sid) if PROBLEM.search(l)][-3:] for sid, *_ in STAGES}
-    return {"build": build, "train": train, "problems": {k: v for k, v in problems.items() if v}}
+    return {"build": build, "train": train, "world": world, "problems": {k: v for k, v in problems.items() if v}}
 
 
 def reports():
     out = {}
-    for name in ("report.md", "route_report.md", "sim_report.md"):
+    for name in ("report.md", "route_report.md", "sim_report.md", "world_report.md"):
         path = os.path.join(OUT, name)
         if os.path.exists(path):
             out[name] = open(path, encoding="utf-8").read()[:20000]
@@ -381,12 +389,12 @@ function draw(now){requestAnimationFrame(draw);if(!S)return;const dpr=devicePixe
  P.in.forEach(n=>heads.forEach(h=>{if(!feeds(n,h.id))return;const b=P.heads[h.id],w=linkW(n.g,h.id),on=hot[h.id];
   cx.strokeStyle=on?`hsla(${HUE[n.gi]},80%,65%,${.07+.3*w})`:`rgba(148,160,191,${.025+.25*w*n.u+.1*w})`;cx.lineWidth=.5+1.5*w;
   cx.beginPath();cx.moveTo(n.x,n.y);cx.bezierCurveTo((n.x+b.x)/2,n.y,(n.x+b.x)/2,b.y,b.x,b.y);cx.stroke()}));
- heads.forEach(h=>{const a=P.heads[h.id],b=P.sim;cx.strokeStyle=running('sim')?'rgba(91,140,255,.6)':'rgba(148,160,191,.2)';cx.lineWidth=1.2;
+ heads.forEach(h=>{const a=P.heads[h.id],b=P.sim;cx.strokeStyle=(running('sim')||running('world'))?'rgba(91,140,255,.6)':'rgba(148,160,191,.2)';cx.lineWidth=1.2;
   cx.beginPath();cx.moveTo(a.x,a.y);cx.bezierCurveTo((a.x+b.x)/2,a.y,(a.x+b.x)/2,b.y,b.x,b.y);cx.stroke()});
  // steady trickle only while a stage is really working, on the part it works on
  if(running('build')&&Math.random()<.25){const n=P.in[Math.floor(Math.random()*P.in.length)];fire({x:0,y:n.y},n,`hsl(${HUE[n.gi]},90%,70%)`,.6)}
  Object.keys(hot).forEach(h=>{if(Math.random()<.5){const c=P.in.filter(n=>feeds(n,h));const n=c[Math.floor(Math.random()*c.length)];fire(n,P.heads[h],`hsl(${HUE[n.gi]},90%,72%)`)}});
- if(running('sim')&&Math.random()<.3)fire(P.heads[heads[Math.floor(Math.random()*heads.length)].id],P.sim,'rgba(160,195,255,.95)');
+ if((running('sim')||running('world'))&&Math.random()<.3)fire(P.heads[heads[Math.floor(Math.random()*heads.length)].id],P.sim,'rgba(160,195,255,.95)');
  fx=fx.filter(p=>(p.s+=p.v/60)<1);fx.forEach(p=>{const q=bez(p.a,p.b,p.s);cx.fillStyle=p.col;cx.globalAlpha=Math.sin(p.s*Math.PI);
   cx.beginPath();cx.arc(q.x,q.y,1.9,0,7);cx.fill()});cx.globalAlpha=1;if(fx.length>2500)fx=fx.slice(-2500);
  // input dots
@@ -402,10 +410,13 @@ function draw(now){requestAnimationFrame(draw);if(!S)return;const dpr=devicePixe
   cx.beginPath();cx.arc(n.x,n.y,n.r,0,7);cx.fill();cx.stroke();
   if(t.head==h.id&&t.of){cx.strokeStyle='#a8c2ff';cx.lineWidth=3;cx.beginPath();cx.arc(n.x,n.y,n.r+4,-Math.PI/2,-Math.PI/2+2*Math.PI*t.curve.length/t.of);cx.stroke()}
   cx.fillStyle='#e8ecf7';if(n.nar){cx.textAlign='center';cx.fillText(h.name,n.x,n.y+n.r+12)}else{cx.textAlign='left';cx.fillText(h.name,n.x+n.r+9,n.y)}});
- const sm=P.sim;cx.fillStyle=running('sim')?'#3d6fe8':'#1c2440';cx.strokeStyle='#3a4670';cx.beginPath();cx.arc(sm.x,sm.y,sm.r,0,7);cx.fill();cx.stroke();
+ const sm=P.sim;cx.fillStyle=(running('sim')||running('world'))?'#3d6fe8':'#1c2440';cx.strokeStyle='#3a4670';cx.beginPath();cx.arc(sm.x,sm.y,sm.r,0,7);cx.fill();cx.stroke();
  cx.fillStyle='#e8ecf7';cx.textAlign='center';cx.fillText('Stage 2',sm.x,sm.y+sm.r+14);
  curve(W,Hc)}
 function curve(W,Hc){const y0=Hc-100,h=80,x0=W<600?8:40,w=W-x0-20,t=S.activity.train;cx.strokeStyle='#26304d';cx.lineWidth=1;cx.strokeRect(x0,y0,w,h);
+ const wd=S.activity.world;if(wd.curve.length&&(running('world')||!running('train'))){const c=wd.curve,lo=Math.min(...c),hi=Math.max(...c),sp=hi-lo||1,X=i=>x0+8+(w-16)*i/Math.max(1,(wd.of?wd.of/25:c.length)-1),Y=v=>y0+h-8-(h-32)*(v-lo)/sp;
+  cx.strokeStyle='#a8c2ff';cx.lineWidth=2;cx.beginPath();c.forEach((v,i)=>i?cx.lineTo(X(i),Y(v)):cx.moveTo(X(i),Y(v)));cx.stroke();cx.fillStyle='#e8ecf7';
+  cx.fillText(`Virtual world: ${wd.done} of ${wd.of} episodes, reward per walk ${c[c.length-1].toFixed(3)} (higher is better; event chances are assumptions)`,x0+8,y0+10);return}
  cx.textAlign='left';cx.fillStyle='#94a0bf';cx.font='12px system-ui';
  if(!t.curve.length){cx.fillText(W<600?'Learning curve: shows during training.':'Learning curve: appears when base training runs (each point is one setting tried, scored on areas held out).',x0+8,y0+h/2);return}
  const lo=Math.min(...t.curve),hi=Math.max(...t.curve),sp=hi-lo||1,X=i=>x0+8+(w-16)*i/Math.max(1,(t.of||t.curve.length)-1),Y=v=>y0+h-8-(h-32)*(v-lo)/sp;
@@ -415,7 +426,7 @@ function curve(W,Hc){const y0=Hc-100,h=80,x0=W<600?8:40,w=W-x0-20,t=S.activity.t
 function nowText(){const A=S.activity,b=A.build,t=A.train,parts=[];
  if(running('build'))parts.push(`Measuring streets: block ${b.blocks||'1'}${b.of?' of '+b.of:''}, ${b.streets.toLocaleString()} streets this run (${b.lit.toLocaleString()} with a lit label), ${b.blocks_on_disk} blocks saved in total`);
  if(running('train'))parts.push(t.head?`Training ${(S.network.heads.find(x=>x.id==t.head)||{}).name||t.head}: setting ${t.curve.length} of ${t.of||'?'}`:'Training: loading the streets');
- ['pairs','qwen','rank','sim'].forEach(id=>{const s=S.stages.find(x=>x.id==id);if(s.status=='running')parts.push(s.name+(s.progress!=null?' '+Math.round(s.progress*100)+'%':''))});
+ ['pairs','qwen','rank','sim','world'].forEach(id=>{const s=S.stages.find(x=>x.id==id);if(s.status=='running')parts.push(s.name+(s.progress!=null?' '+Math.round(s.progress*100)+'%':''))});
  return parts.join(' · ')||'Nothing running. Press Run everything or Start on a stage.'}
 load();setInterval(load,2000);requestAnimationFrame(draw);
 </script></html>"""

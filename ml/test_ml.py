@@ -175,6 +175,39 @@ class Simulation(unittest.TestCase):
         self.assertEqual(res["learned"]["expected_per_1000"], res["fastest"]["expected_per_1000"])  # learned "shorter is better" walks the fastest way
 
 
+class VirtualWorld(unittest.TestCase):
+    def test_walker_learns_to_dodge_the_danger_it_is_punished_for(self):
+        import random
+        import numpy as np
+        import world
+        from test_safety import NIGHT
+        w0 = world.World(Area(fixture()))
+        rng = random.Random(0)
+        w = np.array([world.START.get(k, 0.0) for k in world.FEATS])
+        base = 0.0
+        trips = [w0.trip(rng) for _ in range(60)]
+        before = world.evaluate(w0, w, [(a, b, NIGHT) for a, b, _ in trips], random.Random(1))
+        for i in range(30):
+            eps = []
+            for _ in range(world.BATCH):
+                a, b, _ = w0.trip(rng)
+                steps, reward, ok, *_ = world.episode(w0, w, (a, b, NIGHT), rng)
+                eps.append({"steps": steps, "reward": reward})
+            w, base = world.learn(eps, w, base)
+        after = world.evaluate(w0, w, [(a, b, NIGHT) for a, b, _ in trips], random.Random(1))
+        self.assertLess(after["events"], before["events"])  # meets fewer events after learning than before, on the same trips
+        self.assertLess(w[world.FEATS.index("danger")], 0)  # dangerous streets are avoided
+
+    def test_resume_state_round_trips(self):
+        import world
+        with tempfile.TemporaryDirectory() as d:
+            world.STATE = os.path.join(d, "s.json")
+            s = world.load_state()
+            s["episodes"] = 50
+            world.save(s)
+            self.assertEqual(world.load_state()["episodes"], 50)
+
+
 class Surroundings(unittest.TestCase):
     def test_context_counts_and_nearest_distances(self):
         area = Area(fixture())
