@@ -59,6 +59,42 @@ class Features(unittest.TestCase):
         self.assertIsNone(features.bus_rate(bus, (51.5, -0.12), 0, 22))  # London: the feed doesn't cover it, so no count is not zero
 
 
+class Routes(unittest.TestCase):
+    def test_pair_holds_measures_but_never_the_score(self):
+        import random
+        import pairs
+        from test_safety import NIGHT
+        grid = __import__("test_safety").fixture()
+        p = pairs.make_pair(Area(grid), (28.0, 77.0), (28.0, 77.003), NIGHT, random.Random(0))
+        self.assertIsNotNone(p)
+        self.assertEqual(set(p["A"]), set(pairs.FEATURES))
+        self.assertFalse({"score", "kind", "rank"} & set(p["A"]))
+
+    def test_language_model_answer_must_survive_the_swap(self):
+        import json
+        import label_llm
+        p = {"hour": 22, "weekend": 0, "A": {k: 1 for k in label_llm.pairs.FEATURES}, "B": {k: 0 for k in label_llm.pairs.FEATURES}}
+        likes_ones = lambda t: json.dumps({"safer": "A" if "A = 1" in t else "B", "reason": "more of everything"})
+        self.assertEqual(label_llm.judge(p, likes_ones)[0], "A")
+        self.assertIsNone(label_llm.judge(p, lambda t: json.dumps({"safer": "A"}))[0])  # always says A: position bias, thrown out
+        self.assertIsNone(label_llm.judge(p, lambda t: "no idea")[0])
+
+    def test_ranker_learns_what_the_answers_reward(self):
+        import random
+        import pairs
+        import rank
+        rng = random.Random(1)
+        route = lambda: {k: rng.uniform(0, 100) for k in pairs.FEATURES}
+        pl = [{"id": i, "block": f"{i % 8}_0", "daylight": i % 2, "A": route(), "B": route()} for i in range(400)]
+        labels = {p["id"]: "A" if p["A"]["lit_pct"] - p["A"]["isolated_m"] > p["B"]["lit_pct"] - p["B"]["isolated_m"] else "B" for p in pl}
+        saved, info = rank.train(pl, labels)
+        self.assertGreater(info["accuracy_on_unseen_areas"], 0.9)
+        self.assertGreater(saved["weights"]["lit_pct"], 0)
+        self.assertLess(saved["weights"]["isolated_m"], 0)
+        self.assertGreater(rank.score(saved, {**pl[0]["B"], "lit_pct": 100, "isolated_m": 0}, {**pl[0]["B"], "lit_pct": 0, "isolated_m": 100}, 0), 0)
+        self.assertIn("skipped", rank.train(pl[:20], labels)[1])  # too few answers: says so, learns nothing
+
+
 class Surroundings(unittest.TestCase):
     def test_context_counts_and_nearest_distances(self):
         area = Area(fixture())
