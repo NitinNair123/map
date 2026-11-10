@@ -30,7 +30,7 @@ def prompt(p, first="A"):
 
 def ollama(text, model):
     body = json.dumps({"model": model, "messages": [{"role": "user", "content": text}], "stream": False, "format": "json",
-                       "think": False, "options": {"temperature": 0, "num_ctx": 4096}}).encode()
+                       "think": False, "options": {"temperature": 0, "num_ctx": 2048}}).encode()
     req = urllib.request.Request("http://localhost:11434/api/chat", body, {"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=300) as r:
         return json.load(r)["message"]["content"]
