@@ -256,6 +256,46 @@ def activity():
     return {"build": build, "train": train, "world": world, "problems": {k: v for k, v in problems.items() if v}}
 
 
+SOURCE_NAMES = {"": "OpenStreetMap", "nightlights": "NASA night lights", "mapillary": "Mapillary", "geoapify": "Geoapify",
+                "places": "Overture places", "buildings": "Overture buildings", "roads": "Overture streets"}
+STALL_S = 180  # nothing finished for this long while the build runs: say so
+
+
+def live(running):
+    """The build's real counters (ml/dataset.py writes them every second) with rates, ETA and a stall check. None
+    before the first build with live counters has run."""
+    try:
+        L = json.load(open(os.path.join(LOGS, "build_live.json")))
+    except (OSError, ValueError):
+        return None
+    now, secs = time.time(), L.get("block_seconds") or []
+    avg = sum(secs) / len(secs) if secs else None
+    left = max(0, L["blocks_total"] - L["blocks_on_disk"])
+    elapsed = now - L["first_block_at"] if L.get("first_block_at") else None
+    waits = sorted(({"source": SOURCE_NAMES.get(k, k), "box": box, "for": round(now - t)} for k, s in L["sources"].items()
+                    for box, t in s["busy"].items()), key=lambda x: -x["for"])
+    sources = [{"name": SOURCE_NAMES.get(k, k), **{f: s[f] for f in ("requests", "ok", "failed", "skipped", "bytes", "items")},
+                "avg_s": round(s["seconds"] / (s["ok"] + s["failed"]), 1) if s["ok"] + s["failed"] else None,
+                "waiting": len(s["busy"]), "last_error": s["last_error"], "id": k} for k, s in L["sources"].items()]
+    stalled = None
+    if running:
+        if now - L["updated"] > 15:
+            stalled = f"The build hasn't reported for {now - L['updated']:.0f} s. It may be frozen: Pause it and Start it again."
+        elif now - L["last_event"] > STALL_S:
+            stalled = f"Nothing has finished for {(now - L['last_event']) / 60:.0f} min." + \
+                      (f" Still waiting on {waits[0]['source']} ({waits[0]['for'] // 60} min). A slow or blocked connection can do this." if waits else "")
+    cur = L.get("current") if running else None
+    waits = waits if running else []  # a stopped build waits on nothing
+    return {"running": running, "phase": L["phase"] if running else "Stopped" if L["phase"] != "Done" else "Done",
+            "updated_ago": round(now - L["updated"]), "last_event_ago": round(now - L["last_event"]),
+            "blocks_total": L["blocks_total"], "blocks_on_disk": L["blocks_on_disk"], "blocks_built": L["blocks_built"],
+            "blocks_failed": L["blocks_failed"], "streets": L["streets"], "lit": L["lit"],
+            "streets_per_s": round(L["streets"] / elapsed, 2) if elapsed and L["streets"] else 0,
+            "block_avg_s": round(avg) if avg else None, "eta_s": round(left * avg) if avg and running else None,
+            "current": {"n": cur["n"], "for": round(now - cur["started"])} if cur else None, "prefetch": L.get("prefetch"),
+            "sources": sources, "waits": waits, "stalled": stalled}
+
+
 def reports():
     out = {}
     for name in ("report.md", "route_report.md", "sim_report.md", "world_report.md"):
@@ -284,7 +324,8 @@ class Handler(BaseHTTPRequestHandler):
             for sid, name, _, what in STAGES:
                 lines = tail(sid)
                 stages.append({"id": sid, "name": name, "what": what, "status": RUNNER.status(sid), "progress": progress(lines), "tail": lines})
-            return self.send(json.dumps({"stages": stages, "ollama": ollama(), "network": network(), "activity": activity(), "reports": reports()}))
+            return self.send(json.dumps({"stages": stages, "ollama": ollama(), "network": network(), "activity": activity(), "reports": reports(),
+                                         "live": live(RUNNER.status("build") == "running"), "now": time.time()}))
         self.send("not found", "text/plain", 404)
 
     def do_POST(self):
@@ -332,14 +373,21 @@ canvas{width:100%;height:600px;display:block}@media(max-width:600px){canvas{heig
 .running{color:var(--accent);border-color:var(--accent)}.done{color:var(--good);border-color:var(--good)}.failed{color:var(--bad);border-color:var(--bad)}.paused{color:var(--warn);border-color:var(--warn)}
 .bar{height:4px;background:var(--line);border-radius:4px;margin-top:6px;overflow:hidden}.bar i{display:block;height:100%;background:var(--accent);width:0}
 pre{white-space:pre-wrap;font:12px/1.4 ui-monospace,Consolas,monospace;color:var(--quiet);margin:6px 0 0;max-height:150px;overflow:auto}
-.note{color:var(--quiet);font-size:13px}details summary{cursor:pointer;color:var(--quiet);font-size:13px}
+.note{color:var(--quiet);font-size:13px}
+.stall{background:#3a1820;border:1px solid var(--bad);color:#ffd0d0;border-radius:8px;padding:8px 10px;margin:0 0 8px;font-weight:600}
+.phase{font-size:14px;margin-bottom:8px}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:10px}
+.stat{background:#10162a;border:1px solid var(--line);border-radius:8px;padding:6px 9px}.stat b{display:block;font-size:18px;font-variant-numeric:tabular-nums}.stat span{color:var(--quiet);font-size:12px}
+table.src{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}table.src th{color:var(--quiet);font-weight:500;text-align:right;padding:3px 6px}
+table.src td{text-align:right;padding:3px 6px;border-top:1px solid var(--line)}table.src td:first-child,table.src th:first-child{text-align:left}
+td.bad{color:var(--bad)}td.wait{color:var(--warn)}.flashrow{animation:fr 1.2s}@keyframes fr{from{background:#1e3a2a}to{background:transparent}}
+.tablewrap{overflow-x:auto}details summary{cursor:pointer;color:var(--quiet);font-size:13px}
 </style>
 <header><h1>SafeRoute AI Studio</h1><div><span id=qwen class=pill></span>
 <button class=primary onclick="post('/api/run-all')">Run everything</button> <button onclick="post('/api/pause-all')">Pause all</button></div></header>
-<main><section><div class=card><div id=now class=now>Loading...</div><canvas id=net></canvas>
+<main><section><div class=card><div id=now class=now>Loading...</div><div id=live></div><canvas id=net></canvas>
 <p class=note>Each small dot is one of the 104 things measured about every street, coloured by group. They feed the four street models
-and the route model in the middle, which feed stage 2 on the right. Only a stage that is really running moves: dots flash when the build finishes a
-block of streets, lines fire into a model each time training tries a setting, and the curve below is that model's real score on areas it
+and the route model in the middle, which feed stage 2 on the right. Nothing here moves on a timer: dots fire into a group only when a download for it really finishes (red when one fails),
+every dot flashes when the build saves a block of streets, lines fire into a model each time training tries a setting, and the curve below is that model's real score on areas it
 never saw. After training, a dot grows with how much it helped. The models are gradient-boosted trees and a learned weighting, not a neural network.</p></div>
 <div class=card style="margin-top:16px"><h3 style="margin:0 0 8px">Results</h3><div id=reports class=note>No results yet.</div></div></section>
 <section class=card id=stages></section></main>
@@ -347,7 +395,28 @@ never saw. After training, a dot grows with how much it helped. The models are g
 const $=s=>document.querySelector(s);let S=null,pulses=[],t0=performance.now();
 const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 async function post(u,b){await fetch(u,{method:'POST',body:JSON.stringify(b||{})});load()}
-async function load(){try{S=await(await fetch('/api/state')).json()}catch(e){$('#now').textContent='The Studio isn\'t answering. Is "Start SafeRoute AI Studio" still open?';return}render();events();$('#now').textContent=nowText()}
+async function load(){try{S=await(await fetch('/api/state')).json()}catch(e){$('#now').textContent='The Studio isn\'t answering. Is "Start SafeRoute AI Studio" still open?';return}render();renderLive();events();$('#now').textContent=nowText()}
+const dur=s=>s==null?'–':s<90?Math.round(s)+' s':s<5400?Math.round(s/60)+' min':s<172800?(s/3600).toFixed(1)+' h':(s/86400).toFixed(1)+' days';
+const size=b=>b<1e6?Math.round(b/1e3)+' kB':(b/1e6).toFixed(1)+' MB';
+let liveRows={};
+function renderLive(){const L=S.live,el=$('#live');
+ if(!L){el.innerHTML='<p class=note>Live numbers appear here once the build runs.</p>';return}
+ const st=(v,l)=>`<div class=stat><b>${v}</b><span>${l}</span></div>`,w=L.waits;
+ const rows=L.sources.map(s=>{const was=liveRows[s.id],fl=was&&(s.ok>was.ok||s.failed>was.failed);liveRows[s.id]=s;
+  const wt=w.filter(x=>x.source==s.name);
+  return `<tr class="${fl?'flashrow':''}"><td>${esc(s.name)}</td><td>${s.requests}</td><td>${s.ok}</td><td class="${s.failed?'bad':''}">${s.failed}${s.skipped?` <span title="refused after 3 failures in a row">+${s.skipped} skipped</span>`:''}</td>
+   <td>${s.items.toLocaleString()}</td><td>${size(s.bytes)}</td><td>${s.avg_s==null?'–':s.avg_s+' s'}</td><td class="${wt.length?'wait':''}">${wt.length?'for '+dur(wt[0].for):'–'}</td></tr>`}).join('');
+ const err=L.sources.filter(s=>s.last_error).map(s=>`${s.name}: ${s.last_error}`);
+ el.innerHTML=(L.stalled?`<div class=stall>⚠ ${esc(L.stalled)}</div>`:'')+
+  `<div class=phase><b>${esc(L.phase)}</b>${L.running?` · updated ${L.updated_ago} s ago · last download finished ${dur(L.last_event_ago)} ago`:' · numbers from the last run'}</div>`+
+  (L.prefetch&&L.prefetch.of&&!L.blocks_built?`<div class=note style="margin-bottom:8px">Overture ${esc(L.prefetch.kind)}: ${L.prefetch.done} of ${L.prefetch.of} worldwide files scanned for this area (a one-time download; after it every block reads them from disk)</div><div class=bar style="margin:-4px 0 10px"><i style="width:${Math.round(100*L.prefetch.done/L.prefetch.of)}%"></i></div>`:'')+
+  `<div class=stats>${st(L.streets.toLocaleString(),'streets this run')}${st(L.streets_per_s,'streets per second')}
+   ${st(L.blocks_on_disk+' / '+L.blocks_total,'blocks saved')}${st(L.current?'#'+L.current.n+' · '+dur(L.current.for):'–','block now, for')}
+   ${st(L.block_avg_s?dur(L.block_avg_s):'–','per block (this run)')}${st(L.eta_s!=null?dur(L.eta_s):'–','time left at that pace')}
+   ${L.blocks_failed?st(L.blocks_failed,'blocks skipped'):''}</div>`+
+  (rows?`<div class=tablewrap><table class=src><tr><th>Source</th><th>Requests</th><th>OK</th><th>Failed</th><th>Items</th><th>Data</th><th>Avg</th><th>Waiting</th></tr>${rows}</table></div>
+   <p class=note style="margin:6px 0 0">Requests count every try, failures included. Overture's data is the size saved to disk, as its reader doesn't report bytes read.</p>`:'<p class=note>No downloads yet this run.</p>')+
+  (err.length?`<details><summary>Last errors</summary><pre>${esc(err.join('\n'))}</pre></details>`:'')}
 function render(){
  const q=S.ollama;$('#qwen').textContent=q.model?'Qwen ready: '+q.model:q.running?'Ollama running, Qwen not pulled':'Qwen not installed';
  $('#qwen').className='pill '+(q.model?'done':'paused');
@@ -375,7 +444,20 @@ function linkW(g,h){const l=S.network.links.find(l=>l.from==g&&l.to==h);return l
 function feeds(n,h){return h!='route'||S.network.route_groups.includes(n.g)}
 function bez(a,b,u){const m=(a.x+b.x)/2;return{x:(1-u)**3*a.x+3*(1-u)**2*u*m+3*(1-u)*u*u*m+u**3*b.x,y:(1-u)**3*a.y+3*(1-u)**2*u*a.y+3*(1-u)*u*u*b.y+u**3*b.y}}
 function fire(a,b,col,speed){fx.push({a,b,s:0,v:speed||(.5+Math.random()*.6),col})}
-function events(){const A=S.activity,P=layout();if(!prev){prev=A;return}
+const SRC_GROUPS={'':['Street itself','Street network'],nightlights:['Lighting and cameras'],mapillary:['Lighting and cameras'],
+ geoapify:['People around','Help nearby'],places:['People around','Help nearby'],buildings:['Beside the road'],roads:['Street itself','Street network']};
+let prevLive=null,prevProg={};
+function events(){const A=S.activity,P=layout(),L=S.live;
+ if(L&&prevLive){const was=Object.fromEntries(prevLive.sources.map(s=>[s.id,s]));  // a download finished: dots into the groups it feeds
+  L.sources.forEach(s=>{const p=was[s.id]||{ok:0,failed:0},g=SRC_GROUPS[s.id]||[];if(s.ok<=p.ok&&s.failed<=p.failed)return;const bad=s.failed>p.failed;
+   P.in.filter(n=>g.includes(n.g)).forEach(n=>{if(!bad)flash[n.key]=performance.now()+Math.random()*400;
+    fire({x:0,y:n.y+(Math.random()-.5)*30},n,bad?'rgba(239,91,91,.95)':`hsl(${HUE[n.gi]},90%,70%)`,.9+Math.random()*.5)})})}
+ prevLive=L;
+ S.stages.forEach(s=>{const p=prevProg[s.id];  // a later stage logged more progress: dots into the route model or stage 2
+  if(p!=null&&s.progress!=null&&s.progress>p&&['pairs','qwen','rank','sim'].includes(s.id)){const to=s.id=='sim'?P.sim:P.heads.route,c=P.in.filter(n=>feeds(n,'route'));
+   for(let i=0;i<24;i++)fire(s.id=='sim'?P.heads[S.network.heads[i%S.network.heads.length].id]:c[Math.floor(Math.random()*c.length)],to,'rgba(160,195,255,.95)')}
+  prevProg[s.id]=s.progress});
+ if(!prev){prev=A;return}
  if(A.build.blocks>prev.build.blocks||A.build.blocks_on_disk>prev.build.blocks_on_disk)  // a block of streets was measured
   P.in.forEach(n=>{flash[n.key]=performance.now()+Math.random()*900;fire({x:0,y:n.y+(Math.random()-.5)*40},n,'hsl('+HUE[n.gi]+',90%,70%)',.8+Math.random())});
  const t=A.train;if(t.head&&P.heads[t.head]&&(t.curve.length>(prev.train.head==t.head?prev.train.curve.length:0))){  // training tried one more setting
@@ -391,10 +473,7 @@ function draw(now){requestAnimationFrame(draw);if(!S)return;const dpr=devicePixe
   cx.beginPath();cx.moveTo(n.x,n.y);cx.bezierCurveTo((n.x+b.x)/2,n.y,(n.x+b.x)/2,b.y,b.x,b.y);cx.stroke()}));
  heads.forEach(h=>{const a=P.heads[h.id],b=P.sim;cx.strokeStyle=(running('sim')||running('world'))?'rgba(91,140,255,.6)':'rgba(148,160,191,.2)';cx.lineWidth=1.2;
   cx.beginPath();cx.moveTo(a.x,a.y);cx.bezierCurveTo((a.x+b.x)/2,a.y,(a.x+b.x)/2,b.y,b.x,b.y);cx.stroke()});
- // steady trickle only while a stage is really working, on the part it works on
- if(running('build')&&Math.random()<.25){const n=P.in[Math.floor(Math.random()*P.in.length)];fire({x:0,y:n.y},n,`hsl(${HUE[n.gi]},90%,70%)`,.6)}
- Object.keys(hot).forEach(h=>{if(Math.random()<.5){const c=P.in.filter(n=>feeds(n,h));const n=c[Math.floor(Math.random()*c.length)];fire(n,P.heads[h],`hsl(${HUE[n.gi]},90%,72%)`)}});
- if((running('sim')||running('world'))&&Math.random()<.3)fire(P.heads[heads[Math.floor(Math.random()*heads.length)].id],P.sim,'rgba(160,195,255,.95)');
+ // no idle animation: dots travel only after events() saw a real download, block, training trial or progress step
  fx=fx.filter(p=>(p.s+=p.v/60)<1);fx.forEach(p=>{const q=bez(p.a,p.b,p.s);cx.fillStyle=p.col;cx.globalAlpha=Math.sin(p.s*Math.PI);
   cx.beginPath();cx.arc(q.x,q.y,1.9,0,7);cx.fill()});cx.globalAlpha=1;if(fx.length>2500)fx=fx.slice(-2500);
  // input dots
@@ -424,7 +503,8 @@ function curve(W,Hc){const y0=Hc-100,h=80,x0=W<600?8:40,w=W-x0-20,t=S.activity.t
  t.curve.forEach((v,i)=>{cx.fillStyle='#a8c2ff';cx.beginPath();cx.arc(X(i),Y(v),2.6,0,7);cx.fill()});
  cx.fillStyle='#e8ecf7';cx.fillText(`${(S.network.heads.find(x=>x.id==t.head)||{}).name||t.head}: setting ${t.curve.length} of ${t.of}, best ${best.toFixed(4)}${W<600?'':' (score on unseen areas, lower is better; green = best so far)'}`,x0+8,y0+10)}
 function nowText(){const A=S.activity,b=A.build,t=A.train,parts=[];
- if(running('build'))parts.push(`Measuring streets: block ${b.blocks||'1'}${b.of?' of '+b.of:''}, ${b.streets.toLocaleString()} streets this run (${b.lit.toLocaleString()} with a lit label), ${b.blocks_on_disk} blocks saved in total`);
+ if(running('build')&&S.live)parts.push(S.live.current?`Building block #${S.live.current.n} of ${S.live.blocks_total} (for ${dur(S.live.current.for)})`:S.live.phase);
+ else if(running('build'))parts.push(`Measuring streets: block ${b.blocks||'1'}${b.of?' of '+b.of:''}, ${b.streets.toLocaleString()} streets this run (${b.lit.toLocaleString()} with a lit label), ${b.blocks_on_disk} blocks saved in total`);
  if(running('train'))parts.push(t.head?`Training ${(S.network.heads.find(x=>x.id==t.head)||{}).name||t.head}: setting ${t.curve.length} of ${t.of||'?'}`:'Training: loading the streets');
  ['pairs','qwen','rank','sim','world'].forEach(id=>{const s=S.stages.find(x=>x.id==id);if(s.status=='running')parts.push(s.name+(s.progress!=null?' '+Math.round(s.progress*100)+'%':''))});
  return parts.join(' · ')||'Nothing running. Press Run everything or Start on a stage.'}

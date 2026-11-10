@@ -92,6 +92,74 @@ class Features(unittest.TestCase):
             finally:
                 studio.LOGS = old
 
+    def test_downloads_are_counted_as_they_happen(self):
+        import dataset
+        import tiles
+        tiles.STATS.clear()
+
+        def down(*a):
+            raise OSError("timed out")
+        with tempfile.TemporaryDirectory() as d:
+            ts = tiles.TileStore(d, fetch=lambda *a: {"elements": [{"type": "node", "id": 1, "lat": 28.001, "lon": 77.001}]},
+                                 extras={"mapillary": dataset.breaker(down, "Mapillary", limit=1)})
+            ts._fetch_chunk([(2800, 7700)])
+            ts._fetch_chunk([(2800, 7700)], "mapillary")
+            ts._fetch_chunk([(2801, 7700)], "mapillary")  # refused by the breaker: no download tried
+        st = tiles.stats_snapshot()
+        self.assertEqual({k: st[""][k] for k in ("requests", "ok", "failed", "items", "busy")}, {"requests": 1, "ok": 1, "failed": 0, "items": 1, "busy": {}})
+        self.assertEqual({k: st["mapillary"][k] for k in ("requests", "ok", "failed", "skipped")}, {"requests": 1, "ok": 0, "failed": 1, "skipped": 1})
+        self.assertIn("timed out", st["mapillary"]["last_error"])
+        tiles.STATS.clear()
+
+    def test_overture_strips_on_disk_answer_blocks_inside_them(self):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        import tiles
+
+        def table(rows):
+            return pa.table({"id": [r[0] for r in rows], "bbox": [{"xmin": r[2], "xmax": r[2], "ymin": r[1], "ymax": r[1]} for r in rows]})
+        with tempfile.TemporaryDirectory() as d:
+            a, b = os.path.join(d, "a.parquet"), os.path.join(d, "b.parquet")
+            pq.write_table(table([("x", 28.05, 77.05), ("edge", 28.1, 77.1)]), a)
+            pq.write_table(table([("edge", 28.1, 77.1), ("y", 28.15, 77.2)]), b)
+            old = dict(tiles.OVERTURE_LOCAL)
+            tiles.OVERTURE_LOCAL["buildings"] = [(28.0, 77.0, 28.1, 77.5, a), (28.1, 77.0, 28.2, 77.5, b)]
+            try:
+                rows = tiles._local("buildings", 28.04, 77.0, 28.16, 77.3, [])
+                self.assertEqual(sorted(r["id"] for r in rows), ["edge", "x", "y"])  # across both strips, the shared one once
+                self.assertIsNone(tiles._local("buildings", 28.15, 77.0, 28.25, 77.3, []))  # sticks out: goes online
+                self.assertEqual(len(tiles.overture_buildings(28.0, 77.0, 28.06, 77.06)["elements"]), 1)
+            finally:
+                tiles.OVERTURE_LOCAL.clear()
+                tiles.OVERTURE_LOCAL.update(old)
+                tiles._strip_cache.clear()
+
+    def test_studio_live_numbers_and_stall_warning(self):
+        import json
+        import time
+        import studio
+        now = time.time()
+        live = {"pid": 1, "started": now - 900, "phase": "Measuring streets block by block", "blocks_total": 10, "blocks_on_disk": 4,
+                "blocks_built": 2, "blocks_failed": 0, "streets": 600, "lit": 3, "first_block_at": now - 600, "block_seconds": [200, 400],
+                "current": {"n": 7, "block": [1, 2], "started": now - 250}, "prefetch": None, "last_event": now - 250, "updated": now,
+                "sources": {"buildings": {"requests": 3, "ok": 2, "failed": 0, "skipped": 0, "bytes": 5, "items": 9, "seconds": 20,
+                                          "busy": {"28.00,77.00": now - 250}, "last": now - 250, "last_error": None}}}
+        with tempfile.TemporaryDirectory() as d:
+            old = studio.LOGS
+            studio.LOGS = d
+            try:
+                json.dump(live, open(os.path.join(d, "build_live.json"), "w"))
+                L = studio.live(True)
+                self.assertEqual((L["streets_per_s"], L["block_avg_s"], L["eta_s"]), (1.0, 300, 1800))
+                self.assertIn("Overture buildings", L["stalled"])
+                self.assertEqual(L["waits"][0]["source"], "Overture buildings")
+                self.assertIsNone(studio.live(False)["stalled"])  # paused: frozen numbers, no warning
+                live.update(updated=now - 60)
+                json.dump(live, open(os.path.join(d, "build_live.json"), "w"))
+                self.assertIn("frozen", studio.live(True)["stalled"])
+            finally:
+                studio.LOGS = old
+
     def test_studio_groups_cover_every_input_once(self):
         import studio
         cols = [c for g in studio.GROUPS.values() for c in g.split()]

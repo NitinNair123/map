@@ -14,6 +14,7 @@ Writes ml/data/blocks/<block>.edges.csv.gz and .slots.csv.gz; blocks already wri
 """
 import argparse
 import csv
+import json
 import gzip
 import importlib.util
 import os
@@ -32,8 +33,9 @@ import rasters  # noqa: E402
 from features import NCR, STATIC, load_bus_logs, load_traffic_logs, slot_rows, static_rows  # noqa: E402
 from rating import REPORT_TYPES  # noqa: E402
 from reports import Reports  # noqa: E402
-from tiles import (CHUNK, TileStore, geoapify, mapillary, nightlights, overture_buildings, overture_places, tiles_near,  # noqa: E402
-                   warm_overture)
+import tiles  # noqa: E402
+from tiles import (CHUNK, TILE, TileStore, geoapify, mapillary, nightlights, overture_buildings, overture_places, overture_prefetch,  # noqa: E402
+                   tiles_near)
 
 DATA = os.path.join(ROOT, "data")
 OUT = os.path.join(ROOT, "ml", "data")
@@ -93,12 +95,14 @@ def breaker(fetch, name, limit=3):
 
     def call(*a):
         if fails[0] >= limit:
-            raise OSError(f"{name} skipped for this run after {limit} failures in a row")
+            err = OSError(f"{name} skipped for this run after {limit} failures in a row")
+            err.skipped = True
+            raise err
         try:
             out = fetch(*a)
         except Exception:
             fails[0] += 1
-            if fails[0] == limit:
+            if fails[0] == limit:  # (the refusals after this are counted as skipped, not as failed downloads)
                 print(f"{name}: {limit} failures in a row, skipped for the rest of this run", flush=True)
             raise
         fails[0] = 0
@@ -120,8 +124,7 @@ def store(world=False):
         extras["geoapify"] = breaker(geoapify, "Geoapify")
         used.append("Geoapify")
     if importlib.util.find_spec("pyarrow"):
-        extras.update(places=overture_places, buildings=overture_buildings)
-        threading.Thread(target=warm_overture, daemon=True).start()
+        extras.update(places=overture_places, buildings=overture_buildings)  # saved locally first by prefetch() in main()
         used.append("Overture places and buildings")
     stops = gtfs.load(os.path.join(DATA, "gtfs"))
     features.TIMETABLES = bool(stops)
@@ -151,6 +154,69 @@ def write(path, rows, columns):
     os.replace(tmp, path)  # a block stopped half way is redone next run, never half used
 
 
+LIVE = os.path.join(ROOT, "ml", "out", "studio", "build_live.json")
+
+
+class Live:
+    """Real counters of this run, written every second to ml/out/studio/build_live.json for the Studio: every number
+    there comes from a download or a block that really happened, so the Studio shows nothing that didn't."""
+
+    def __init__(self, total):
+        self.lock = threading.Lock()
+        self.info = {"pid": os.getpid(), "started": time.time(), "phase": "starting", "blocks_total": total, "blocks_on_disk": 0,
+                     "blocks_built": 0, "blocks_failed": 0, "streets": 0, "lit": 0, "first_block_at": None, "block_seconds": [],
+                     "current": None, "prefetch": None, "last_event": time.time()}
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def set(self, **kw):
+        with self.lock:
+            self.info.update(kw, last_event=time.time())
+
+    def block_done(self, streets, lit, seconds):
+        with self.lock:
+            i = self.info
+            i.update(blocks_built=i["blocks_built"] + 1, blocks_on_disk=i["blocks_on_disk"] + 1, streets=i["streets"] + streets,
+                     lit=i["lit"] + lit, block_seconds=(i["block_seconds"] + [round(seconds, 1)])[-50:], current=None, last_event=time.time())
+
+    def write(self):
+        with self.lock:
+            snap = {**self.info, "updated": time.time(), "sources": tiles.stats_snapshot()}
+        snap["last_event"] = max([snap["last_event"]] + [s["last"] or 0 for s in snap["sources"].values()])
+        os.makedirs(os.path.dirname(LIVE), exist_ok=True)
+        with open(LIVE + ".tmp", "w") as f:
+            json.dump(snap, f)
+        try:
+            os.replace(LIVE + ".tmp", LIVE)
+        except OSError:  # the Studio had it open this instant (Windows): next second's write lands
+            pass
+
+    def loop(self):
+        said = False
+        while True:
+            try:
+                self.write()
+            except Exception as err:  # never let the counters die silently: the Studio would call the build frozen
+                if not said:
+                    print(f"live counters: {err!r}", flush=True)
+                    said = True
+            time.sleep(1)
+
+
+def prefetch(tile_set, live):
+    """Overture places and buildings for the whole region, saved once (see tiles.overture_prefetch). Only for one
+    compact region like Delhi NCR; --world areas are spread over the globe and keep querying online per block."""
+    if not importlib.util.find_spec("pyarrow") or not tile_set:
+        return
+    s, n = min(t[0] for t in tile_set) * TILE, (max(t[0] for t in tile_set) + 1) * TILE
+    w, e = min(t[1] for t in tile_set) * TILE, (max(t[1] for t in tile_set) + 1) * TILE
+    if (n - s) * (e - w) > 4:
+        return
+    live.set(phase="Downloading Overture places and buildings for the whole area (once, then every block reads them from disk)")
+    print(f"Overture: places and buildings for {s:.2f},{w:.2f} to {n:.2f},{e:.2f}, saved in ml/data/overture", flush=True)
+    overture_prefetch(os.path.join(OUT, "overture"), s, w, n, e,
+                      progress=lambda kind, done, of: live.set(prefetch={"kind": kind, "done": done, "of": of}))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true")
@@ -160,25 +226,31 @@ def main():
     ap.add_argument("--redo", action="store_true", help="rebuild blocks already written (new data since)")
     ap.add_argument("--hours", type=float, default=0, help="stop starting new blocks after this many hours (0 = no limit); blocks come in random order, so any stop point is a fair spread of the area")
     args = ap.parse_args()
+    tiles.VERBOSE = True  # a timestamped line per download, so the log shows work between blocks
     ts = store(args.world)
     if args.all:
         if not ts.extracted:
             sys.exit("No OSM import found: run py import_osm.py first, or leave out --all")
-        tiles = ts.extracted
+        tile_set = ts.extracted
     else:
         pts = [(la, lo) for _, la, lo in WORLD] if args.world else \
             [tuple(map(float, p.split(","))) for p in args.points.split(";")] if args.points else SPOTS
-        tiles = set().union(*(tiles_near(p, p, args.radius) for p in pts))
+        tile_set = set().union(*(tiles_near(p, p, args.radius) for p in pts))
     bus = load_bus_logs(os.path.join(OUT, "bus_counts.csv"), os.path.join(OUT, "bus_hours.csv"))
     tr = load_traffic_logs(os.path.join(OUT, "traffic.csv"))
     print("Traffic logs:", f"{sum(map(len, tr.values()))} readings" if tr else "none yet", flush=True)
     print("Bus logs:", f"{sum(bus['watched'].values())} hours watched" if bus else "none yet (run py ml/collect.py)", flush=True)
     folder = os.path.join(OUT, "blocks")
     os.makedirs(folder, exist_ok=True)
-    todo = blocks(tiles)
+    todo = blocks(tile_set)
     edges = slots = 0
     order = sorted(todo.items())
     random.Random(0).shuffle(order)  # the same shuffle every run, so a stopped and resumed run carries on through the same order
+    live = Live(len(order))
+    live.set(blocks_on_disk=sum(os.path.exists(os.path.join(folder, f"{b[0]}_{b[1]}.slots.csv.gz")) for b, _ in order))
+    if not args.world:
+        prefetch(tile_set, live)
+    live.set(phase="Measuring streets block by block")
     began = time.time()
     for n, (b, group) in enumerate(order, 1):
         if args.hours and time.time() - began > args.hours * 3600:
@@ -188,10 +260,14 @@ def main():
         if os.path.exists(name + ".slots.csv.gz") and not args.redo:
             continue
         started = time.time()
+        live.set(current={"n": n, "block": list(b), "started": started})
+        if live.info["first_block_at"] is None:
+            live.set(first_block_at=started)
         try:
             area = ts.area(group)
         except (OSError, ValueError, KeyError) as err:
             print(f"[{n}/{len(todo)}] block {b}: skipped ({err})", flush=True)
+            live.set(blocks_failed=live.info["blocks_failed"] + 1, current=None)
             continue
         e_rows, s_rows = static_rows(area), slot_rows(area, bus, tr)
         got = rasters.add_land_cover(e_rows)
@@ -206,8 +282,11 @@ def main():
         write(name + ".slots.csv.gz", s_rows, ["edge_id", "hour", "weekend", "daylight", "gtfs_deps", "open_share", "open_known", "bus_per_hour", "traffic_ratio"])
         ts.areas.clear()  # one block at a time in memory
         edges, slots = edges + len(e_rows), slots + len(s_rows)
+        live.block_done(len(e_rows), sum(r["lit"] is not None for r in e_rows), time.time() - started)
         print(f"[{n}/{len(todo)}] block {b}: {len(e_rows)} streets, {sum(r['lit'] is not None for r in e_rows)} with a lit label, "
               f"{len(s_rows)} hour rows, sources: {used} ({time.time() - started:.0f} s)", flush=True)
+    live.set(phase="Done", current=None)
+    live.write()
     print(f"Done: {edges} streets and {slots} hour rows written this run", flush=True)
 
 
