@@ -134,6 +134,40 @@ class Features(unittest.TestCase):
                 tiles.OVERTURE_LOCAL.update(old)
                 tiles._strip_cache.clear()
 
+    def test_overture_prefetch_saves_each_file_and_resumes(self):
+        import pyarrow as pa
+        import pyarrow.dataset as ds
+        import pyarrow.parquet as pq
+        import tiles
+        box = lambda lat, lon: {"xmin": lon, "xmax": lon, "ymin": lat, "ymax": lat}
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "src")
+            os.makedirs(src)
+            for k, rows in enumerate([[("a", 28.05, 77.05), ("far", 40.0, 10.0)], [("b", 28.15, 77.1)], [("c", 28.12, 77.2)]]):
+                pq.write_table(pa.table({"id": [r[0] for r in rows], "bbox": [box(r[1], r[2]) for r in rows]}), os.path.join(src, f"p{k}.parquet"))
+            data, real, calls = ds.dataset(src, format="parquet"), tiles._dataset, []
+            tiles._dataset = lambda *a: data
+            real_scan = ds.ParquetFileFormat
+            out = os.path.join(d, "out")
+            try:
+                tiles.overture_prefetch(out, 28.0, 77.0, 28.2, 77.5, 0.1, kinds=(("buildings", []),), progress=lambda *a: calls.append(a), workers=2)
+                self.assertEqual(len(os.listdir(os.path.join(out, "parts"))), 3)
+                strips = {f: pq.read_table(os.path.join(out, f)).column("id").to_pylist() for f in os.listdir(out) if f.endswith(".parquet")}
+                self.assertEqual(sorted(sum(strips.values(), [])), ["a", "b", "c"])  # "far" is outside the area
+                self.assertEqual(calls[-1][1:], (3, 3))
+                for f in os.listdir(out):  # a stopped run keeps its parts: delete the strips and rerun without downloading
+                    if f.endswith(".parquet"):
+                        os.remove(os.path.join(out, f))
+                tiles._dataset = lambda *a: data
+                before = {k: dict(v) for k, v in tiles.STATS.items()}.get("buildings", {}).get("requests", 0)
+                tiles.overture_prefetch(out, 28.0, 77.0, 28.2, 77.5, 0.1, kinds=(("buildings", []),), workers=2)
+                self.assertEqual(tiles.STATS["buildings"]["requests"], before)  # every file came from its part
+                self.assertEqual(len([f for f in os.listdir(out) if f.endswith(".parquet")]), 2)
+            finally:
+                tiles._dataset = real
+                tiles.OVERTURE_LOCAL.clear()
+                tiles.STATS.clear()
+
     def test_studio_live_numbers_and_stall_warning(self):
         import json
         import time

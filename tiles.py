@@ -334,37 +334,53 @@ def overture_prefetch(folder, s, w, n, e, step=0.1, kinds=(("places", PLACE_COLU
             data = _dataset(kind, None)
             frags, f, cols = list(data.get_fragments()), _bbox_filter(s, w, n, e), columns + ["id", "bbox"]
             done, lock = [0], threading.Lock()
+            pdir = os.path.join(folder, "parts")  # one small file per scanned Overture file: memory stays flat and a stop resumes
+            os.makedirs(pdir, exist_ok=True)
+            part = lambda i: os.path.join(pdir, f"{kind}_{i:04d}_{w:.2f}_{e:.2f}_{s:.2f}_{n:.2f}.parquet")
 
             def scan(job):
                 i, frag = job
-                for attempt in range(3):
-                    token = stats_begin(kind, f"file {i}", quiet=True)
-                    try:
-                        t = frag.to_table(filter=f, columns=cols, schema=data.schema)
-                    except (OSError, ValueError) as err:
-                        stats_end(token, err=err)
-                        continue
-                    stats_end(token, items=t.num_rows)
+                if os.path.exists(part(i)):
                     with lock:
                         done[0] += 1
                         if progress:
                             progress(kind, done[0], len(frags))
-                    return t
+                    return part(i)
+                for attempt in range(3):
+                    token = stats_begin(kind, f"file {i}", quiet=True)
+                    try:
+                        t = frag.to_table(filter=f, columns=cols, schema=data.schema)
+                        pq.write_table(t, part(i) + ".tmp")
+                        os.replace(part(i) + ".tmp", part(i))
+                    except (OSError, ValueError) as err:
+                        stats_end(token, err=err)
+                        continue
+                    stats_end(token, items=t.num_rows)
+                    with _stats_lock:
+                        _stat(kind)["bytes"] += os.path.getsize(part(i))  # saved size: pyarrow doesn't report what it read
+                    del t
+                    pa.default_memory_pool().release_unused()
+                    with lock:
+                        done[0] += 1
+                        if progress:
+                            progress(kind, done[0], len(frags))
+                    return part(i)
                 raise OSError(f"Overture {kind} file {i} failed 3 times")
-            print(f"Overture {kind}: scanning {len(frags)} files once for this area", flush=True)
+            print(f"Overture {kind}: scanning {len(frags)} files once for this area ({len([i for i in range(1, len(frags) + 1) if os.path.exists(part(i))])} already saved)", flush=True)
             try:
                 with ThreadPoolExecutor(workers) as ex:
-                    parts = [t for t in ex.map(scan, enumerate(frags, 1)) if t.num_rows]
+                    files = list(ex.map(scan, enumerate(frags, 1)))
             except OSError as err:
                 print(f"Overture {kind}: {err}; blocks will query it online", flush=True)
                 continue
-            table = pa.concat_tables(parts) if parts else data.schema.empty_table().select(cols)
-            for a, b, path in paths:
-                pq.write_table(table.filter(_bbox_filter(a, w, b, e)), path + ".part")
+            total = 0
+            for a, b, path in paths:  # strips are cut from the part files one at a time
+                pieces = [t for t in (pq.read_table(p, filters=_bbox_filter(a, w, b, e)) for p in files) if t.num_rows]
+                strip = pa.concat_tables(pieces) if pieces else data.schema.empty_table().select(cols)
+                pq.write_table(strip, path + ".part")
                 os.replace(path + ".part", path)
-                with _stats_lock:
-                    _stat(kind)["bytes"] += os.path.getsize(path)  # saved size: pyarrow doesn't report what it read
-            print(f"Overture {kind}: {table.num_rows} rows saved in {len(paths)} strips", flush=True)
+                total += strip.num_rows
+            print(f"Overture {kind}: {total} rows saved in {len(paths)} strips", flush=True)
         OVERTURE_LOCAL[kind] = [(a, w, b, e, p) for a, b, p in paths]
 
 
