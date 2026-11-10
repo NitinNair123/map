@@ -121,7 +121,7 @@ def score_fn(kind):
     return mean_absolute_error
 
 
-def tune(kind, X, y, groups, mask=None, trials=None, budget=None):
+def tune(kind, X, y, groups, mask=None, trials=None, budget=None, name="model"):
     """Random search scored by block-grouped cross-validation. mask picks the rows that count for the score
     (NCR streets, when other regions only help to learn). Returns (best params, its out-of-fold predictions, table)."""
     trials, budget = trials or TRIALS, budget or BUDGET_S
@@ -143,6 +143,7 @@ def tune(kind, X, y, groups, mask=None, trials=None, budget=None):
             oof[te] = predict(kind, make(kind, list(X.columns), params).fit(Xt.iloc[tr], yt[tr]), Xt.iloc[te])
         s = float(score(yt[mt], oof[mt]))
         table.append({**params, "cv_score": round(s, 5)})
+        print(f"{name} trial {n + 1} of {trials}: score {s:.5f}", flush=True)  # the Studio draws these as the learning curve
         if best is None or s < best[0]:
             best = (s, params, oof)
     s, params, oof = best
@@ -230,6 +231,7 @@ def run_head(name, kind, d, cols, target, trials=None, budget=None):
     lock = locked(d["block"])
     ncr = (d["region"] == "ncr").to_numpy()
     info = {"head": name, "rows": int(len(d)), "blocks": int(d["block"].nunique()), "regions": d["region"].value_counts().to_dict()}
+    print(f"Training {name}: {len(d)} rows in {info['blocks']} areas", flush=True)
     if kind == "clf":
         y = y.astype(int)
         if len(set(y)) < 2:
@@ -245,7 +247,7 @@ def run_head(name, kind, d, cols, target, trials=None, budget=None):
         if d.loc[rows & ncr, "block"].nunique() < MIN_BLOCKS:
             continue
         idx = np.flatnonzero(rows)
-        params, oof, cv, table = tune(kind, d.iloc[idx][cols], y[idx], d["block"].to_numpy()[idx], ncr[idx], trials, budget)
+        params, oof, cv, table = tune(kind, d.iloc[idx][cols], y[idx], d["block"].to_numpy()[idx], ncr[idx], trials, budget, name)
         done[vname] = {"idx": idx, "params": params, "oof": oof, "cv": cv, "table": table[:5]}
     if not done:
         return None, {**info, "skipped": "too few Delhi NCR areas to hold out"}

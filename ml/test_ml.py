@@ -65,6 +65,33 @@ class Features(unittest.TestCase):
                 f(1, 2, 3, 4)
         self.assertEqual(len(calls), 3)  # the last two never waited on the network
 
+    def test_studio_reads_progress_from_logs_and_finds_its_old_stages(self):
+        import subprocess
+        import studio
+        with tempfile.TemporaryDirectory() as d:
+            old = studio.LOGS
+            studio.LOGS = d
+            try:
+                open(os.path.join(d, "build.log"), "w").write("=== started a ===\n[1/9] block x: 5 streets, 9 with a lit label\n"
+                                                              "=== started b ===\n[2/9] block y: 7 streets, 1 with a lit label\nmapillary: 3 failures in a row\n")
+                open(os.path.join(d, "train.log"), "w").write("Training lit: 9 rows\nlit trial 1 of 4: score 0.5\nlit trial 2 of 4: score 0.4\n")
+                a = studio.activity()
+                self.assertEqual((a["build"]["blocks"], a["build"]["streets"], a["build"]["lit"]), (2, 7, 1))  # this run only
+                self.assertEqual((a["train"]["head"], a["train"]["curve"], a["train"]["of"]), ("lit", [0.5, 0.4], 4))
+                self.assertIn("build", a["problems"])
+                if sys.platform.startswith("linux"):
+                    p = subprocess.Popen(["sleep", "30"])
+                    try:
+                        r = studio.Runner()
+                        r.last["pids"]["sim"] = (p.pid, studio.started_at(p.pid))
+                        self.assertEqual(r.status("sim"), "running")  # started by an earlier Studio, still going
+                        r.last["pids"]["sim"] = (p.pid, 0)
+                        self.assertNotEqual(r.status("sim"), "running")  # same pid, other start time: not ours
+                    finally:
+                        p.kill()
+            finally:
+                studio.LOGS = old
+
     def test_studio_groups_cover_every_input_once(self):
         import studio
         cols = [c for g in studio.GROUPS.values() for c in g.split()]
