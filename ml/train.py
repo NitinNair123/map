@@ -202,6 +202,25 @@ def baseline_hour(d_tr, y_tr, d_te):
     return key(d_te).map(pd.Series(y_tr).groupby(key(d_tr).to_numpy()).mean()).fillna(y_tr.mean()).to_numpy()
 
 
+def importance(kind, model, X, y, repeats=3, rows=20000):
+    """How much the held-out score drops when one column is scrambled: the honest answer to 'does this parameter help?'"""
+    rng = np.random.default_rng(0)
+    if len(X) > rows:
+        pick = rng.choice(len(X), rows, replace=False)
+        X, y = X.iloc[pick], y[pick]
+    metric = roc_auc_score if kind == "clf" else (lambda a, b: -mean_absolute_error(a, b))  # higher is better
+    base = metric(y, predict(kind, model, X))
+    out = {}
+    for c in X.columns:
+        drops = []
+        for _ in range(repeats):
+            Xp = X.copy()
+            Xp[c] = rng.permutation(Xp[c].to_numpy())
+            drops.append(base - metric(y, predict(kind, model, Xp)))
+        out[c] = float(np.mean(drops))
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]))
+
+
 # ---------------------------------------------------------------- one head
 
 def run_head(name, kind, d, cols, target, trials=None, budget=None):
@@ -240,6 +259,9 @@ def run_head(name, kind, d, cols, target, trials=None, budget=None):
     if test.sum() >= MIN_ROWS and d.loc[test, "block"].nunique() >= 3:
         fitted = bag(kind, X.iloc[idx], y[idx], v["params"])
         p = predict(kind, fitted, X[test])
+        imp = importance(kind, fitted, X[test], y[test])
+        info["most_useful_parameters"] = {k: round(x, 4) for k, x in list(imp.items())[:15]}
+        info["parameters_with_no_measurable_effect"] = [k for k, x in imp.items() if x <= 0.0002]
         if kind == "clf":
             ok = ~np.isnan(v["oof"]) & ncr[idx]
             cal = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0).fit(v["oof"][ok], y[idx][ok])
@@ -304,6 +326,11 @@ def report(metrics, e, s):
             lines += [f"- {k}: {v}" for k, v in t.items() if k != "error_when_sure"]
             if "error_when_sure" in t:
                 lines += ["", "Error on only the streets the model is sure about:", ""] + table(t["error_when_sure"])
+            if "most_useful_parameters" in m:
+                lines += ["", "Parameters that moved the held-out score most (drop when scrambled):", ""]
+                lines += table([{"parameter": k, "score_drop": v} for k, v in m["most_useful_parameters"].items()])
+                lines += ["", f"{len(m['parameters_with_no_measurable_effect'])} parameters had no measurable effect here: "
+                          + ", ".join(m["parameters_with_no_measurable_effect"][:40])]
             for k in ("meets_plan_bar", "meets_target_error_below_1_percent", "beats_baseline"):
                 if k in m:
                     lines.append(f"- **{k}: {m[k]}**")

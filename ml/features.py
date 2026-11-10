@@ -7,27 +7,33 @@ A row's inputs never include the thing its label measures (no lit tag or light r
 no opening hours in the open-places model's, no buses in the bus model's), so the model can't just copy the answer.
 """
 import math
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+import context
+import osm_extra
 import rating
 from safety import SURROUNDINGS, daylight, is_open
 from tiles import TILE
 
 IST = timezone(timedelta(hours=5, minutes=30))
 SLOT_DAYS = {0: datetime(2026, 11, 11, tzinfo=IST), 1: datetime(2026, 11, 14, tzinfo=IST)}  # weekend flag -> a Wednesday, a Saturday
+LAND = [f"wc_{k}_{r}" for r in (50, 250) for k in ("built", "tree", "field", "bare", "water")]  # ESA WorldCover shares, filled by rasters.py
 HIGHWAYS = sorted(set(rating.ROAD_SCORE) | rating.MAIN_ROADS | {"motorway", "motorway_link", "trunk_link", "service"})
 SIDEWALKS = {None: 0, "no": 1, "none": 1}  # anything else mapped means a footpath on at least one side (2)
 NEAR_KINDS = ["lamp", "cctv", "guard", "sos_phone", "crossing", "blackspot", "waterlogging", "nightlife", "transit"]
 GROUPS = ["food", "shop", "pharmacy", "hospital", "fuel", "other"]
 ZONES = sorted(SURROUNDINGS)
 CATEGORICAL = ["highway", "sidewalk"]
-STATIC = (["highway", "sidewalk", "length", "lanes", "maxspeed", "unpaved", "underpass", "overbridge", "gap_m", "dead_ends",
+STATIC = (["highway", "sidewalk", "length", "lanes", "maxspeed", "unpaved", "rough", "incident_hits", "report_points", "underpass", "overbridge", "gap_m", "dead_ends",
            "buildings_ha", "nightlight", "police_m", "places_mapped_500m", "gtfs_stops"]
           + [f"n_{k}" for k in NEAR_KINDS] + ["lamps_per_100m"] + [f"places_{g}" for g in GROUPS] + ["places_total"]
-          + [f"zone_{z}" for z in ZONES] + ["nb_lamps_per_100m", "nb_places", "nb_main_share", "degree"])
+          + [f"zone_{z}" for z in ZONES] + ["nb_lamps_per_100m", "nb_places", "nb_main_share", "degree"] + LAND + context.COLUMNS + osm_extra.COLUMNS)
 TIME = ["hour", "weekend", "daylight", "gtfs_deps"]
 NAN = float("nan")
+INCIDENTS = False  # set by dataset.py when data/incidents.csv has rows; without them the incident columns are unknown, not zero
+REPORTS = False  # same for app reports and street-survey rows
 TIMETABLES = False  # set by dataset.py when GTFS zips are loaded; without them departures are unknown, not zero
 NCR = (28.2, 76.8, 28.95, 77.75)  # Delhi NCR box (same as crime.py): the only place the OTD bus feed and logs cover
 
@@ -56,6 +62,7 @@ def static_rows(area):
     """[dict] one per segment, inputs from STATIC plus id, tile, position and the lit label."""
     pois = area.pois
     deg = {n: len(v) for n, v in area.adj.items()}
+    now = time.time()
     rows = []
     for e in area.edges:
         near = e["near"]
@@ -65,6 +72,12 @@ def static_rows(area):
              "sidewalk": SIDEWALKS.get(e["sidewalk"], 2), "length": round(e["length"], 1),
              "lanes": e.get("lanes") or NAN, "maxspeed": e.get("maxspeed") or NAN,
              "unpaved": int(e.get("surface") in rating.UNPAVED) if e.get("surface") else NAN,
+             "rough": int(e["smoothness"] in rating.ROUGH) if e.get("smoothness") else NAN,
+             # recorded events near the street, decayed like the app does (incidents 180-day half-life, reports 30-day)
+             "incident_hits": round(sum(rating.INCIDENT_SEVERITY.get(i["type"], 0.5) * 0.5 ** ((now - i["ts"]) / 86400 / 180)
+                                        for i in e["incidents"]), 3) if INCIDENTS else NAN,
+             "report_points": round(sum(rating.REPORT_POINTS[r["type"]] * 0.5 ** ((now - r["ts"]) / 86400 / 30)
+                                        for r in rating.votes(e["reports"]) if r["type"] in rating.REPORT_POINTS), 2) if REPORTS else NAN,
              "underpass": int(e["underpass"]), "overbridge": int(e["overbridge"]), "gap_m": round(e["gap_m"], 1),
              "dead_ends": e["dead_ends"], "buildings_ha": round(e["buildings_ha"], 2),
              "nightlight": NAN if e.get("nightlight") is None else e["nightlight"],
@@ -79,6 +92,7 @@ def static_rows(area):
         for z in ZONES:
             r[f"zone_{z}"] = int(z in e["zones"])
         r["degree"] = deg.get(e["a"], 0) + deg.get(e["b"], 0)
+        r.update({c: NAN for c in LAND + osm_extra.COLUMNS})  # unknown until rasters.py and osm_extra.py read their sources
         r["lit"], r["lit_source"] = lit_label(e)
         rows.append(r)
     # what the neighbouring streets look like: segments that share a junction with this one (a one-step graph view)
@@ -92,6 +106,7 @@ def static_rows(area):
         r["nb_lamps_per_100m"] = round(sum(rows[j]["lamps_per_100m"] for j in nb) / len(nb), 3) if nb else NAN
         r["nb_places"] = sum(rows[j]["places_total"] for j in nb)
         r["nb_main_share"] = round(sum(area.edges[j]["highway"] in rating.MAIN_ROADS for j in nb) / len(nb), 3) if nb else NAN
+    context.add(area, rows)
     return rows
 
 

@@ -26,6 +26,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import gtfs  # noqa: E402
 import features  # noqa: E402
+import osm_extra  # noqa: E402
+import rasters  # noqa: E402
 from features import NCR, STATIC, load_bus_logs, load_traffic_logs, slot_rows, static_rows  # noqa: E402
 from rating import REPORT_TYPES  # noqa: E402
 from reports import Reports  # noqa: E402
@@ -64,6 +66,25 @@ def key(name, env):
     return os.environ.get(env) or (open(path).read().strip() if os.path.exists(path) else "")
 
 
+def rows(path, types=None, **extra):
+    """Rows of lat,lon,type,when from data/survey.csv or data/incidents.csv, as server.py reads them; bad rows are skipped."""
+    from datetime import datetime
+    out = []
+    if not os.path.exists(path):
+        return out
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        for n, row in enumerate(csv.DictReader(f), 2):
+            try:
+                t, kind = datetime.fromisoformat(row["when"]), row["type"].strip().lower()
+                if types and kind not in types:
+                    raise ValueError(f"unknown type {kind!r}")
+                out.append({"lat": float(row["lat"]), "lon": float(row["lon"]), "type": kind, "hour": t.hour,
+                            "weekday": t.weekday(), "ts": t.timestamp(), **extra})
+            except (KeyError, ValueError, TypeError, AttributeError) as err:
+                print(f"{os.path.basename(path)} line {n} skipped: {err}", flush=True)
+    return out
+
+
 def store(world=False):
     """A TileStore set up like server.py's, except that every source loads before an area is built (no background)
     and streets come from OpenStreetMap, which carries the lit tags."""
@@ -84,20 +105,11 @@ def store(world=False):
     stops = gtfs.load(os.path.join(DATA, "gtfs"))
     features.TIMETABLES = bool(stops)
     reports = Reports(os.path.join(DATA, "reports.db")).all() if os.path.exists(os.path.join(DATA, "reports.db")) else []
-    survey = []
-    if os.path.exists(os.path.join(DATA, "survey.csv")):
-        from datetime import datetime
-        with open(os.path.join(DATA, "survey.csv"), newline="", encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                try:
-                    t = datetime.fromisoformat(row["when"])
-                    if row["type"].strip().lower() in REPORT_TYPES:
-                        survey.append({"lat": float(row["lat"]), "lon": float(row["lon"]), "type": row["type"].strip().lower(),
-                                       "hour": t.hour, "weekday": t.weekday(), "ts": t.timestamp(), "source": "Street survey"})
-                except (KeyError, ValueError, TypeError):
-                    pass
-    print(f"Sources: {', '.join(used)}; {len(stops)} timetabled stops; {len(reports)} app reports; {len(survey)} survey rows", flush=True)
-    return TileStore(os.path.join(DATA, "tiles"), reports=reports + survey, extras=extras, stops=stops,
+    survey = rows(os.path.join(DATA, "survey.csv"), REPORT_TYPES, source="Street survey")
+    incidents = rows(os.path.join(DATA, "incidents.csv"))
+    features.REPORTS, features.INCIDENTS = bool(reports or survey), bool(incidents)
+    print(f"Sources: {', '.join(used)}; {len(stops)} timetabled stops; {len(reports)} app reports; {len(survey)} survey rows; {len(incidents)} incidents", flush=True)
+    return TileStore(os.path.join(DATA, "tiles"), reports=reports + survey, incidents=incidents, extras=extras, stops=stops,
                      layers=os.path.join(DATA, "layers"))
 
 
@@ -154,7 +166,9 @@ def main():
             print(f"[{n}/{len(todo)}] block {b}: skipped ({err})", flush=True)
             continue
         e_rows, s_rows = static_rows(area), slot_rows(area, bus, tr)
-        used = ", ".join(sorted(area.sources))
+        got = rasters.add_land_cover(e_rows)
+        extra = osm_extra.add(e_rows, osm_extra.load(group))
+        used = ", ".join(sorted(area.sources) + (["ESA WorldCover"] if got else []) + (["OSM walls, drains, parking, toilets"] if extra else []))
         for r in e_rows:
             r["sources"] = used  # which downloads this block really has: a source that failed leaves a gap, and the log shows it
             r["region"] = region(r["lat"], r["lon"])
