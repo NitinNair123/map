@@ -74,14 +74,16 @@ def score(saved, route, other, daylight):
 
 
 CLAUDE_ONLY = "--claude-only" in sys.argv
-WHO = "Claude" if CLAUDE_ONLY else "Qwen and Claude"
+QWEN_TAUGHT = "--qwen-taught" in sys.argv
+WHO = "Claude" if CLAUDE_ONLY else "Qwen (taught Claude's method) and Claude" if QWEN_TAUGHT else "Qwen and Claude"
 
 
 def labels():
     """{pair id: (safer "A"/"B", weight, source)} plus counts of what went in and what was left out."""
     human = rank.human_labels(os.path.join(DATA, "labels_human.csv"))
     # --claude-only: learn from Claude's answers (and people's) alone, e.g. while Qwen is kept off for memory
-    qwen = {} if CLAUDE_ONLY else rank.llm_labels(os.path.join(DATA, "labels_llm.csv"))
+    # --qwen-taught: Qwen's answers after it was taught Claude's method (ml/label_llm.py --method claude)
+    qwen = {} if CLAUDE_ONLY else rank.llm_labels(os.path.join(DATA, "labels_qwen_taught.csv" if QWEN_TAUGHT else "labels_llm.csv"))
     claude = label_claude.load()
     out, info = {}, Counter()
     for i in set(human) | set(qwen) | set(claude):
