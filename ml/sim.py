@@ -8,8 +8,9 @@ it is not evidence of real-world safety. Replace HAZARD from real data (felt-uns
 A/B answers through ml/rank.py) when there is enough of it.
 
 What it takes from the base stage:
-  - the lit model's estimate for streets with no lighting data (ml/out/lit_predictions.csv.gz), so fewer streets are unknown;
-  - the route weights learned from people's answers (ml/out/route_ranker.json), raced as a fourth way of choosing a route.
+  - the lit model's estimate for streets with no lighting data (ml/out/lit_predictions.csv.gz), only once that model beats a
+    plain guess on its locked test (it doesn't yet, so unknown streets stay unknown);
+  - the learned route model (ml/out/route_ranker_v2.json from ml/rank_v2.py, else route_ranker.json), raced as a fourth way of choosing a route.
 
 Usage: py ml/sim.py --trips 500 [--around 28.4741,77.4998]     writes ml/out/sim_report.md
 """
@@ -37,15 +38,29 @@ STRATEGIES = ("fastest", "balanced", "safest")
 OUT = os.path.join(ROOT, "ml", "out")
 
 
+def lit_model_usable(folder=OUT):
+    """True only if the lit model beat 'always guess the majority' on its locked test (ml/eval_claude/report.md: so far it hasn't).
+    A model that can't beat a guess must not fill in unknown streets: unknown stays unknown."""
+    try:
+        m = next(x for x in json.load(open(os.path.join(folder, "metrics.json"))) if x.get("head") == "lit")
+        t = m["locked_test"]
+        return t["error_rate"] < t["always_guess_majority_error"] and (t.get("auroc") or 0) >= 0.7
+    except (OSError, ValueError, StopIteration, KeyError, TypeError):
+        return False
+
+
 def load_base(folder=OUT):
-    """What the base stage produced: ({street id: lit probability}, learned route weights or None)."""
+    """What the base stage produced: ({street id: lit probability}, learned route model or None).
+    Route model: ml/rank_v2.py's route_ranker_v2.json when present, else the older route_ranker.json."""
     lit, ranker = {}, None
     path = os.path.join(folder, "lit_predictions.csv.gz")
-    if os.path.exists(path):
+    if os.path.exists(path) and lit_model_usable(folder):
         with gzip.open(path, "rt") as f:
             lit = {r["edge_id"]: float(r["p_lit"]) for r in csv.DictReader(f)}
-    if os.path.exists(os.path.join(folder, "route_ranker.json")):
-        ranker = json.load(open(os.path.join(folder, "route_ranker.json")))
+    for name in ("route_ranker_v2.json", "route_ranker.json"):
+        if os.path.exists(os.path.join(folder, name)):
+            ranker = json.load(open(os.path.join(folder, name)))
+            break
     return lit, ranker
 
 
@@ -78,8 +93,14 @@ def route_edges(area, route):
 
 
 def learned_choice(routes, ranker):
-    """The candidate the learned weights rate best (ml/rank.py: a route's total of measure x weight)."""
+    """The candidate the learned model rates best. v2 (day/night weights) compares routes in pairs: the one that wins most
+    against the others, by total score margin. v1 (ml/rank.py): a route's total of measure x weight."""
     import pairs
+    if "day" in ranker:
+        import rank_v2
+        f = [pairs.route_features(r) for r in routes]
+        total = [sum(rank_v2.score(ranker, f[i], f[j], routes[i]["daylight"]) for j in range(len(routes)) if j != i) for i in range(len(routes))]
+        return routes[max(range(len(routes)), key=total.__getitem__)]
     w = ranker["weights"]
     value = lambda r: sum(pairs.route_features(r)[k] * (w[k] + w[f"{k}_dark"] * (r["daylight"] < 0.5)) for k in ranker["features"])
     return max(routes, key=value)
@@ -150,12 +171,13 @@ def main():
     center = tuple(map(float, args.around.split(",")))
     lit, ranker = load_base()
     if not lit and not ranker:
-        sys.exit("Stage 2 runs after base training: run py ml/train.py (and py ml/rank.py once pairs are answered) first")
+        sys.exit("Stage 2 runs after base training: run py ml/rank_v2.py (after Qwen and Claude label the pairs) first")
     rng = random.Random(0)
     area = dataset.store().around(center, 3500)
     res = simulate(area, random_trips(center, args.trips, rng), rng, lit=lit, ranker=ranker)
     lines = ["# Stage 2: simulated walks", "", "Event chances are assumptions (see HAZARD in ml/sim.py), not measured safety.",
-             f"From base training: lit estimates for {len(lit)} streets; learned route weights: {'yes' if ranker else 'not yet'}.", "",
+             f"From base training: lit estimates for {len(lit)} streets" + ("" if lit else " (lit model not used: it doesn't beat a plain guess yet)")
+             + f"; learned route model: {('v2, Qwen + Claude answers' if 'day' in ranker else 'v1') if ranker else 'not yet'}.", "",
              "| Route | Trips | Bad events per 1000 trips | Expected per 1000 | Extra minutes vs fastest | Reward per trip | Danger left unknown |",
              "| --- | --- | --- | --- | --- | --- | --- |"]
     lines += [f"| {s} | {o['trips']} | {o['events_per_1000']} | {o['expected_per_1000']} | {o['extra_minutes']} | {o['reward']} | {o['unknown']:.0%} |"

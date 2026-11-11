@@ -17,6 +17,7 @@ import json
 import os
 import re
 import signal
+import csv
 import subprocess
 import sys
 import threading
@@ -32,13 +33,16 @@ STAGES = [  # id, name, command, what it does
     ("train", "Base training: streets", ["ml/train.py"], "Lit, open places, buses and traffic, scored on unseen areas."),
     ("pairs", "Make route pairs", ["ml/pairs.py", "--n", "2000"], "Two real routes per simulated trip, up to 2,000. Resumes."),
     ("qwen", "Qwen labels the pairs", ["ml/label_llm.py"], "Local Qwen picks the safer route of each pair. Resumes."),
+    ("claude", "Claude labels the pairs", ["ml/label_claude.py"],
+     "Claude picks the safer route of every pair: its hand answers, and its written Safetipin-based criteria for the rest. Re-runs on new pairs."),
     ("ab", "A/B answers page", ["ml/rate_pairs.py"], "People answer the same pairs at http://localhost:8765."),
-    ("rank", "Base training: routes", ["ml/rank.py"], "Learns how much each measure matters from the answers."),
+    ("rank", "Train the route model (Qwen + Claude)", ["ml/rank_v2.py"],
+     "Learns from Qwen's and Claude's answers (people's too, once any exist), with safety-sign rules; scored on unseen areas."),
     ("sim", "Stage 2: simulated walks", ["ml/sim.py", "--trips", "500"], "Races the route choices through simulated trips."),
     ("world", "Stage 2: virtual world", ["ml/world.py", "--episodes", "3000"],
      "A walker is rewarded for arriving and punished for events on the real street graph. Event chances are assumptions. Resumes."),
 ]
-CHAIN = ["build", "train", "pairs", "qwen", "rank", "sim", "world"]  # the A/B page is a server, started on its own
+CHAIN = ["build", "train", "pairs", "qwen", "claude", "rank", "sim", "world"]  # the A/B page is a server, started on its own
 GROUPS = {  # the parameter groups of the spec; a test checks every model input sits in exactly one
     "Street itself": "highway sidewalk length lanes maxspeed unpaved rough underpass overbridge gap_m dead_ends n_crossing degree",
     "Lighting and cameras": "n_lamp lamps_per_100m n_cctv lamps_100 lamps_250 cctv_250 cctv_500 d_cctv d_lamp nb_lamps_per_100m nightlight",
@@ -59,7 +63,7 @@ ROUTE_GROUPS = {  # route measures of ml/pairs.py -> the same groups
     "police_m": "Help nearby", "help_gap_m": "Help nearby", "pharmacy_found": "Help nearby", "hospital_found": "Help nearby", "fuel_found": "Help nearby",
     "open_now": "People around", "nothing_open_m": "People around", "food_found": "People around", "shop_found": "People around",
     "other_found": "People around", "transit_found": "Transit", "main_pct": "Street network", "isolated_m": "Street network",
-    "length_m": "Street itself", "unrated_pct": "Street itself",
+    "length_m": "Street itself", "unrated_pct": "Street itself", "extra_length": "Street itself",  # extra_length: route model v2
 }
 HEADS = [("lit", "Lit at night"), ("open_share", "Places open"), ("bus_per_hour", "Buses passing"), ("traffic_ratio", "Traffic"), ("route", "Safer route choice")]
 PROGRESS = re.compile(r"\[?(\d+)\s*(?:of|/)\s*(\d+)")
@@ -269,7 +273,12 @@ def network():
     except (OSError, ValueError, TypeError):
         pass
     try:
-        w = json.load(open(os.path.join(OUT, "route_ranker.json")))["weights"]
+        v2 = os.path.join(OUT, "route_ranker_v2.json")
+        if os.path.exists(v2):
+            r = json.load(open(v2))
+            w = {**r["day"], **{f"{k}_dark": v for k, v in r["night"].items()}}
+        else:
+            w = json.load(open(os.path.join(OUT, "route_ranker.json")))["weights"]
         for col, v in w.items():
             g = ROUTE_GROUPS.get(col.removesuffix("_dark"))
             if g:
@@ -377,6 +386,28 @@ def reports():
     return out
 
 
+def route_model():
+    """What the route model v2 learned from and how it scored, for the 'Route model training' card. None before its first run."""
+    try:
+        r = json.load(open(os.path.join(OUT, "route_ranker_v2.json")))
+    except (OSError, ValueError):
+        return None
+    ids = {"people": set(), "qwen": set(), "claude_hand": set(), "claude_rubric": set()}  # distinct pairs with an A or B answer
+    for name, key in (("labels_llm.csv", "qwen"), ("labels_claude.csv", None), ("labels_human.csv", "people")):
+        path = os.path.join(ROOT, "ml", "data", name)
+        if not os.path.exists(path):
+            continue
+        for row in csv.DictReader(open(path, encoding="utf-8")):
+            if row.get("safer") in ("A", "B"):
+                ids.setdefault(key or row.get("source") or "claude_rubric", set()).add(row["id"])
+    counts = {k: len(v) for k, v in ids.items()}
+    m = r.get("metrics", {})
+    return {"counts": counts, "agree": m.get("qwen_agrees_with_claude"), "held": m.get("held_out_areas", {}),
+            "checks": m.get("sanity_checks", {}), "left_out": m.get("qwen_and_claude_disagree_left_out", 0),
+            "updated": os.path.getmtime(os.path.join(OUT, "route_ranker_v2.json")),
+            "top": sorted(((k, r["day"][k], r["night"][k]) for k in r["features"]), key=lambda t: -abs(t[1]) - abs(t[2]))[:6]}
+
+
 RUNNER = Runner()
 
 
@@ -397,7 +428,7 @@ class Handler(BaseHTTPRequestHandler):
                 lines = tail(sid)
                 stages.append({"id": sid, "name": name, "what": what, "status": RUNNER.status(sid), "progress": progress(lines), "tail": lines,
                                "note": RUNNER.notes.get(sid), "restarts": len(RUNNER.restarts.get(sid, []))})
-            return self.send(json.dumps({"stages": stages, "ollama": ollama(), "network": network(), "activity": activity(), "reports": reports(),
+            return self.send(json.dumps({"stages": stages, "ollama": ollama(), "network": network(), "activity": activity(), "reports": reports(), "route": route_model(),
                                          "live": live(RUNNER.status("build") == "running"), "now": time.time(),
                                          "running": RUNNER.any_running()}))
         self.send("not found", "text/plain", 404)
@@ -464,6 +495,7 @@ td.bad{color:var(--bad)}td.wait{color:var(--warn)}.flashrow{animation:fr 1.2s}@k
 and the route model in the middle, which feed stage 2 on the right. Nothing here moves on a timer: dots fire into a group only when a download for it really finishes (red when one fails),
 every dot flashes when the build saves a block of streets, lines fire into a model each time training tries a setting, and the curve below is that model's real score on areas it
 never saw. After training, a dot grows with how much it helped. The models are gradient-boosted trees and a learned weighting, not a neural network.</p></div>
+<div class=card style="margin-top:16px"><h3 style="margin:0 0 8px">Route model training: Qwen + Claude</h3><div id=route class=note>Not trained yet: press Play, or Start on "Claude labels the pairs" then "Train the route model".</div></div>
 <div class=card style="margin-top:16px"><h3 style="margin:0 0 8px">Results</h3><div id=reports class=note>No results yet.</div></div></section>
 <section class=card id=stages></section></main>
 <script>
@@ -471,7 +503,18 @@ const $=s=>document.querySelector(s);let S=null,pulses=[],t0=performance.now();
 const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 function toggleAll(){post(S&&S.running?'/api/pause-all':'/api/run-all')}
 async function post(u,b){await fetch(u,{method:'POST',body:JSON.stringify(b||{})});load()}
-async function load(){try{S=await(await fetch('/api/state')).json()}catch(e){$('#now').textContent='The Studio isn\'t answering. Is "Start SafeRoute AI Studio" still open?';return}render();renderLive();events();$('#now').textContent=nowText()}
+async function load(){try{S=await(await fetch('/api/state')).json()}catch(e){$('#now').textContent='The Studio isn\'t answering. Is "Start SafeRoute AI Studio" still open?';return}render();renderLive();renderRoute();events();$('#now').textContent=nowText()}
+function renderRoute(){const R=S.route,el=$('#route');if(!R)return;const c=R.counts,h=R.held||{},pct=v=>v==null?'–':Math.round(v*100)+'%';
+ const st=(v,l)=>`<div class=stat><b>${v}</b><span>${l}</span></div>`,ag=x=>x&&x.agree!=null?pct(x.agree)+` <span style="font-size:12px">of ${x.n}</span>`:'–';
+ const chk=Object.entries(R.checks||{}).map(([k,v])=>`<span class="pill ${v.ok?'done':'failed'}" title="day ${v.day}, night ${v.night}">${v.ok?'✓':'✗'} ${esc(k)}</span>`).join(' ');
+ el.innerHTML=`<p style="margin:0 0 8px">Every run, Qwen and Claude each pick the safer route of every pair; the model learns from both
+ (people's answers count most, once anyone answers on the A/B page). Pairs where Qwen and Claude disagree are left out.</p>
+ <div class=stats>${st(c.qwen,'pairs Qwen answered')}${st(c.claude_hand,'pairs Claude judged by hand')}${st(c.claude_rubric,"pairs by Claude's written criteria")}${st(c.people,'pairs people answered')}
+ ${st(pct(R.agree),'Qwen agrees with Claude')}${st(R.left_out,'left out (they disagree)')}</div>
+ <div class=stats>${st(ag(h.vs_qwen),'matches Qwen, unseen areas')}${st(ag(h.vs_claude_hand),"matches Claude's hand calls")}${st(ag(h.vs_people),'matches people')}${st(pct(h.baseline_always_the_shorter_route),'always-shorter baseline')}</div>
+ <div style="margin:4px 0 8px">Sanity checks: ${chk}</div>
+ <div>Biggest weights (day / night): ${R.top.map(([k,d,n])=>`${esc(k)} ${d>0?'+':''}${d.toFixed(1)} / ${n>0?'+':''}${n.toFixed(1)}`).join(' · ')}</div>
+ <p style="margin:8px 0 0">Trained ${dur(S.now-R.updated)} ago. These are Qwen's and Claude's judgments from measured numbers, not people's, and not proof a route is safe.</p>`}
 const dur=s=>s==null?'–':s<90?Math.round(s)+' s':s<5400?Math.round(s/60)+' min':s<172800?(s/3600).toFixed(1)+' h':(s/86400).toFixed(1)+' days';
 const size=b=>b<1e6?Math.round(b/1e3)+' kB':(b/1e6).toFixed(1)+' MB';
 let liveRows={};
@@ -532,7 +575,7 @@ function events(){const A=S.activity,P=layout(),L=S.live;
     fire({x:0,y:n.y+(Math.random()-.5)*30},n,bad?'rgba(239,91,91,.95)':`hsl(${HUE[n.gi]},90%,70%)`,.9+Math.random()*.5)})})}
  prevLive=L;
  S.stages.forEach(s=>{const p=prevProg[s.id];  // a later stage logged more progress: dots into the route model or stage 2
-  if(p!=null&&s.progress!=null&&s.progress>p&&['pairs','qwen','rank','sim'].includes(s.id)){const to=s.id=='sim'?P.sim:P.heads.route,c=P.in.filter(n=>feeds(n,'route'));
+  if(p!=null&&s.progress!=null&&s.progress>p&&['pairs','qwen','claude','rank','sim'].includes(s.id)){const to=s.id=='sim'?P.sim:P.heads.route,c=P.in.filter(n=>feeds(n,'route'));
    for(let i=0;i<24;i++)fire(s.id=='sim'?P.heads[S.network.heads[i%S.network.heads.length].id]:c[Math.floor(Math.random()*c.length)],to,'rgba(160,195,255,.95)')}
   prevProg[s.id]=s.progress});
  if(!prev){prev=A;return}
@@ -544,7 +587,7 @@ function events(){const A=S.activity,P=layout(),L=S.live;
 function draw(now){requestAnimationFrame(draw);if(!S)return;const dpr=devicePixelRatio||1,W=cv.clientWidth,Hc=cv.clientHeight;
  if(cv.width!=Math.round(W*dpr)||cv.height!=Math.round(Hc*dpr)){cv.width=Math.round(W*dpr);cv.height=Math.round(Hc*dpr)}
  cx.setTransform(dpr,0,0,dpr,0,0);cx.clearRect(0,0,W,Hc);const P=layout(),t=S.activity.train,heads=S.network.heads;
- const hot={};if(running('train')&&t.head)hot[t.head]=1;if(['pairs','qwen','rank','ab'].some(running))hot.route=1;
+ const hot={};if(running('train')&&t.head)hot[t.head]=1;if(['pairs','qwen','claude','rank','ab'].some(running))hot.route=1;
  // links: input -> model, model -> stage 2
  P.in.forEach(n=>heads.forEach(h=>{if(!feeds(n,h.id))return;const b=P.heads[h.id],w=linkW(n.g,h.id),on=hot[h.id];
   cx.strokeStyle=on?`hsla(${HUE[n.gi]},80%,65%,${.07+.3*w})`:`rgba(148,160,191,${.025+.25*w*n.u+.1*w})`;cx.lineWidth=.5+1.5*w;
@@ -584,7 +627,7 @@ function nowText(){const A=S.activity,b=A.build,t=A.train,parts=[];
  if(running('build')&&S.live)parts.push(S.live.current?`Building block #${S.live.current.n} of ${S.live.blocks_total} (for ${dur(S.live.current.for)})`:S.live.phase);
  else if(running('build'))parts.push(`Measuring streets: block ${b.blocks||'1'}${b.of?' of '+b.of:''}, ${b.streets.toLocaleString()} streets this run (${b.lit.toLocaleString()} with a lit label), ${b.blocks_on_disk} blocks saved in total`);
  if(running('train'))parts.push(t.head?`Training ${(S.network.heads.find(x=>x.id==t.head)||{}).name||t.head}: setting ${t.curve.length} of ${t.of||'?'}`:'Training: loading the streets');
- ['pairs','qwen','rank','sim','world'].forEach(id=>{const s=S.stages.find(x=>x.id==id);if(s.status=='running')parts.push(s.name+(s.progress!=null?' '+Math.round(s.progress*100)+'%':''))});
+ ['pairs','qwen','claude','rank','sim','world'].forEach(id=>{const s=S.stages.find(x=>x.id==id);if(s.status=='running')parts.push(s.name+(s.progress!=null?' '+Math.round(s.progress*100)+'%':''))});
  return parts.join(' · ')||'Nothing running. Press Run everything or Start on a stage.'}
 load();setInterval(load,2000);requestAnimationFrame(draw);
 </script></html>"""

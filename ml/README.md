@@ -6,8 +6,10 @@ Nothing in the app imports this folder. It learns from the same free sources the
 2. Keep `ml/collect.py` running (laptop: double-click the .bat; server: see safe-route/ai-model/collector-on-vps.md): logs Delhi OTD bus counts and TomTom traffic per hour. Counts only.
 3. `py ml/dataset.py` exports training rows. `--all` covers the whole OSM import, `--world` adds ~40 other cities (marked `region=other`, never scored), `--redo` rebuilds blocks after new logs or code.
 4. `py ml/train.py` trains the heads, scores them once on 20% of areas locked away, and lists which parameters helped. Output: `ml/out/report.md`.
-5. Stage 2 (after base training): `py ml/sim.py` races the route choices; `py ml/world.py` is the virtual world, a walker rewarded for arriving and punished for events on the real street graph (event chances are labelled assumptions in `ml/sim.py`). Resumes after a pause. Both run from the AI Studio.
-6. `python -m unittest ml.test_ml`
+5. Route model: `py ml/pairs.py`, then `py ml/label_llm.py` (Qwen) and `py ml/label_claude.py` (Claude: its hand answers in `ml/data/labels_claude_hand.csv`, its written criteria in `ml/eval_claude/criteria.md` for the rest), then `py ml/rank_v2.py`. People's answers from `py ml/rate_pairs.py` count most once there are any. The Studio (`py ml/studio.py`) runs all of these on Play and shows a "Route model training: Qwen + Claude" card.
+6. `python -m unittest ml.test_ml ml.test_route_v2`
+
+The lit model's estimates are only used (by `ml/sim.py` and `ml/world.py`) once it beats a plain guess on its locked test; see `ml/eval_claude/report.md` for the independent evaluation.
 
 ## Parameters (about 100 per street segment, all measured; unknown stays unknown, never zero)
 - **Safety infrastructure:** lamps, CCTV (OSM + Mapillary), guard posts, SOS phones, police distance, crossings, blackspots, waterlogging
