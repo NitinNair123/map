@@ -432,6 +432,17 @@ class Training(unittest.TestCase):
         e["lit_source"] = "osm"
         self.e, self.rng = e, rng
 
+    def test_unknown_columns_and_single_class_folds_do_not_crash_training(self):
+        np, pd = self.np, self.pd
+        X = pd.DataFrame({"a": self.rng.random(60), "b": np.nan, "highway": self.rng.integers(0, 3, 60)})
+        y = np.r_[np.ones(59), 0].astype(int)
+        m = self.train.make("clf", list(X.columns), {"max_iter": 5}).fit(X, y)  # column b is entirely unknown: left out
+        self.assertEqual(m.predict_proba(X).shape, (60, 2))
+        ones = self.train.make("clf", list(X.columns), {"max_iter": 5}).fit(X, np.ones(60, int))  # one class only
+        self.assertTrue((ones.predict_proba(X)[:, 1] == 1).all())
+        zeros = self.train.make("clf", list(X.columns), {"max_iter": 5}).fit(X, np.zeros(60, int))
+        self.assertTrue((zeros.predict_proba(X)[:, 1] == 0).all())
+
     def test_lit_head_is_scored_once_on_locked_blocks(self):
         saved, m = self.train.train_lit(self.e, trials=2, budget=60)
         t = m["locked_test"]

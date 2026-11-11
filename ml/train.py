@@ -101,10 +101,37 @@ class Bag:
         return np.mean([m.predict_proba(X) for m in self.models], axis=0)
 
 
+class Learner:
+    """One boosted-tree model that copes with what block-by-block data does: a column that is entirely unknown in the
+    training rows is left out (sklearn crashes on it: "window shape cannot be larger than input array shape"), and a
+    training set with a single class predicts that class instead of failing. Prediction uses the same columns."""
+
+    def __init__(self, kind, cols, kw):
+        self.kind, self.cols, self.kw = kind, cols, kw
+
+    def fit(self, X, y):
+        self.keep = [c for c in self.cols if X[c].notna().any()]
+        if not self.keep:
+            raise ValueError("every column is unknown in the training rows")
+        kw = {**self.kw, "categorical_features": [c in CATEGORICAL for c in self.keep]}
+        if self.kind == "clf" and np.bincount(np.asarray(y).astype(int), minlength=2).min() < 2:
+            kw["early_stopping"] = False  # its stratified validation split needs two of every class
+        self.model = (HistGradientBoostingClassifier if self.kind == "clf" else HistGradientBoostingRegressor)(**kw).fit(X[self.keep], y)
+        return self
+
+    def predict(self, X):
+        return self.model.predict(X[self.keep])
+
+    def predict_proba(self, X):
+        if len(self.model.classes_) == 1:  # only one class was seen in training (sklearn would answer 0 for it)
+            one = float(self.model.classes_[0] == 1)
+            return np.column_stack([np.full(len(X), 1 - one), np.full(len(X), one)])
+        return self.model.predict_proba(X[self.keep])
+
+
 def make(kind, cols, params, seed=0):
-    kw = dict(early_stopping=True, validation_fraction=0.1, n_iter_no_change=25, random_state=seed,
-              categorical_features=[c in CATEGORICAL for c in cols], **params)
-    return HistGradientBoostingClassifier(**kw) if kind == "clf" else HistGradientBoostingRegressor(**kw)
+    kw = dict(early_stopping=True, validation_fraction=0.1, n_iter_no_change=25, random_state=seed, **params)
+    return Learner(kind, cols, kw)
 
 
 def bag(kind, X, y, params):
