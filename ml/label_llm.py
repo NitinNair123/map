@@ -59,9 +59,12 @@ def main():
     ap.add_argument("--limit", type=int, default=10000)
     args = ap.parse_args()
     done = {int(r["id"]) for r in csv.DictReader(open(OUT))} if os.path.exists(OUT) else set()
-    todo = [p for p in pairs.load() if p["id"] not in done][:args.limit]
+    every = pairs.load()
+    if not every:
+        sys.exit(f"No route pairs yet ({pairs.OUT} is empty or missing): run 'Make route pairs' first. Nothing was labelled.")
+    todo = [p for p in every if p["id"] not in done][:args.limit]
     print(f"{len(todo)} pairs to label with {args.model}, {len(done)} already done", flush=True)
-    new = not os.path.exists(OUT)
+    new, usable = not os.path.exists(OUT), 0
     with open(OUT, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         if new:
@@ -70,8 +73,12 @@ def main():
             safer, reason = judge(p, lambda t: ollama(t, args.model))
             w.writerow([p["id"], safer or "", reason, args.model])
             f.flush()
+            usable += safer is not None
             if n % 25 == 0:
                 print(f"{n} of {len(todo)}", flush=True)
+    print(f"Labelled {usable} of {len(todo)} pairs this run ({len(todo) - usable} unusable: unreadable or changed with the order)", flush=True)
+    if todo and not usable:
+        sys.exit("Qwen gave no usable answer for any pair: check the model and the prompt.")
 
 
 if __name__ == "__main__":

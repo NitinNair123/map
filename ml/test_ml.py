@@ -251,6 +251,31 @@ class Features(unittest.TestCase):
 
 
 class Routes(unittest.TestCase):
+    def test_labelling_with_no_pairs_fails_and_with_pairs_writes_labels(self):
+        import csv
+        import json
+        import label_llm
+        real = (label_llm.pairs.load, label_llm.OUT, label_llm.ollama, sys.argv)
+        pair = lambda i: {"id": i, "hour": 22, "weekend": 0, "A": {k: 1 for k in label_llm.pairs.FEATURES}, "B": {k: 0 for k in label_llm.pairs.FEATURES}}
+        with tempfile.TemporaryDirectory() as d:
+            label_llm.OUT, sys.argv = os.path.join(d, "labels.csv"), ["label_llm.py"]
+            try:
+                label_llm.pairs.load = lambda path=None: []
+                with self.assertRaises(SystemExit) as stop:  # no pairs: the stage must fail, not say "done"
+                    label_llm.main()
+                self.assertIn("No route pairs", str(stop.exception))
+                label_llm.pairs.load = lambda path=None: [pair(1), pair(2)]
+                label_llm.ollama = lambda text, model: json.dumps({"safer": "A" if "A = 1, B = 0" in text else "B", "reason": "more of everything"})
+                label_llm.main()
+                rows = list(csv.DictReader(open(label_llm.OUT)))
+                self.assertEqual([r["safer"] for r in rows], ["A", "A"])
+                label_llm.ollama = lambda text, model: "no idea"  # nothing usable: fails too
+                label_llm.pairs.load = lambda path=None: [pair(3)]
+                with self.assertRaises(SystemExit):
+                    label_llm.main()
+            finally:
+                label_llm.pairs.load, label_llm.OUT, label_llm.ollama, sys.argv = real
+
     def test_pair_holds_measures_but_never_the_score(self):
         import random
         import pairs

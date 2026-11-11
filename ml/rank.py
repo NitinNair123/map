@@ -109,6 +109,8 @@ def main():
     text = "\n".join(lines) + "\n"
     open(os.path.join(OUT, "route_report.md"), "w").write(text)
     print(text)
+    if not saved:  # a stage that learned nothing must not show "done"
+        sys.exit(f"Nothing learned: {info.get('skipped', 'no model')}")
 
 
 if __name__ == "__main__":
