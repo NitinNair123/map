@@ -4,6 +4,9 @@ Stages run as separate processes. Pause stops one; the build, the route pairs an
 stopped when started again, while the trainers (minutes each) start over. "Run everything" goes through the stages in
 order and stops at the first pause or failure.
 
+The page has one Play/Pause button. A watchdog restarts a stage that crashed, or a build that has finished nothing for
+20 minutes, by itself (5 times an hour at most, with growing pauses); a stage you paused is never restarted.
+
 The picture shows the real model: parameter groups on the left feed the street and route models, which feed stage 2.
 They are gradient-boosted trees and a learned weighting, not a neural network. Lines grow with how much each group
 helped on areas the model never saw, once a training run has measured it.
@@ -85,6 +88,7 @@ def started_at(pid):
 class Runner:
     def __init__(self):
         self.procs, self.paused, self.lock = {}, set(), threading.Lock()
+        self.wanted, self.restarts, self.failed_at, self.notes = set(), {}, {}, {}  # watchdog: stages that should be running, and its record
         os.makedirs(LOGS, exist_ok=True)
         self.state_path = os.path.join(LOGS, "state.json")
         try:
@@ -92,6 +96,7 @@ class Runner:
         except (OSError, ValueError):
             self.last = {}
         self.last.setdefault("pids", {})
+        self.wanted |= {sid for sid, *_ in STAGES if sid != "ab" and self.orphan(sid)}  # carried on from an earlier Studio
 
     def save(self):
         json.dump(self.last, open(self.state_path, "w"))
@@ -108,6 +113,7 @@ class Runner:
             if sid in self.procs and self.procs[sid].poll() is None or self.orphan(sid):
                 return
             self.paused.discard(sid)
+            self.wanted.add(sid)
             log = open(os.path.join(LOGS, f"{sid}.log"), "a", encoding="utf-8")
             log.write(f"\n=== started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
             log.flush()
@@ -118,6 +124,8 @@ class Runner:
 
     def pause(self, sid):
         with self.lock:
+            self.wanted.discard(sid)  # the watchdog leaves a stage you paused alone
+            self.notes.pop(sid, None)
             p = self.procs.get(sid)
             if p and p.poll() is None:
                 self.paused.add(sid)
@@ -145,8 +153,8 @@ class Runner:
                 if sid == "qwen" and not ollama()["model"]:
                     continue  # no Qwen yet: the routes learn from people's answers only
                 self.start(sid)
-                while self.status(sid) == "running":
-                    time.sleep(2)
+                while self.status(sid) == "running" or (self.status(sid) == "failed" and sid in self.wanted and self.can_retry(sid)):
+                    time.sleep(2)  # (a failed stage is being restarted by the watchdog)
                 if self.status(sid) != "done":
                     return
         threading.Thread(target=chain, daemon=True).start()
@@ -154,6 +162,67 @@ class Runner:
     def pause_all(self):
         for sid, *_ in STAGES:
             self.pause(sid)
+
+    def any_running(self):
+        return any(self.status(sid) == "running" for sid, *_ in STAGES)
+
+    def can_retry(self, sid):
+        now = time.time()
+        self.restarts[sid] = [x for x in self.restarts.get(sid, []) if now - x < 3600]
+        return len(self.restarts[sid]) < MAX_RESTARTS
+
+    def heal(self):
+        """One pass of the watchdog: restart a wanted stage that crashed, or a build that has gone HUNG_S without finishing
+        anything while still reporting (a stuck download), after a pause that grows with each restart."""
+        now = time.time()
+        for sid, *_ in STAGES:
+            if sid not in self.wanted or sid == "ab":
+                continue
+            status, why = self.status(sid), None
+            if status == "failed":
+                why = "it stopped with an error"
+            elif status == "running" and sid == "build" and self.hung() and sid in self.procs:
+                self.procs[sid].terminate()  # not a pause: it comes back below once it has exited
+                why = f"it finished nothing for {HUNG_S // 60} min"
+                time.sleep(1)
+                status = self.status(sid)
+            if why is None or status == "running":
+                self.failed_at.pop(sid, None)
+                continue
+            if status == "done" or sid not in self.wanted:
+                continue
+            if not self.can_retry(sid):
+                self.notes[sid] = f"Gave up after {MAX_RESTARTS} automatic restarts in an hour ({why}). The log shows the error."
+                self.wanted.discard(sid)
+                continue
+            n = len(self.restarts[sid])
+            first = self.failed_at.setdefault(sid, now)
+            if now - first < min(30 * 2 ** n, 600):
+                continue
+            self.restarts[sid].append(now)
+            self.failed_at.pop(sid, None)
+            self.notes[sid] = f"Restarted by itself ({n + 1} of {MAX_RESTARTS} this hour) because {why}."
+            with open(os.path.join(LOGS, f"{sid}.log"), "a", encoding="utf-8") as log:
+                log.write(f"\n=== automatic restart {n + 1}/{MAX_RESTARTS}: {why} ===\n")
+            self.start(sid)
+
+    def hung(self):
+        try:
+            L = json.load(open(os.path.join(LOGS, "build_live.json")))
+        except (OSError, ValueError):
+            return False
+        now = time.time()
+        return L.get("phase") != "Done" and now - L["updated"] < 15 and now - L["last_event"] > HUNG_S
+
+    def watch(self):
+        def loop():
+            while True:
+                try:
+                    self.heal()
+                except Exception as err:  # the watchdog itself must never die
+                    print(f"watchdog: {err!r}", flush=True)
+                time.sleep(15)
+        threading.Thread(target=loop, daemon=True).start()
 
 
 def tail(sid, n=12, size=6000):
@@ -257,7 +326,10 @@ def activity():
 
 
 SOURCE_NAMES = {"": "OpenStreetMap", "nightlights": "NASA night lights", "mapillary": "Mapillary", "geoapify": "Geoapify",
-                "places": "Overture places", "buildings": "Overture buildings", "roads": "Overture streets"}
+                "places": "Overture places", "buildings": "Overture buildings", "roads": "Overture streets",
+                "osm_extra": "OSM walls, drains, parking (Overpass)"}
+MAX_RESTARTS = 5  # automatic restarts of one stage per hour
+HUNG_S = 1200  # a running build that has finished nothing for this long is stuck, not slow
 STALL_S = 180  # nothing finished for this long while the build runs: say so
 
 
@@ -323,9 +395,11 @@ class Handler(BaseHTTPRequestHandler):
             stages = []
             for sid, name, _, what in STAGES:
                 lines = tail(sid)
-                stages.append({"id": sid, "name": name, "what": what, "status": RUNNER.status(sid), "progress": progress(lines), "tail": lines})
+                stages.append({"id": sid, "name": name, "what": what, "status": RUNNER.status(sid), "progress": progress(lines), "tail": lines,
+                               "note": RUNNER.notes.get(sid), "restarts": len(RUNNER.restarts.get(sid, []))})
             return self.send(json.dumps({"stages": stages, "ollama": ollama(), "network": network(), "activity": activity(), "reports": reports(),
-                                         "live": live(RUNNER.status("build") == "running"), "now": time.time()}))
+                                         "live": live(RUNNER.status("build") == "running"), "now": time.time(),
+                                         "running": RUNNER.any_running()}))
         self.send("not found", "text/plain", 404)
 
     def do_POST(self):
@@ -365,7 +439,8 @@ h1{font-size:19px;margin:0}main{display:grid;grid-template-columns:minmax(0,1.5f
 @media(max-width:900px){main{grid-template-columns:1fr}}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
 button{font:inherit;border:1px solid var(--line);background:#1c2440;color:var(--ink);border-radius:8px;padding:7px 14px;cursor:pointer}
-button:hover{border-color:var(--accent)}button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button:hover{border-color:var(--accent)}button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button.big{font-size:17px;font-weight:600;padding:9px 26px;min-width:150px}button.big.pausing{background:var(--warn);border-color:var(--warn);color:#1a1300}
+.fixed{color:var(--warn);font-size:12px;margin-top:4px}
 canvas{width:100%;height:600px;display:block}@media(max-width:600px){canvas{height:480px}}
 .now{font-size:14px;margin:0 0 6px;min-height:20px}.problem{color:var(--bad);font-size:12px;margin-top:4px;white-space:pre-wrap}.stage{border-top:1px solid var(--line);padding:10px 0}.stage:first-child{border-top:0}
 .row{display:flex;gap:8px;align-items:center;justify-content:space-between}.name{font-weight:600}.what{color:var(--quiet);font-size:13px}
@@ -383,7 +458,7 @@ td.bad{color:var(--bad)}td.wait{color:var(--warn)}.flashrow{animation:fr 1.2s}@k
 .tablewrap{overflow-x:auto}details summary{cursor:pointer;color:var(--quiet);font-size:13px}
 </style>
 <header><h1>SafeRoute AI Studio</h1><div><span id=qwen class=pill></span>
-<button class=primary onclick="post('/api/run-all')">Run everything</button> <button onclick="post('/api/pause-all')">Pause all</button></div></header>
+<button id=toggle class="primary big" onclick="toggleAll()">Play</button></div></header>
 <main><section><div class=card><div id=now class=now>Loading...</div><div id=live></div><canvas id=net></canvas>
 <p class=note>Each small dot is one of the 104 things measured about every street, coloured by group. They feed the four street models
 and the route model in the middle, which feed stage 2 on the right. Nothing here moves on a timer: dots fire into a group only when a download for it really finishes (red when one fails),
@@ -394,6 +469,7 @@ never saw. After training, a dot grows with how much it helped. The models are g
 <script>
 const $=s=>document.querySelector(s);let S=null,pulses=[],t0=performance.now();
 const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+function toggleAll(){post(S&&S.running?'/api/pause-all':'/api/run-all')}
 async function post(u,b){await fetch(u,{method:'POST',body:JSON.stringify(b||{})});load()}
 async function load(){try{S=await(await fetch('/api/state')).json()}catch(e){$('#now').textContent='The Studio isn\'t answering. Is "Start SafeRoute AI Studio" still open?';return}render();renderLive();events();$('#now').textContent=nowText()}
 const dur=s=>s==null?'–':s<90?Math.round(s)+' s':s<5400?Math.round(s/60)+' min':s<172800?(s/3600).toFixed(1)+' h':(s/86400).toFixed(1)+' days';
@@ -418,10 +494,12 @@ function renderLive(){const L=S.live,el=$('#live');
    <p class=note style="margin:6px 0 0">Requests count every try, failures included. Overture's data is the size saved to disk, as its reader doesn't report bytes read.</p>`:'<p class=note>No downloads yet this run.</p>')+
   (err.length?`<details><summary>Last errors</summary><pre>${esc(err.join('\n'))}</pre></details>`:'')}
 function render(){
+ const tg=$('#toggle');tg.textContent=S.running?'⏸ Pause':'▶ Play';tg.className='primary big'+(S.running?' pausing':'');
  const q=S.ollama;$('#qwen').textContent=q.model?'Qwen ready: '+q.model:q.running?'Ollama running, Qwen not pulled':'Qwen not installed';
  $('#qwen').className='pill '+(q.model?'done':'paused');
  $('#stages').innerHTML='<h3 style="margin:0 0 8px">Stages</h3>'+S.stages.map(s=>`<div class=stage><div class=row><div><div class=name>${esc(s.name)}</div><div class=what>${esc(s.what)}</div></div>
   <div class=row><span class="pill ${s.status}">${s.status}</span>${s.status=='running'?`<button onclick="post('/api/pause',{id:'${s.id}'})">Pause</button>`:`<button onclick="post('/api/start',{id:'${s.id}'})">${s.status=='paused'?'Resume':'Start'}</button>`}</div></div>
+  ${s.note?`<div class=fixed>🔧 ${esc(s.note)}</div>`:''}
   ${(S.activity.problems[s.id]||[]).map(l=>`<div class=problem>⚠ ${esc(l)}</div>`).join('')}
   <div class=bar><i style="width:${s.progress==null?(s.status=='done'?100:0):Math.round(s.progress*100)}%"></i></div>
   ${s.tail.length?`<details${s.status=='running'?' open':''}><summary>Log</summary><pre>${esc(s.tail.join('\n'))}</pre></details>`:''}</div>`).join('');
@@ -514,4 +592,5 @@ load();setInterval(load,2000);requestAnimationFrame(draw);
 
 if __name__ == "__main__":
     print(f"SafeRoute AI Studio: open http://localhost:{PORT}", flush=True)
+    RUNNER.watch()
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

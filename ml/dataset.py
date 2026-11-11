@@ -10,7 +10,8 @@ Usage:
   py ml/dataset.py --points 28.47,77.50;28.63,77.22 --radius 2000
   py ml/dataset.py --world         ~40 areas of other Indian and world cities (OSM lit tags are plentiful there), marked
                                    region=other so training can test whether they help Delhi NCR (they are never scored)
-Writes ml/data/blocks/<block>.edges.csv.gz and .slots.csv.gz; blocks already written are skipped.
+Writes ml/data/blocks/<block>.edges.csv.gz and .slots.csv.gz; blocks already written are skipped. Blocks written while
+Overpass or Mapillary was down are rebuilt at the end of the run (or alone with --repair), never left with zeros.
 """
 import argparse
 import csv
@@ -30,6 +31,7 @@ import gtfs  # noqa: E402
 import features  # noqa: E402
 import osm_extra  # noqa: E402
 import rasters  # noqa: E402
+from spots import SPOTS  # noqa: E402
 from features import NCR, STATIC, load_bus_logs, load_traffic_logs, slot_rows, static_rows  # noqa: E402
 from rating import REPORT_TYPES  # noqa: E402
 from reports import Reports  # noqa: E402
@@ -39,8 +41,6 @@ from tiles import (CHUNK, TILE, TileStore, geoapify, mapillary, nightlights, ove
 
 DATA = os.path.join(ROOT, "data")
 OUT = os.path.join(ROOT, "ml", "data")
-# spread over Delhi, Noida, Greater Noida, Gurugram, Ghaziabad and Faridabad: markets, campuses, housing, industry, outskirts
-from spots import SPOTS  # noqa: E402
 
 
 # Cities whose OSM has many street-light tags, to learn what a lit street looks like. Real map data, no estimates.
@@ -86,27 +86,36 @@ def rows(path, types=None, **extra):
     return out
 
 
-def breaker(fetch, name, limit=3):
-    """A source that failed `limit` times in a row is skipped for the rest of the run instead of timing out on every
-    tile (Mapillary timing out made one block take an hour). Its tiles stay without it, so its columns are unknown."""
-    fails = [0]
+def breaker(fetch, name, limit=3, cool=300):
+    """A source that failed `limit` times in a row is skipped for `cool` seconds instead of timing out on every tile
+    (Mapillary timing out made one block take an hour), then tried again; each failed retry doubles the pause (up to
+    30 min), a success resets it. Tiles skipped meanwhile stay without the source, so its columns are unknown, and the
+    repair pass at the end of main() fetches them later."""
+    st = {"fails": 0, "until": 0.0, "cool": cool}
+    lock = threading.Lock()
 
     def call(*a):
-        if fails[0] >= limit:
-            err = OSError(f"{name} skipped for this run after {limit} failures in a row")
+        with lock:
+            wait = st["until"] - time.time()
+        if wait > 0:
+            err = OSError(f"{name} skipped, resting for {wait:.0f} more seconds after {limit} failures in a row")
             err.skipped = True
             raise err
         try:
             out = fetch(*a)
         except Exception:
-            fails[0] += 1
-            if fails[0] == limit:  # (the refusals after this are counted as skipped, not as failed downloads)
-                print(f"{name}: {limit} failures in a row, skipped for the rest of this run", flush=True)
+            with lock:
+                st["fails"] += 1
+                if st["fails"] >= limit:  # (the refusals during the rest are counted as skipped, not as failed downloads)
+                    st["until"], st["cool"] = time.time() + st["cool"], min(st["cool"] * 2, 1800)
+                    print(f"{name}: {st['fails']} failures in a row, resting for {st['until'] - time.time():.0f} s", flush=True)
+                    st["fails"] = limit - 1  # one more failure after the rest re-opens the pause, longer
             raise
-        fails[0] = 0
+        with lock:
+            st.update(fails=0, until=0.0, cool=cool)
         return out
+    call.state = st
     return call
-
 
 def store(world=False):
     """A TileStore set up like server.py's, except that every source loads before an area is built (no background)
@@ -217,12 +226,27 @@ def prefetch(tile_set, live):
                       progress=lambda kind, done, of: live.set(prefetch={"kind": kind, "done": done, "of": of}))
 
 
+def gaps(folder, order, wanted):
+    """Blocks already on disk whose `sources` column lacks something in `wanted` (a block with no streets has no row to
+    read and counts as done): a list of (position, block, tiles) to rebuild."""
+    out = []
+    for n, (b, group) in enumerate(order, 1):
+        path = os.path.join(folder, f"{b[0]}_{b[1]}.edges.csv.gz")
+        if not (os.path.exists(path) and os.path.exists(path[:-len('.edges.csv.gz')] + ".slots.csv.gz")):
+            continue
+        with gzip.open(path, "rt", newline="") as f:
+            row = next(csv.DictReader(f), None)
+        if row is not None and any(w not in row.get("sources", "") for w in wanted):
+            out.append((n, b, group))
+    return out
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--points")
     ap.add_argument("--world", action="store_true")
     ap.add_argument("--radius", type=float, default=1500)
+    ap.add_argument("--repair", action="store_true", help="only re-fetch what finished blocks are missing (a source was down when they were built)")
     ap.add_argument("--redo", action="store_true", help="rebuild blocks already written (new data since)")
     ap.add_argument("--hours", type=float, default=0, help="stop starting new blocks after this many hours (0 = no limit); blocks come in random order, so any stop point is a fair spread of the area")
     args = ap.parse_args()
@@ -252,13 +276,11 @@ def main():
         prefetch(tile_set, live)
     live.set(phase="Measuring streets block by block")
     began = time.time()
-    for n, (b, group) in enumerate(order, 1):
-        if args.hours and time.time() - began > args.hours * 3600:
-            print(f"Time limit of {args.hours} h reached after {n - 1} of {len(order)} blocks; run again to continue", flush=True)
-            break
+    total = len(order)
+
+    def build(n, b, group):
+        """Measures and writes one block; returns (streets, hour rows), or None when its streets can't be loaded."""
         name = os.path.join(folder, f"{b[0]}_{b[1]}")
-        if os.path.exists(name + ".slots.csv.gz") and not args.redo:
-            continue
         started = time.time()
         live.set(current={"n": n, "block": list(b), "started": started})
         if live.info["first_block_at"] is None:
@@ -266,9 +288,9 @@ def main():
         try:
             area = ts.area(group)
         except (OSError, ValueError, KeyError) as err:
-            print(f"[{n}/{len(todo)}] block {b}: skipped ({err})", flush=True)
+            print(f"[{n}/{total}] block {b}: skipped ({err})", flush=True)
             live.set(blocks_failed=live.info["blocks_failed"] + 1, current=None)
-            continue
+            return None
         e_rows, s_rows = static_rows(area), slot_rows(area, bus, tr)
         got = rasters.add_land_cover(e_rows)
         extra = osm_extra.add(e_rows, osm_extra.load(group))
@@ -281,10 +303,49 @@ def main():
         write(name + ".edges.csv.gz", e_rows, ["edge_id", "tile", "lat", "lon", "region", "sources", *STATIC, "lit", "lit_source"])
         write(name + ".slots.csv.gz", s_rows, ["edge_id", "hour", "weekend", "daylight", "gtfs_deps", "open_share", "open_known", "bus_per_hour", "traffic_ratio"])
         ts.areas.clear()  # one block at a time in memory
-        edges, slots = edges + len(e_rows), slots + len(s_rows)
         live.block_done(len(e_rows), sum(r["lit"] is not None for r in e_rows), time.time() - started)
-        print(f"[{n}/{len(todo)}] block {b}: {len(e_rows)} streets, {sum(r['lit'] is not None for r in e_rows)} with a lit label, "
+        print(f"[{n}/{total}] block {b}: {len(e_rows)} streets, {sum(r['lit'] is not None for r in e_rows)} with a lit label, "
               f"{len(s_rows)} hour rows, sources: {used} ({time.time() - started:.0f} s)", flush=True)
+        return len(e_rows), len(s_rows)
+
+    def out_of_time():
+        return args.hours and time.time() - began > args.hours * 3600
+
+    if not args.repair:
+        for n, (b, group) in enumerate(order, 1):
+            if out_of_time():
+                print(f"Time limit of {args.hours} h reached after {n - 1} of {total} blocks; run again to continue", flush=True)
+                break
+            if os.path.exists(os.path.join(folder, f"{b[0]}_{b[1]}.slots.csv.gz")) and not args.redo:
+                continue
+            done = build(n, b, group)
+            if done:
+                edges, slots = edges + done[0], slots + done[1]
+    # Repair: a block written while a source was down has that source's columns unknown. Ask again now, a few times, since
+    # Overpass and Mapillary usually come back within the hour. The source's own rest (see breaker, osm_extra.HEALTH) keeps
+    # a source that is still down from costing more than a moment per block.
+    wanted = [label for label, on in (("OSM walls", True), ("Mapillary", "mapillary" in ts.extras)) if on]
+    for attempt in range(1, 4):
+        if out_of_time():
+            break
+        todo_fix = gaps(folder, order, wanted)
+        live.set(gaps=len(todo_fix))
+        if not todo_fix:
+            break
+        live.set(phase=f"Repairing {len(todo_fix)} blocks that missed a source (try {attempt} of 3)")
+        print(f"Repair try {attempt}: {len(todo_fix)} blocks lack {', '.join(wanted)}", flush=True)
+        fixed = 0
+        for n, b, group in todo_fix:
+            if out_of_time():
+                break
+            done = build(n, b, group)
+            fixed += bool(done)
+        left = len(gaps(folder, order, wanted))
+        live.set(gaps=left)
+        print(f"Repair try {attempt}: {left} blocks still have gaps", flush=True)
+        if left == 0 or attempt == 3 or out_of_time():
+            break
+        time.sleep(300)  # let the servers recover before the next try
     live.set(phase="Done", current=None)
     live.write()
     print(f"Done: {edges} streets and {slots} hour rows written this run", flush=True)

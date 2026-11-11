@@ -1,8 +1,10 @@
 """Checks for the AI street model pipeline. Run from the repo folder: python -m unittest ml.test_ml"""
+import gzip
 import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -64,6 +66,43 @@ class Features(unittest.TestCase):
             with self.assertRaises(OSError):
                 f(1, 2, 3, 4)
         self.assertEqual(len(calls), 3)  # the last two never waited on the network
+
+    def test_studio_restarts_a_crashed_stage_itself_but_never_one_you_paused(self):
+        import studio
+        with tempfile.TemporaryDirectory() as d:
+            script = os.path.join(d, "crash.py")
+            with open(script, "w") as f:
+                f.write("import sys; sys.exit(1)")
+            old = studio.LOGS, studio.ROOT, studio.STAGES
+            studio.LOGS, studio.ROOT, studio.STAGES = d, d, [("build", "Build", [script], "")]
+            try:
+                r = studio.Runner()
+                r.start("build")
+                r.procs["build"].wait()
+                self.assertEqual(r.status("build"), "failed")
+                r.heal()  # first sight of the crash: waits before restarting
+                self.assertEqual(len(r.restarts.get("build", [])), 0)
+                r.failed_at["build"] = 0  # the pause is over
+                r.heal()
+                self.assertEqual(len(r.restarts["build"]), 1)
+                self.assertIn("Restarted by itself", r.notes["build"])
+                self.assertIn("automatic restart 1/", open(os.path.join(d, "build.log")).read())
+                r.procs["build"].wait()
+                for _ in range(studio.MAX_RESTARTS):  # a stage that keeps crashing is given up on, not restarted forever
+                    r.failed_at["build"] = 0
+                    r.heal()
+                    r.procs["build"].wait()
+                self.assertIn("Gave up", r.notes["build"])
+                self.assertNotIn("build", r.wanted)
+                r.start("build")
+                r.procs["build"].wait()
+                r.pause("build")  # paused by hand: no restart whatever its exit code
+                r.failed_at["build"] = 0
+                n = len(r.restarts["build"])
+                r.heal()
+                self.assertEqual(len(r.restarts["build"]), n)
+            finally:
+                studio.LOGS, studio.ROOT, studio.STAGES = old
 
     def test_studio_reads_progress_from_logs_and_finds_its_old_stages(self):
         import subprocess
@@ -416,6 +455,92 @@ class Surroundings(unittest.TestCase):
         self.assertFalse(osm_extra.add([failed], None))
         self.assertTrue(all(math.isnan(failed[c]) for c in osm_extra.COLUMNS))  # a block that couldn't be fetched is unknown, not zero
 
+    @staticmethod
+    def fake_clock():
+        """time.time() and time.sleep() on a clock that only sleep() and each simulated request move forward."""
+        now = [1000.0]
+        return unittest.mock.patch("time.time", lambda: now[0]), unittest.mock.patch("time.sleep", lambda s: now.__setitem__(0, now[0] + s)), now
+
+    def test_overpass_falls_back_to_a_healthy_mirror_and_rests_a_bad_one(self):
+        import osm_extra
+        calls = []
+
+        def ask(box, url):
+            calls.append(url)
+            if url == osm_extra.HOSTS[0]:
+                osm_extra._mark(url, False)
+                raise OSError("HTTP Error 502: Bad Gateway")
+            osm_extra._mark(url, True)
+            return {"elements": [{"type": "way", "id": 1}]}
+        old, osm_extra._ask, osm_extra.HEALTH = osm_extra._ask, ask, {}
+        try:
+            clock, nap, _ = self.fake_clock()
+            with clock, nap:
+                self.assertEqual(osm_extra.fetch((28.0, 77.0, 28.03, 77.03))["elements"][0]["id"], 1)
+                self.assertEqual(calls[:2], osm_extra.HOSTS[:2])  # the first mirror failed, the next answered
+                osm_extra._mark(osm_extra.HOSTS[0], False)  # a second failure in a row rests it
+                calls.clear()
+                osm_extra.fetch((28.0, 77.0, 28.03, 77.03))
+                self.assertNotIn(osm_extra.HOSTS[0], calls)
+        finally:
+            osm_extra._ask = old
+
+    def test_overpass_asks_for_quarters_when_the_whole_box_fails_and_gives_up_as_unknown(self):
+        import osm_extra
+        boxes = []
+
+        def ask(box, url):
+            boxes.append(box)
+            if box[2] - box[0] > 0.02:  # only small boxes get through
+                osm_extra._mark(url, False)
+                raise OSError("The read operation timed out")
+            osm_extra._mark(url, True)
+            return {"elements": [{"type": "way", "id": 7}, {"type": "node", "id": len(boxes)}]}
+        old, osm_extra._ask, osm_extra.HEALTH = osm_extra._ask, ask, {}
+        try:
+            clock, nap, _ = self.fake_clock()
+            with clock, nap:
+                osm = osm_extra.fetch((28.0, 77.0, 28.03, 77.03), deadline=600)
+            self.assertEqual(len([e for e in osm["elements"] if e["id"] == 7]), 1)  # a way in two quarters counts once
+            self.assertEqual(len([e for e in osm["elements"] if e["type"] == "node"]), 4)
+            osm_extra.HEALTH = {}
+            def down(box, url):
+                osm_extra._mark(url, False)
+                raise OSError("down")
+            osm_extra._ask = down
+            clock, nap, now = self.fake_clock()
+            with clock, nap:
+                self.assertIsNone(osm_extra.fetch((28.0, 77.0, 28.03, 77.03)))  # None, so the columns stay NaN
+                self.assertLessEqual(now[0] - 1000, osm_extra.DEADLINE_S + 20)  # and it gave up within its deadline
+        finally:
+            osm_extra._ask = old
+
+    def test_a_resting_source_is_tried_again_and_blocks_missing_a_source_are_found(self):
+        import dataset
+        state = {"down": True}
+
+        def src(*a):
+            if state["down"]:
+                raise OSError("timed out")
+            return {"elements": []}
+        f = dataset.breaker(src, "Test", limit=2, cool=300)
+        for _ in range(4):
+            with self.assertRaises(OSError):
+                f(1)
+        self.assertGreater(f.state["until"], 0)  # resting now
+        f.state["until"] = 0  # the rest is over
+        state["down"] = False
+        self.assertEqual(f(1), {"elements": []})
+        self.assertEqual(f.state["fails"], 0)
+        with tempfile.TemporaryDirectory() as d:
+            for name, sources in (("1_1", "OpenStreetMap, OSM walls, drains, parking, toilets, Mapillary"), ("1_2", "OpenStreetMap, Mapillary")):
+                for kind in ("edges", "slots"):
+                    with gzip.open(os.path.join(d, f"{name}.{kind}.csv.gz"), "wt", newline="") as fh:
+                        fh.write("edge_id,sources\n" + (f"a,\"{sources}\"\n" if kind == "edges" else "a,x\n"))
+            order = [((1, 1), {(1, 1)}), ((1, 2), {(1, 2)}), ((1, 3), {(1, 3)})]  # block 1_3 isn't written yet: not a gap
+            self.assertEqual([b for _, b, _ in dataset.gaps(d, order, ["OSM walls", "Mapillary"])], [(1, 2)])
+            self.assertEqual(dataset.gaps(d, order, ["Mapillary"]), [])
+
 
 class LandCover(unittest.TestCase):
     def test_tile_names_match_esa_worldcover(self):
@@ -533,6 +658,8 @@ class ServerLogs(unittest.TestCase):
             mods = {a.name.split(".")[0] for n in tree.body if isinstance(n, ast.Import) for a in n.names}
             mods |= {n.module.split(".")[0] for n in tree.body if isinstance(n, ast.ImportFrom)}
             self.assertFalse(mods - own - set(sys.stdlib_module_names), f)  # the server has plain Python only
+
+
 
 
 if __name__ == "__main__":
