@@ -240,6 +240,22 @@ def gaps(folder, order, wanted):
             out.append((n, b, group))
     return out
 
+def older_than_traffic(folder, order, tr, traffic_path):
+    """Blocks saved before the newest traffic readings arrived that those readings reach: a traffic cell is a 0.001 degree
+    square on a main road, so its tile is cell // 10 and its block is tile // CHUNK. Returns (position, block, tiles) to
+    rebuild; a rebuilt block is newer than the file, so it is not asked for twice."""
+    if not tr or not os.path.exists(traffic_path):
+        return []
+    reached = {((k[0] // 10) // CHUNK, (k[1] // 10) // CHUNK) for k in tr}
+    newest = os.path.getmtime(traffic_path)
+    out = []
+    for n, (b, group) in enumerate(order, 1):
+        slots = os.path.join(folder, f"{b[0]}_{b[1]}.slots.csv.gz")
+        if b in reached and os.path.exists(slots) and os.path.getmtime(slots) < newest:
+            out.append((n, b, group))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true")
@@ -321,6 +337,14 @@ def main():
             done = build(n, b, group)
             if done:
                 edges, slots = edges + done[0], slots + done[1]
+    # Traffic readings keep arriving (ml/collect.py, the logger): blocks saved before the latest ones get their hour rows now.
+    for n, b, group in older_than_traffic(folder, order, tr, os.path.join(OUT, "traffic.csv")):
+        if out_of_time():
+            break
+        if n == 1 or not live.info.get("traffic_redo"):
+            print("Traffic: rebuilding the blocks saved before the newest traffic readings", flush=True)
+        live.set(phase="Adding new traffic readings to older blocks", traffic_redo=True)
+        build(n, b, group)
     # Repair: a block written while a source was down has that source's columns unknown. Ask again now, a few times, since
     # Overpass and Mapillary usually come back within the hour. The source's own rest (see breaker, osm_extra.HEALTH) keeps
     # a source that is still down from costing more than a moment per block.

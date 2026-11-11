@@ -635,6 +635,25 @@ class Training(unittest.TestCase):
         self.assertIn("skipped", m)
 
 
+class TrafficRebuild(unittest.TestCase):
+    def test_only_blocks_saved_before_newer_traffic_that_reaches_them_are_rebuilt(self):
+        import dataset
+        with tempfile.TemporaryDirectory() as d:
+            traffic = os.path.join(d, "traffic.csv")
+            open(traffic, "w").write("x\n")
+            old, fresh = (0, 0), (5, 5)
+            for b, age in ((old, -100), (fresh, 100), ((9, 9), -100)):
+                p = os.path.join(d, f"{b[0]}_{b[1]}.slots.csv.gz")
+                open(p, "w").write("x")
+                t = os.path.getmtime(traffic) + age
+                os.utime(p, (t, t))
+            order = [(old, ["a"]), (fresh, ["b"]), ((9, 9), ["c"]), ((7, 7), ["d"])]  # (7,7) was never saved
+            cell = lambda b: (b[0] * dataset.CHUNK * 10, b[1] * dataset.CHUNK * 10)
+            tr = {cell(old): 1, cell(fresh): 1}  # no traffic reaches block (9, 9)
+            self.assertEqual(dataset.older_than_traffic(d, order, tr, traffic), [(1, old, ["a"])])
+            self.assertEqual(dataset.older_than_traffic(d, order, {}, traffic), [])
+
+
 class ServerLogs(unittest.TestCase):
     def test_merge_keeps_every_row_once(self):
         import merge_logs
