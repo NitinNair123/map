@@ -254,6 +254,9 @@ def importance(kind, model, X, y, repeats=3, rows=20000):
 def run_head(name, kind, d, cols, target, trials=None, budget=None):
     """Tune, choose NCR-only vs all regions, score once on the locked blocks, then fit the final model on everything."""
     d = d.reset_index(drop=True)
+    if d.empty:  # a head with no logged data yet (bus, traffic) is skipped, not a crash
+        print(f"Training {name}: 0 rows, skipped", flush=True)
+        return None, {"head": name, "rows": 0, "skipped": "no rows recorded yet"}
     y = d[target].to_numpy(float)
     lock = locked(d["block"])
     ncr = (d["region"] == "ncr").to_numpy()

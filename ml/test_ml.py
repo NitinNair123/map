@@ -457,6 +457,11 @@ class Training(unittest.TestCase):
         e["lit_source"] = "osm"
         self.e, self.rng = e, rng
 
+    def test_head_with_no_rows_is_skipped_not_a_crash(self):
+        saved, info = self.train.run_head("bus_per_hour", "reg", self.e.iloc[0:0], ["n_lamp"], "lit")
+        self.assertIsNone(saved)
+        self.assertIn("skipped", info)
+
     def test_unknown_columns_and_single_class_folds_do_not_crash_training(self):
         np, pd = self.np, self.pd
         X = pd.DataFrame({"a": self.rng.random(60), "b": np.nan, "highway": self.rng.integers(0, 3, 60)})
