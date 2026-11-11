@@ -10,6 +10,7 @@ import csv
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -56,19 +57,38 @@ def judge(p, ask):
 
 
 LOCAL = "qwen3:4b"
-# Ollama's cloud models run on Ollama's servers (free tier, rate-limited) once Ollama is signed in and cloud is turned on in its
-# settings; only the route measures in the prompt leave this PC. Tried in order; the first that answers is used.
-CLOUD = ["gpt-oss:120b-cloud", "qwen3-coder:480b-cloud", "deepseek-v3.1:671b-cloud"]
+MAX_PROBES = 5  # cloud models tried per run; each probe is one tiny request
+# Ollama's cloud models run on Ollama's servers once Ollama is signed in and cloud is turned on in its settings; only the route
+# measures in the prompt leave this PC. Model names change, so the list is read from Ollama's public catalogue each run, never hard-coded.
+
+
+def cloud_candidates():
+    """Cloud model names to try, smallest first: from ollama.com's public model list ("name:cloud", or "name:tag-cloud")."""
+    try:
+        with urllib.request.urlopen("https://ollama.com/api/tags", timeout=10) as r:
+            models = json.load(r)["models"]
+    except Exception as err:  # offline or the catalogue moved: no cloud this run
+        print(f"could not read Ollama's cloud model list ({str(err)[:60]})", flush=True)
+        return []
+    names = [m["name"] for m in sorted(models, key=lambda m: m.get("size") or 0) if m.get("size")]
+    return [n + "-cloud" if ":" in n else n + ":cloud" for n in names]
 
 
 def pick_model():
-    """The model to label with: $SAFEROUTE_LLM if set, else the first Ollama cloud model that answers, else local Qwen."""
-    wanted = [os.environ["SAFEROUTE_LLM"]] if os.environ.get("SAFEROUTE_LLM") else []
-    for m in wanted + CLOUD:
+    """The model to label with: $SAFEROUTE_LLM if set, else the first Ollama cloud model that answers, else local Qwen.
+    HTTP 402 (the account has no cloud access on its plan, or the free allowance is used up) applies to every cloud model,
+    so the first 402 ends the search; 404/410 (name retired or unknown) moves on to the next name."""
+    names = ([os.environ["SAFEROUTE_LLM"]] if os.environ.get("SAFEROUTE_LLM") else []) + cloud_candidates()
+    for m in names[:MAX_PROBES + 1]:
         try:
             ollama('Reply in JSON: {"ok": true}', m)
             return m
-        except Exception as err:  # 403 "ollama cloud is disabled", not signed in, offline: try the next one
+        except urllib.error.HTTPError as err:
+            print(f"{m} not available (HTTP {err.code})", flush=True)
+            if err.code == 402:
+                print("Ollama cloud is not usable on this account right now (402: plan or free allowance). Using local Qwen.", flush=True)
+                break
+        except Exception as err:  # 403 cloud turned off, offline, timeout: try the next name
             print(f"{m} not available ({str(err)[:80]})", flush=True)
     return LOCAL
 
