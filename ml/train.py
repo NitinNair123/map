@@ -44,8 +44,8 @@ ML = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(ML, "out")
 MIN_ROWS, MIN_BLOCKS = 200, 6
 LOCKED = 0.2            # share of blocks kept out of every decision
-TRIALS = 25             # parameter sets tried per head
-BUDGET_S = 1500         # most time spent tuning one head; a few trials always run
+TRIALS = 75             # parameter sets tried per head (was 25; a wider search, still scored once on the locked blocks)
+BUDGET_S = 3600         # most time spent tuning one head (was 1500); a few trials always run
 MAX_ROWS = 3_000_000    # street-hour rows kept per hourly head, so the full NCR build fits in a laptop's memory
 MAX_TUNE_ROWS = 300_000  # tuning looks at a random subset of blocks beyond this; the final fit uses everything
 SEEDS = 5
@@ -101,37 +101,42 @@ class Bag:
         return np.mean([m.predict_proba(X) for m in self.models], axis=0)
 
 
-class Learner:
-    """One boosted-tree model that copes with what block-by-block data does: a column that is entirely unknown in the
-    training rows is left out (sklearn crashes on it: "window shape cannot be larger than input array shape"), and a
-    training set with a single class predicts that class instead of failing. Prediction uses the same columns."""
+class Safe:
+    """One gradient-boosted model that drops columns holding a single value in the rows it is fitted on. sklearn's
+    binning crashes ("window shape cannot be larger than input array shape") on such a column, and in a small
+    cross-validation fold a sparse column (e.g. all zero lamps) can be constant even when the whole set is not."""
 
-    def __init__(self, kind, cols, kw):
-        self.kind, self.cols, self.kw = kind, cols, kw
+    def __init__(self, kind, cols, params, seed):
+        self.kind, self.cols, self.params, self.seed = kind, list(cols), params, seed
 
     def fit(self, X, y):
-        self.keep = [c for c in self.cols if X[c].notna().any()]
-        if not self.keep:
-            raise ValueError("every column is unknown in the training rows")
-        kw = {**self.kw, "categorical_features": [c in CATEGORICAL for c in self.keep]}
-        if self.kind == "clf" and np.bincount(np.asarray(y).astype(int), minlength=2).min() < 2:
-            kw["early_stopping"] = False  # its stratified validation split needs two of every class
-        self.model = (HistGradientBoostingClassifier if self.kind == "clf" else HistGradientBoostingRegressor)(**kw).fit(X[self.keep], y)
+        self.keep = [c for c in self.cols if X[c].nunique(dropna=True) > 1] or self.cols[:1]
+        self.const, stop = None, True
+        if self.kind == "clf":
+            _, counts = np.unique(np.asarray(y), return_counts=True)
+            if len(counts) < 2:  # a fold with one class only: every street gets that class
+                self.const = float(np.asarray(y)[0])
+                return self
+            stop = counts.min() >= 2  # early stopping holds out a stratified slice, which needs two of every class
+        kw = dict(early_stopping=stop, validation_fraction=0.1, n_iter_no_change=25, random_state=self.seed,
+                  categorical_features=[c in CATEGORICAL for c in self.keep], **self.params)
+        self.model = (HistGradientBoostingClassifier if self.kind == "clf" else HistGradientBoostingRegressor)(**kw)
+        self.model.fit(X[self.keep], y)
         return self
 
     def predict(self, X):
+        if self.const is not None:
+            return np.full(len(X), int(self.const))
         return self.model.predict(X[self.keep])
 
     def predict_proba(self, X):
-        if len(self.model.classes_) == 1:  # only one class was seen in training (sklearn would answer 0 for it)
-            one = float(self.model.classes_[0] == 1)
-            return np.column_stack([np.full(len(X), 1 - one), np.full(len(X), one)])
+        if self.const is not None:
+            return np.column_stack([np.full(len(X), 1 - self.const), np.full(len(X), self.const)])
         return self.model.predict_proba(X[self.keep])
 
 
 def make(kind, cols, params, seed=0):
-    kw = dict(early_stopping=True, validation_fraction=0.1, n_iter_no_change=25, random_state=seed, **params)
-    return Learner(kind, cols, kw)
+    return Safe(kind, cols, params, seed)
 
 
 def bag(kind, X, y, params):
@@ -254,9 +259,9 @@ def importance(kind, model, X, y, repeats=3, rows=20000):
 def run_head(name, kind, d, cols, target, trials=None, budget=None):
     """Tune, choose NCR-only vs all regions, score once on the locked blocks, then fit the final model on everything."""
     d = d.reset_index(drop=True)
-    if d.empty:  # a head with no logged data yet (bus, traffic) is skipped, not a crash
+    if d.empty:  # no labelled rows at all (e.g. no bus or traffic logs): ~lock below would fail on an empty array
         print(f"Training {name}: 0 rows, skipped", flush=True)
-        return None, {"head": name, "rows": 0, "skipped": "no rows recorded yet"}
+        return None, {"head": name, "rows": 0, "skipped": "no rows"}
     y = d[target].to_numpy(float)
     lock = locked(d["block"])
     ncr = (d["region"] == "ncr").to_numpy()

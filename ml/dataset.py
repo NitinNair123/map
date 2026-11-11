@@ -181,10 +181,11 @@ class Live:
         with self.lock:
             self.info.update(kw, last_event=time.time())
 
-    def block_done(self, streets, lit, seconds):
+    def block_done(self, streets, lit, seconds, new=True):
         with self.lock:
             i = self.info
-            i.update(blocks_built=i["blocks_built"] + 1, blocks_on_disk=i["blocks_on_disk"] + 1, streets=i["streets"] + streets,
+            # a rebuilt block (traffic, repair, --redo) was already on disk: it isn't counted again
+            i.update(blocks_built=i["blocks_built"] + 1, blocks_on_disk=i["blocks_on_disk"] + bool(new), streets=i["streets"] + streets,
                      lit=i["lit"] + lit, block_seconds=(i["block_seconds"] + [round(seconds, 1)])[-50:], current=None, last_event=time.time())
 
     def write(self):
@@ -298,6 +299,7 @@ def main():
         """Measures and writes one block; returns (streets, hour rows), or None when its streets can't be loaded."""
         name = os.path.join(folder, f"{b[0]}_{b[1]}")
         started = time.time()
+        new = not os.path.exists(name + ".slots.csv.gz")
         live.set(current={"n": n, "block": list(b), "started": started})
         if live.info["first_block_at"] is None:
             live.set(first_block_at=started)
@@ -319,7 +321,7 @@ def main():
         write(name + ".edges.csv.gz", e_rows, ["edge_id", "tile", "lat", "lon", "region", "sources", *STATIC, "lit", "lit_source"])
         write(name + ".slots.csv.gz", s_rows, ["edge_id", "hour", "weekend", "daylight", "gtfs_deps", "open_share", "open_known", "bus_per_hour", "traffic_ratio"])
         ts.areas.clear()  # one block at a time in memory
-        live.block_done(len(e_rows), sum(r["lit"] is not None for r in e_rows), time.time() - started)
+        live.block_done(len(e_rows), sum(r["lit"] is not None for r in e_rows), time.time() - started, new)
         print(f"[{n}/{total}] block {b}: {len(e_rows)} streets, {sum(r['lit'] is not None for r in e_rows)} with a lit label, "
               f"{len(s_rows)} hour rows, sources: {used} ({time.time() - started:.0f} s)", flush=True)
         return len(e_rows), len(s_rows)
