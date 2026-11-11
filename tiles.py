@@ -7,6 +7,7 @@ import os
 import struct
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
@@ -66,6 +67,70 @@ MAPILLARY_KINDS = {"object--street-light": {"highway": "street_lamp"}, "object--
 MAPILLARY_MAX_AGE_Y = 5  # objects not seen in any photo for 5 years may have been removed when the road was redone
 
 
+VERBOSE = False  # print a timestamped start/ok/failed line for every download (ml/dataset.py turns it on)
+STATS = {}  # source -> live counters of real downloads, read by ml/dataset.py for the Studio
+_stats_lock, _now = threading.Lock(), threading.local()
+
+
+def _stat(source):
+    return STATS.setdefault(source, {"requests": 0, "ok": 0, "failed": 0, "skipped": 0, "bytes": 0, "items": 0, "seconds": 0.0,
+                                     "busy": {}, "last": None, "last_error": None})
+
+
+def stats_begin(source, box, quiet=False):
+    """A download starts: counted at once, and listed as in flight (with when it began) until stats_end."""
+    key = box if isinstance(box, str) else f"{box[0]:.2f},{box[1]:.2f}"
+    with _stats_lock:
+        st = _stat(source)
+        st["requests"] += 1
+        st["busy"][key] = time.time()
+        st["last"] = time.time()
+    _now.source = source
+    if VERBOSE and not quiet:
+        print(f"{time.strftime('%H:%M:%S')} {SOURCE_LABELS.get(source, source)} {key}: start", flush=True)
+    return source, key, time.time(), quiet
+
+
+def stats_end(token, items=0, err=None):
+    source, key, began, quiet = token
+    _now.source = None
+    took = time.time() - began
+    skipped = getattr(err, "skipped", False)  # the circuit breaker refused it at once: no download was tried
+    with _stats_lock:
+        st = _stat(source)
+        st["busy"].pop(key, None)
+        st["last"] = time.time()
+        if skipped:
+            st["requests"] -= 1
+            st["skipped"] += 1
+        elif err is not None:
+            st["failed"] += 1
+            st["last_error"] = str(err)[:160]
+        else:
+            st["ok"] += 1
+            st["items"] += items
+        st["seconds"] += 0 if skipped else took
+    if VERBOSE and not skipped and not quiet:
+        print(f"{time.strftime('%H:%M:%S')} {SOURCE_LABELS.get(source, source)} {key}: "
+              + (f"failed in {took:.0f}s ({err})" if err is not None else f"ok, {items} items in {took:.0f}s"), flush=True)
+
+
+def _read(req, timeout):
+    """urlopen().read(), with the bytes counted against the download in progress on this thread."""
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = r.read()
+    src = getattr(_now, "source", None)
+    if src is not None:
+        with _stats_lock:
+            _stat(src)["bytes"] += len(data)
+    return data
+
+
+def stats_snapshot():
+    with _stats_lock:
+        return {k: {**v, "busy": dict(v["busy"])} for k, v in STATS.items()}
+
+
 def seen_years_ago(v):
     """Mapillary's last_seen_at, as milliseconds or an ISO date, in years before now; None when missing."""
     if v in (None, ""):
@@ -74,14 +139,24 @@ def seen_years_ago(v):
     return (time.time() - t) / (365.25 * 86400)
 
 
-def mapillary(s, w, n, e):
-    """Street lights and CCTV cameras that Mapillary found in street-level photos of one tile."""
-    q = urllib.parse.urlencode({"access_token": os.environ["MAPILLARY_TOKEN"], "fields": "id,object_value,geometry,last_seen_at",
+def _mapillary_page(url, token):
+    try:
+        return json.loads(_read(urllib.request.Request(url, headers={"User-Agent": "SafeRoute/1.0"}), 20))
+    except urllib.error.HTTPError as err:
+        spare = os.environ.get("MAPILLARY_TOKEN_2")  # a second token (data/mapillary_token_2.txt) takes over when the first is refused or rate-limited
+        if err.code in (401, 403, 429) and spare and spare != token:
+            return json.loads(_read(urllib.request.Request(url.replace(urllib.parse.quote(token, safe=""), urllib.parse.quote(spare, safe="")),
+                                                           headers={"User-Agent": "SafeRoute/1.0"}), 20))
+        raise
+
+
+def _mapillary_cell(s, w, n, e):
+    token = os.environ["MAPILLARY_TOKEN"]
+    q = urllib.parse.urlencode({"access_token": token, "fields": "id,object_value,geometry,last_seen_at",
                                 "bbox": f"{w},{s},{e},{n}", "object_values": ",".join(MAPILLARY_KINDS), "limit": 2000})
     url, out = f"https://graph.mapillary.com/map_features?{q}", []
     for _ in range(5):  # at most 10,000 objects per tile
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "SafeRoute/1.0"}), timeout=20) as r:
-            page = json.load(r)
+        page = _mapillary_page(url, token)
         for f in page.get("data", []):
             age = seen_years_ago(f.get("last_seen_at"))
             if f.get("object_value") in MAPILLARY_KINDS and (age is None or age <= MAPILLARY_MAX_AGE_Y):
@@ -91,7 +166,21 @@ def mapillary(s, w, n, e):
         url = page.get("paging", {}).get("next")
         if not url:
             break
-    return {"elements": out}
+    return out
+
+
+def mapillary(s, w, n, e):
+    """Street lights and CCTV cameras that Mapillary found in street-level photos. A box of several tiles is asked for one
+    tile at a time, 3 in parallel: a 3x3 box in one request took 30 s and failed with HTTP 500, one tile takes about 3 s."""
+    cells = [(round(s + i * TILE, 5), round(w + j * TILE, 5)) for i in range(max(1, round((n - s) / TILE))) for j in range(max(1, round((e - w) / TILE)))]
+    src = getattr(_now, "source", None)
+
+    def one(c):
+        _now.source = src  # the byte count of this download belongs to the same source
+        return _mapillary_cell(c[0], c[1], min(n, c[0] + TILE), min(e, c[1] + TILE))
+    with ThreadPoolExecutor(3) as ex:
+        found = [x for part in ex.map(one, cells) for x in part]  # one tile failing fails the box: the caller counts and logs it
+    return {"elements": list({x["id"]: x for x in found}.values())}
 
 
 # Geoapify place categories -> the OSM tags the scorer already understands (for places that didn't come from OSM)
@@ -110,9 +199,8 @@ def geoapify(s, w, n, e):
     for offset in range(0, 2000, 500):
         q = urllib.parse.urlencode({"categories": GEOAPIFY_CATEGORIES, "filter": f"rect:{w},{s},{e},{n}", "limit": 500,
                                     "offset": offset, "apiKey": os.environ["GEOAPIFY_KEY"]})
-        with urllib.request.urlopen(urllib.request.Request(f"https://api.geoapify.com/v2/places?{q}", headers={"User-Agent": "SafeRoute/1.0"}),
-                                    timeout=20) as r:
-            features = json.load(r).get("features", [])
+        features = json.loads(_read(urllib.request.Request(f"https://api.geoapify.com/v2/places?{q}", headers={"User-Agent": "SafeRoute/1.0"}),
+                                    20)).get("features", [])
         for f in features:
             p = f["properties"]
             raw = (p.get("datasource") or {}).get("raw") or {}
@@ -184,9 +272,8 @@ def nightlights(s, w, n, e):
     q = urllib.parse.urlencode({"SERVICE": "WMS", "REQUEST": "GetMap", "VERSION": "1.1.1", "LAYERS": "VIIRS_Black_Marble",
                                 "SRS": "EPSG:4326", "STYLES": "", "FORMAT": "image/png", "TIME": "2016-01-01",
                                 "BBOX": f"{w},{s},{w + cols_n * NIGHT_CELL},{s + rows_n * NIGHT_CELL}", "WIDTH": cols_n, "HEIGHT": rows_n})
-    with urllib.request.urlopen(urllib.request.Request(f"https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?{q}",
-                                                       headers={"User-Agent": "SafeRoute/1.0"}), timeout=20) as r:
-        rows = png_pixels(r.read())
+    rows = png_pixels(_read(urllib.request.Request(f"https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?{q}",
+                                                   headers={"User-Agent": "SafeRoute/1.0"}), 20))
     out = []
     for i, row in enumerate(rows):  # image rows run north to south
         for j, (red, green, blue) in enumerate(row):
@@ -218,11 +305,134 @@ def overture_release(s3):
         return _release[0]
 
 
+PLACE_COLUMNS = ["names", "basic_category", "confidence", "operating_status"]
+OVERTURE_LOCAL = {}  # kind -> [(s, w, n, e, path)] strips saved by overture_prefetch; queries inside them never go online
+_strip_cache = OrderedDict()
+
+
+def _bbox_filter(s, w, n, e):
+    import pyarrow.compute as pc
+    b = lambda k: pc.field("bbox", k)
+    return (b("xmax") >= w) & (b("xmin") <= e) & (b("ymax") >= s) & (b("ymin") <= n)
+
+
+def _local(kind, s, w, n, e, columns):
+    """Rows from the saved strips when they cover the whole box, else None (then the query goes to Overture online)."""
+    strips = sorted(x for x in OVERTURE_LOCAL.get(kind, []) if x[0] < n and x[2] > s)
+    if not strips or strips[0][0] > s or any(a[2] < b[0] for a, b in zip(strips, strips[1:])) or strips[-1][2] < n \
+            or any(x[1] > w or x[3] < e for x in strips):
+        return None
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    tables = []
+    for x in strips:
+        with _datasets_lock:
+            t = _strip_cache.get(x[4])
+        if t is None:
+            t = pq.read_table(x[4])
+            with _datasets_lock:
+                _strip_cache[x[4]] = t
+                while len(_strip_cache) > 4:  # a few strips in memory; blocks go in random order, so more wouldn't help much
+                    _strip_cache.popitem(last=False)
+        tables.append(t.filter(_bbox_filter(s, w, n, e)).select(columns + ["id", "bbox"]))
+    rows, seen = [], set()
+    for r in pa.concat_tables(tables).to_pylist():  # a row crossing a strip edge is in both strips
+        if r["id"] not in seen:
+            seen.add(r["id"])
+            rows.append(r)
+    return rows
+
+
+def overture_prefetch(folder, s, w, n, e, step=0.1, kinds=(("places", PLACE_COLUMNS), ("buildings", [])), progress=None, workers=4):
+    """Downloads Overture places and buildings for a whole region once and saves them to `folder` in strips `step`
+    degrees tall, so each block of the dataset reads them from disk. A query online reads the box columns of every
+    worldwide file whatever the box size, which took 8-18 minutes for each 3 km block; this pays that once per kind.
+    Each file is one counted download (the Studio shows them); a file failing three times leaves that kind online-only,
+    as before. Kinds already saved are kept, so a stopped run resumes. progress(kind, files_done, files_total)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    os.makedirs(folder, exist_ok=True)
+    s, n = math.floor(s / step) * step, math.ceil(n / step) * step
+    strips = [(round(s + i * step, 4), round(s + (i + 1) * step, 4)) for i in range(round((n - s) / step))]
+    for kind, columns in kinds:
+        paths = [(a, b, os.path.join(folder, f"{kind}_{a:.2f}_{b:.2f}_{w:.2f}_{e:.2f}.parquet")) for a, b in strips]
+        if not all(os.path.exists(p) for *_, p in paths):
+            data = _dataset(kind, None)
+            frags, f, cols = list(data.get_fragments()), _bbox_filter(s, w, n, e), columns + ["id", "bbox"]
+            done, lock = [0], threading.Lock()
+            pdir = os.path.join(folder, "parts")  # one small file per scanned Overture file: memory stays flat and a stop resumes
+            os.makedirs(pdir, exist_ok=True)
+            part = lambda i: os.path.join(pdir, f"{kind}_{i:04d}_{w:.2f}_{e:.2f}_{s:.2f}_{n:.2f}.parquet")
+
+            def scan(job):
+                i, frag = job
+                if os.path.exists(part(i)):
+                    with lock:
+                        done[0] += 1
+                        if progress:
+                            progress(kind, done[0], len(frags))
+                    return part(i)
+                for attempt in range(3):
+                    token = stats_begin(kind, f"file {i}", quiet=True)
+                    try:
+                        t = frag.to_table(filter=f, columns=cols, schema=data.schema)
+                        pq.write_table(t, part(i) + ".tmp")
+                        os.replace(part(i) + ".tmp", part(i))
+                    except (OSError, ValueError) as err:
+                        stats_end(token, err=err)
+                        continue
+                    stats_end(token, items=t.num_rows)
+                    with _stats_lock:
+                        _stat(kind)["bytes"] += os.path.getsize(part(i))  # saved size: pyarrow doesn't report what it read
+                    del t
+                    pa.default_memory_pool().release_unused()
+                    with lock:
+                        done[0] += 1
+                        if progress:
+                            progress(kind, done[0], len(frags))
+                    return part(i)
+                raise OSError(f"Overture {kind} file {i} failed 3 times")
+            print(f"Overture {kind}: scanning {len(frags)} files once for this area ({len([i for i in range(1, len(frags) + 1) if os.path.exists(part(i))])} already saved)", flush=True)
+            try:
+                with ThreadPoolExecutor(workers) as ex:
+                    files = list(ex.map(scan, enumerate(frags, 1)))
+            except OSError as err:
+                print(f"Overture {kind}: {err}; blocks will query it online", flush=True)
+                continue
+            total = 0
+            for a, b, path in paths:  # strips are cut from the part files one at a time
+                pieces = [t for t in (pq.read_table(p, filters=_bbox_filter(a, w, b, e)) for p in files) if t.num_rows]
+                strip = pa.concat_tables(pieces) if pieces else data.schema.empty_table().select(cols)
+                pq.write_table(strip, path + ".part")
+                os.replace(path + ".part", path)
+                total += strip.num_rows
+            print(f"Overture {kind}: {total} rows saved in {len(paths)} strips", flush=True)
+        OVERTURE_LOCAL[kind] = [(a, w, b, e, p) for a, b, p in paths]
+
+
+def _dataset(theme, kind):
+    import pyarrow.dataset as ds
+    import pyarrow.fs as fs
+    s3 = fs.S3FileSystem(anonymous=True, region="us-west-2", connect_timeout=20, request_timeout=90)  # a stalled read errors out (and is retried) instead of hanging
+    path = f"{OVERTURE_BUCKET}{overture_release(s3)}/theme={theme}/type={kind or theme[:-1]}/"
+    with _datasets_lock:
+        data = _datasets.get(path)
+    if data is None:
+        data = ds.dataset(path, format="parquet", filesystem=s3)
+        with _datasets_lock:
+            data = _datasets.setdefault(path, data)
+    return data
+
+
 def _overture(theme, s, w, n, e, columns, kind=None, where=None):
+    if not where:
+        rows = _local(kind or theme, s, w, n, e, columns)
+        if rows is not None:
+            return rows
     import pyarrow.compute as pc  # optional dependency: pip install pyarrow
     import pyarrow.dataset as ds
     import pyarrow.fs as fs
-    s3 = fs.S3FileSystem(anonymous=True, region="us-west-2")
+    s3 = fs.S3FileSystem(anonymous=True, region="us-west-2", connect_timeout=20, request_timeout=90)  # a stalled read errors out (and is retried) instead of hanging
     path = f"{OVERTURE_BUCKET}{overture_release(s3)}/theme={theme}/type={kind or theme[:-1]}/"
     with _datasets_lock:  # reuse the dataset: it keeps each file's metadata, so later queries skip hundreds of reads
         data = _datasets.get(path)
@@ -297,7 +507,7 @@ def overture_roads(s, w, n, e):
 
 def overture_places(s, w, n, e):
     """Businesses and services from Overture Maps (Meta, Microsoft and others), minus closed and badly placed ones."""
-    rows = _overture("places", s, w, n, e, ["names", "basic_category", "confidence", "operating_status"])
+    rows = _overture("places", s, w, n, e, PLACE_COLUMNS)
     stacked = Counter((r["bbox"]["xmin"], r["bbox"]["ymin"]) for r in rows)
     out = []
     for r in rows:
@@ -351,8 +561,7 @@ def overpass(s, w, n, e):
     for url in order + order[:1]:
         try:
             req = urllib.request.Request(url, data, {"User-Agent": "SafeRoute/1.0"})
-            with urllib.request.urlopen(req, timeout=35) as r:
-                osm = json.load(r)
+            osm = json.loads(_read(req, 35))
             if "runtime error" in osm.get("remark", ""):  # Overpass ran out of time and sent partial data
                 raise ValueError(osm["remark"])
             print(f"map {s:.2f},{w:.2f} from {url.split('/')[2]} in {time.time() - started:.0f}s", flush=True)
@@ -439,13 +648,17 @@ class TileStore:
             fetch = self.fetch if not source else self.roads if source == "roads" else self.extras[source]
             box = (min(t[0] for t in tiles) * TILE, min(t[1] for t in tiles) * TILE,
                    (max(t[0] for t in tiles) + 1) * TILE, (max(t[1] for t in tiles) + 1) * TILE)
+            token = stats_begin(source, box)
             try:
                 osm = fetch(*box)
-            except (OSError, ValueError, KeyError) as err:
-                if required or source == self._main:
+            except Exception as err:
+                stats_end(token, err=err)
+                if not isinstance(err, (OSError, ValueError, KeyError)) or required or source == self._main:
                     raise
-                print(f"{source} {box}: failed ({err})", flush=True)  # an optional source being down must not block trips
+                if not VERBOSE:  # (VERBOSE already printed it)
+                    print(f"{source} {box}: failed ({err})", flush=True)  # an optional source being down must not block trips
                 return
+            stats_end(token, items=len(osm["elements"]))
             write_tiles(self.folder, osm["elements"], tiles, source)
         if source in self._background:
             with self.lock:  # rebuild cached areas so the next trip sees the new data

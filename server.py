@@ -48,6 +48,51 @@ ENDED_TTL = 30 * 60  # an ended trip keeps only "ended" (no locations) so friend
 MAX_TRIPS = 20000
 # requests allowed per network address in a window of seconds, so one script can't flood reports or fill the trip table.
 # One address can be many phones (mobile carriers share them), so reports are also limited per device in reports.py.
+def load_ranker():
+    """The route weights learned in ml/rank.py from people's A-or-B answers, if a trained file has been copied to data/model/."""
+    try:
+        return json.load(open(os.path.join(DATA_DIR, "model", "route_ranker.json")))
+    except (OSError, ValueError):
+        return None
+
+
+def learned_pick(routes, saved):
+    """The route the learned weights would choose: each route's total of measure x weight (the weights are linear, so
+    comparing two routes' totals is the same as comparing their differences). Measures are those of ml/pairs.py."""
+    def value(r):
+        s, groups = r["stats"], r["look"]["groups"]
+        f = {**{k: s[k] for k in ("lit_pct", "dark_pct", "main_pct", "open_now", "isolated_m", "nothing_open_m", "help_gap_m", "cctv")},
+             "length_m": r["length_m"], "unrated_pct": r["unrated_pct"], "no_light_data_pct": max(0, 100 - s["lit_pct"] - s["dark_pct"]),
+             "police_m": 5000 if s["police_m"] is None else min(5000, s["police_m"])}
+        f.update({f"{g}_found": groups.get(g, {}).get("found", 0) for g in ("food", "shop", "pharmacy", "hospital", "fuel", "other", "transit")})
+        w, dark = saved["weights"], r["daylight"] < 0.5
+        return sum(f[k] * (w[k] + w[f"{k}_dark"] * dark) for k in saved["features"])
+    return max(routes, key=value)
+
+
+def learned_shadow(routes, when, mode):
+    """Background only: notes whether the learned weights would have picked the same route as today's rules.
+    Nothing shown or ranked changes. One line per request: hour, routes compared, both picks. No places."""
+    if not RANKER or mode != "walk" or len(routes) < 2 or not routes[0].get("stats"):
+        return
+    try:
+        pick = learned_pick(routes, RANKER)
+        path = os.path.join(DATA_DIR, "model_shadow.csv")
+        with lock:
+            new = not os.path.exists(path)
+            with open(path, "a", newline="") as f:
+                w = csv.writer(f)
+                if new:
+                    w.writerow(["hour", "routes", "rules_pick", "learned_pick", "same"])
+                w.writerow([when.hour, routes[0]["checked"], routes[0]["kind"], pick["kind"], int(pick["coords"] == routes[0]["coords"])])
+    except Exception:  # the experiment must never break a route request
+        traceback.print_exc()
+
+
+RANKER = load_ranker()
+FEELS = ("safe", "uneasy", "unsafe")
+FEEL_MEASURES = ("length_m", "lit_pct", "dark_pct", "main_pct", "open_now", "isolated_m", "nothing_open_m", "help_gap_m", "cctv",
+                 "police_m", "unrated_pct")
 LIMITS = {"report": (60, 3600), "trip": (60, 3600), "update": (120, 600), "read": (300, 600)}
 # map-building requests running at once; the rest wait, so a burst of users can't run a small server out of memory
 BUSY = threading.BoundedSemaphore(6)
@@ -494,6 +539,7 @@ class Handler(SimpleHTTPRequestHandler):
                 pts = [c for r in routes[:3] for c in r["coords"][::4]]  # safest, balanced, fastest: the ones people pick
                 if places.LIVE.fill_hours(area, lambda p: any(dist(p, c) <= 80 for c in pts)):
                     routes = area.routes(a, b, when, rain, mode, extra, via, prefer)
+                learned_shadow(routes, when, mode)
                 for r in routes:  # the districts each route passes through, as background only (never scored)
                     r["area"] = crime.around(CRIME, crime.along(r["coords"]))
                 return self.send_json({"routes": routes, "rain": rain, "alerts": alerts, "sources": area.sources})
@@ -529,11 +575,13 @@ class Handler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             body = self.read_json()
-            kind = "report" if path == "/api/report" else "trip" if path == "/api/trip" else "update"
+            kind = "report" if path in ("/api/report", "/api/route-feel") else "trip" if path == "/api/trip" else "update"
             if not allowed(kind, self.address()):
                 return self.send_json({"error": "Too many requests from this network, please try again later."}, 429)
             if path == "/api/report":
                 return self.report(body)
+            if path == "/api/route-feel":
+                return self.route_feel(body)
             if path == "/api/trip":
                 return self.start_trip(body)
             if path.startswith("/api/trip/"):
@@ -559,6 +607,28 @@ class Handler(SimpleHTTPRequestHandler):
         if not r:
             return self.send_json({"error": "Thanks! You've sent a lot of reports this hour, please try again later."}, 429)
         store.add_report(r)
+        self.send_json({"ok": True})
+
+    def route_feel(self, body):
+        """One answer to "How did this route feel?" after a trip: the route's measures, the hour and the ~3 km area of its
+        middle, for the route model in ml/. The position itself, the trip's ends and who answered are not kept."""
+        if body["feel"] not in FEELS:
+            raise ValueError("unknown answer")
+        lat, lon = latlon(body["mid"])
+        hour = int(body["hour"])
+        if not 0 <= hour <= 23:
+            raise ValueError("bad hour")
+        m = [float(body["measures"][k]) if body["measures"].get(k) is not None else "" for k in FEEL_MEASURES]
+        if any(x != "" and not 0 <= x <= 1e6 for x in m):
+            raise ValueError("bad measure")
+        path = os.path.join(DATA_DIR, "route_feels.csv")
+        with lock:
+            new = not os.path.exists(path)
+            with open(path, "a", newline="") as f:
+                w = csv.writer(f)
+                if new:
+                    w.writerow(["block", "hour", "weekend", "feel", *FEEL_MEASURES])
+                w.writerow([f"{int(lat // 0.03)}_{int(lon // 0.03)}", hour, int(bool(body.get("weekend"))), body["feel"], *m])
         self.send_json({"ok": True})
 
     def start_trip(self, body):

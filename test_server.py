@@ -1,5 +1,6 @@
 """Every API endpoint, its failure cases, and the privacy and abuse rules. Usage: python -m unittest test_server"""
 import json
+from datetime import datetime
 import os
 import tempfile
 import threading
@@ -99,6 +100,32 @@ class ServerTest(unittest.TestCase):
             code, out = self.call("/api/search?q=city")
         self.assertEqual(code, 500)
         self.assertIn("our side", out["error"])
+
+    def test_learned_weights_are_compared_in_the_background_and_change_nothing(self):
+        import ml.pairs as pairs
+        _, routes = self.call("/api/route?from=28.0,77.0&to=28.0,77.003&when=2026-10-25T22:00")
+        routes = routes["routes"]
+        zero = {k: 0.0 for k in pairs.FEATURES + [f"{k}_dark" for k in pairs.FEATURES]}
+        longer = {"features": pairs.FEATURES, "weights": {**zero, "length_m": 1.0, "length_m_dark": 1.0}}
+        shorter = {"features": pairs.FEATURES, "weights": {**zero, "length_m": -1.0, "length_m_dark": -1.0}}
+        self.assertEqual(server.learned_pick(routes, longer)["length_m"], max(r["length_m"] for r in routes))
+        self.assertEqual(server.learned_pick(routes, shorter)["length_m"], min(r["length_m"] for r in routes))
+        with mock.patch.object(server, "DATA_DIR", tempfile.mkdtemp()), mock.patch.object(server, "RANKER", shorter):
+            before = [r["score"] for r in routes]
+            server.learned_shadow(routes, datetime(2026, 10, 25, 22), "walk")
+            self.assertEqual([r["score"] for r in routes], before)
+            self.assertEqual(len(open(os.path.join(server.DATA_DIR, "model_shadow.csv")).read().splitlines()), 2)  # header and one line
+
+    def test_route_feel_keeps_measures_and_area_but_no_position(self):
+        import server
+        body = {"feel": "uneasy", "mid": [28.4741, 77.4998], "hour": 22, "weekend": False, "measures": {"lit_pct": 40, "length_m": 900, "police_m": None}}
+        with mock.patch.object(server, "DATA_DIR", tempfile.mkdtemp()):
+            self.assertEqual(self.call("/api/route-feel", body)[0], 200)
+            self.assertEqual(self.call("/api/route-feel", {**body, "feel": "great"})[0], 400)
+            self.assertEqual(self.call("/api/route-feel", {**body, "hour": 30})[0], 400)
+            saved = open(os.path.join(server.DATA_DIR, "route_feels.csv")).read()
+        self.assertIn("949_2583,22,0,uneasy,900.0,40.0", saved)
+        self.assertNotIn("28.47", saved)
 
     def test_report_is_saved_and_limited(self):
         self.assertEqual(self.call("/api/report", {"lat": 28.0005, "lon": 77.0015, "type": "harassment"})[0], 200)

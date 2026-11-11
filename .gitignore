@@ -2,3 +2,5 @@ data/
 __pycache__/
 graphify-out/
 node_modules/
+ml/data/
+ml/out/
