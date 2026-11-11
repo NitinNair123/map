@@ -42,7 +42,8 @@ STAGES = [  # id, name, command, what it does
     ("world", "Stage 2: virtual world", ["ml/world.py", "--episodes", "3000"],
      "A walker is rewarded for arriving and punished for events on the real street graph. Event chances are assumptions. Resumes."),
 ]
-CHAIN = ["build", "train", "pairs", "qwen", "claude", "rank", "sim", "world"]  # the A/B page is a server, started on its own
+CHAIN = ["build", "train", "pairs", "qwen", "claude", "rank", "sim", "world"]
+ROUTE_CHAIN = ["pairs", "qwen", "claude", "rank"]  # just the route model: no dataset build, no street models (minutes, not hours)  # the A/B page is a server, started on its own
 GROUPS = {  # the parameter groups of the spec; a test checks every model input sits in exactly one
     "Street itself": "highway sidewalk length lanes maxspeed unpaved rough underpass overbridge gap_m dead_ends n_crossing degree",
     "Lighting and cameras": "n_lamp lamps_per_100m n_cctv lamps_100 lamps_250 cctv_250 cctv_500 d_cctv d_lamp nb_lamps_per_100m nightlight",
@@ -151,9 +152,9 @@ class Runner:
             self.save()
         return s
 
-    def run_all(self):
+    def run_all(self, only=None):
         def chain():
-            for sid in CHAIN:
+            for sid in only or CHAIN:
                 if sid == "qwen" and not ollama()["model"]:
                     continue  # no Qwen yet: the routes learn from people's answers only
                 self.start(sid)
@@ -449,6 +450,8 @@ class Handler(BaseHTTPRequestHandler):
             RUNNER.pause(sid)
         elif self.path == "/api/run-all":
             RUNNER.run_all()
+        elif self.path == "/api/run-routes":
+            RUNNER.run_all(ROUTE_CHAIN)
         elif self.path == "/api/pause-all":
             RUNNER.pause_all()
         else:
@@ -489,6 +492,7 @@ td.bad{color:var(--bad)}td.wait{color:var(--warn)}.flashrow{animation:fr 1.2s}@k
 .tablewrap{overflow-x:auto}details summary{cursor:pointer;color:var(--quiet);font-size:13px}
 </style>
 <header><h1>SafeRoute AI Studio</h1><div><span id=qwen class=pill></span>
+<button id=routes title="Make pairs, Qwen and Claude label them, train the route model. Skips the dataset build and street models." onclick="post('/api/run-routes')">Train route model only</button>
 <button id=toggle class="primary big" onclick="toggleAll()">Play</button></div></header>
 <main><section><div class=card><div id=now class=now>Loading...</div><div id=live></div><canvas id=net></canvas>
 <p class=note>Each small dot is one of the 104 things measured about every street, coloured by group. They feed the four street models
