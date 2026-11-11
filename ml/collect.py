@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import buses  # noqa: E402
 import traffic  # noqa: E402
-from dataset import SPOTS  # noqa: E402
+from spots import SPOTS  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "ml", "data")

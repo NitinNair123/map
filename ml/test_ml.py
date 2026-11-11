@@ -510,5 +510,30 @@ class Training(unittest.TestCase):
         self.assertIn("skipped", m)
 
 
+class ServerLogs(unittest.TestCase):
+    def test_merge_keeps_every_row_once(self):
+        import merge_logs
+        with tempfile.TemporaryDirectory() as d:
+            ours, theirs = os.path.join(d, "a.csv"), os.path.join(d, "b.csv")
+            open(ours, "w").write("h\n1\n2\n")
+            open(theirs, "w").write("h\n2\n3\n3\n")
+            self.assertEqual(merge_logs.merge(ours, theirs), 1)
+            self.assertEqual(open(ours).read(), "h\n1\n2\n3\n")
+            self.assertEqual(merge_logs.merge(ours, theirs), 0)  # pulling again adds nothing
+            os.remove(ours)
+            merge_logs.merge(ours, theirs)
+            self.assertEqual(open(ours).read(), "h\n2\n3\n")
+
+    def test_logger_needs_only_the_standard_library(self):
+        import ast
+        here = os.path.dirname(os.path.abspath(__file__))
+        own = {"buses", "traffic", "spots"}
+        for f in ["collect.py", "spots.py", os.path.join("..", "buses.py"), os.path.join("..", "traffic.py")]:
+            tree = ast.parse(open(os.path.join(here, f), encoding="utf-8").read())
+            mods = {a.name.split(".")[0] for n in tree.body if isinstance(n, ast.Import) for a in n.names}
+            mods |= {n.module.split(".")[0] for n in tree.body if isinstance(n, ast.ImportFrom)}
+            self.assertFalse(mods - own - set(sys.stdlib_module_names), f)  # the server has plain Python only
+
+
 if __name__ == "__main__":
     unittest.main()

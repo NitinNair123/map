@@ -40,9 +40,7 @@ from tiles import (CHUNK, TILE, TileStore, geoapify, mapillary, nightlights, ove
 DATA = os.path.join(ROOT, "data")
 OUT = os.path.join(ROOT, "ml", "data")
 # spread over Delhi, Noida, Greater Noida, Gurugram, Ghaziabad and Faridabad: markets, campuses, housing, industry, outskirts
-SPOTS = [(28.4741, 77.4998), (28.6315, 77.2167), (28.5355, 77.3910), (28.4595, 77.0266), (28.6692, 77.4538),
-         (28.4089, 77.3178), (28.6519, 77.1909), (28.5677, 77.2433), (28.7041, 77.1025), (28.5921, 77.0460),
-         (28.6129, 77.2295), (28.4950, 77.0890), (28.5800, 77.3200), (28.6400, 77.3000), (28.4700, 77.5400)]
+from spots import SPOTS  # noqa: E402
 
 
 # Cities whose OSM has many street-light tags, to learn what a lit street looks like. Real map data, no estimates.
