@@ -93,7 +93,11 @@ def main():
     if not trust_llm and llm:
         info["why_not_the_language_model"] = (f"only {len(both)} pairs answered by both, {MIN_BOTH} needed" if len(both) < MIN_BOTH
                                               else f"it agreed with people on {agree:.0%}, under {MIN_AGREE:.0%}")
-    labels = {i: s for i, s in llm.items() if i not in human} if trust_llm else human  # people's pairs stay out of training when they are the test
+    unchecked = not human and bool(llm)  # nobody answered: Qwen alone is the labeller, so say plainly it was never checked against people
+    if unchecked:
+        info["trained_on"] = "language model labels, NOT checked against people (nobody answered any pairs)"
+        info.pop("why_not_the_language_model", None)
+    labels = llm if unchecked else {i: s for i, s in llm.items() if i not in human} if trust_llm else human  # people's pairs stay out of training when they are the test
     saved, m = train(pl, labels)
     info.update(m)
     if saved and trust_llm:
