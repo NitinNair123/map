@@ -32,7 +32,7 @@ STAGES = [  # id, name, command, what it does
     ("build", "Build the dataset", ["ml/dataset.py", "--all"], "Streets and their 104 parameters, block by block. Resumes."),
     ("train", "Base training: streets", ["ml/train.py"], "Lit, open places, buses and traffic, scored on unseen areas."),
     ("pairs", "Make route pairs", ["ml/pairs.py", "--n", "2000"], "Two real routes per simulated trip, up to 2,000. Resumes."),
-    ("qwen", "Qwen labels the pairs", ["ml/label_llm.py"], "Local Qwen picks the safer route of each pair. Resumes."),
+    ("qwen", "Qwen labels the pairs", ["ml/label_llm.py"], "A language model picks the safer route of each pair: an Ollama cloud model, 6 at a time, when Ollama is signed in with cloud on; else local Qwen. Resumes."),
     ("claude", "Claude labels the pairs", ["ml/label_claude.py"],
      "Claude picks the safer route of every pair: its hand answers, and its written Safetipin-based criteria for the rest. Re-runs on new pairs."),
     ("ab", "A/B answers page", ["ml/rate_pairs.py"], "People answer the same pairs at http://localhost:8765."),
