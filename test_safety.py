@@ -591,7 +591,11 @@ class CollectionTest(unittest.TestCase):
         shop = node(5, (28.003, 77.0015), shop="bakery")  # shops are mapped around here, just not on this street
         at = lambda hw: rating.factors(a := Area({"elements": [way(1, [1, 2], [A, B], highway=hw), shop]}), a.edges[0], LATE, 0)["activity"]
         self.assertGreater(at("primary")["value"], at("residential")["value"])
-        self.assertLess(at("primary")["value"], 0.5)  # a main road with nothing open is still not a busy street
+        # activity is judged against the road type: no shops on a main road is not "deserted", but all that is known
+        # is that traffic passes, so it stays weak evidence and is marked as an estimate
+        self.assertEqual(at("primary")["quality"], rating.QUALITY["main_road"])
+        self.assertTrue(rating.estimated(at("primary")))
+        self.assertFalse(rating.estimated(at("residential")))
 
     def test_guards_and_emergency_phones(self):
         els = [way(1, [1, 2], [A, B], highway="residential")]
@@ -745,6 +749,49 @@ class MainRoadTest(unittest.TestCase):
         night = rating.weights(0.0)
         self.assertAlmostEqual(sum(night.values()), 100)
         self.assertGreater(night["main_road"], 5 * night["lighting"])
+
+
+class RuleAdditionsTest(unittest.TestCase):
+    """Nitin's rule, 12 Nov 2026: at most 30% longer, shop-less main roads are not deserted, estimates are marked."""
+
+    def test_no_route_is_more_than_30_percent_longer(self):
+        far = (28.0, 77.02)  # about 2 km east; the lit detour north is 1.5x as long
+        north = [A, (28.005, 77.0), (28.005, 77.02), far]
+        els = [way(1, [1, 2], [A, far], highway="footway", lit="no"),
+               way(2, [1, 10, 11, 2], north, highway="secondary", name="Ring Road", lit="yes", sidewalk="both")]
+        routes = Area({"elements": els}).routes(A, far, NIGHT)
+        self.assertTrue(all(r["length_m"] <= 1.3 * routes[1]["length_m"] for r in routes))  # routes[1] is the fastest
+        self.assertTrue(all(r["same_as"] in (None, "safest") for r in routes))
+
+    def test_main_road_without_shops_is_not_a_nothing_open_penalty(self):
+        mid = (28.0, 77.012)
+        shops = [node(50 + i, (28.0001, 77.0001 + i * 0.0001), shop="convenience", opening_hours="24/7", name=f"S{i}") for i in range(2)]
+        score = lambda hw: Area({"elements": [way(1, [1, 2], [A, (28.0, 77.002)], highway="residential"),
+                                              way(2, [2, 3], [(28.0, 77.002), mid], highway=hw)] + shops}).routes(A, mid, NIGHT)[0]
+        main, lane = score("primary"), score("residential")
+        self.assertGreater(main["stats"]["nothing_open_m"], 800)  # the fact is still reported
+        self.assertGreater(main["score"], lane["score"])
+        self.assertGreater(main["factors"]["People and open places"]["estimated"], 50)
+
+    def test_measured_factors_are_not_marked_estimated(self):
+        r = {x["kind"]: x for x in Area(fixture()).routes(A, B, NIGHT)}["safest"]
+        self.assertEqual(r["factors"]["Main road"]["estimated"], 0)
+        self.assertEqual(r["factors"]["Lighting"]["estimated"], 0)
+
+
+class KnownPlacesTest(unittest.TestCase):
+    def test_known_trips_gate(self):
+        import known_places
+        area = Area(fixture())
+        row = lambda **kw: {"name": "home", "start_lat": A[0], "start_lon": A[1], "end_lat": B[0], "end_lon": B[1],
+                            "when": NIGHT.isoformat(), "must_use": "", "must_avoid": "", **kw}
+        self.assertEqual(known_places.check(lambda a, b: area, [row(must_use="market road")]), [])
+        bad = known_places.check(lambda a, b: area, [row(must_use="Ring Road"), row(must_avoid="Market Road")])
+        self.assertEqual([why for _, why in bad], ["does not follow Ring Road", "follows Market Road"])
+
+        def nowhere(a, b):
+            raise ValueError("no map")
+        self.assertIn("no route", known_places.check(nowhere, [row()])[0][1])
 
 
 class UnknownHoursTest(unittest.TestCase):

@@ -23,7 +23,10 @@ CELL = 0.001  # spatial grid cell in degrees, roughly 100 m
 # Each lambda finds one candidate; more come from re-searching with the streets already used made costlier.
 SEARCH_LAMBDAS = (0, 1, 3, 6, 10, 20)
 DETOUR_ROUNDS = 3
-MAX_DETOUR = 1.8  # candidates longer than this times the fastest route are dropped
+# Nitin's rule (12 Nov 2026): a route is at most 30% longer than the fastest. Short trips get DETOUR_FLOOR_M instead,
+# because one block over to the main road is more than 30% of a 300 m walk.
+MAX_DETOUR = 1.3
+DETOUR_FLOOR_M = 200
 BALANCED_DETOUR = 1.25
 
 COMPASS = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"]
@@ -585,7 +588,7 @@ class Area:
 
     def candidates(self, src, dst, credits, mode="walk", max_extra_m=None):
         """Distinct ways from src to dst: one per safety weighting, plus detours that avoid the streets already found.
-        Ways longer than MAX_DETOUR times the shortest, or more than max_extra_m longer, are dropped."""
+        Ways longer than MAX_DETOUR times the shortest (DETOUR_FLOOR_M on short trips), or more than max_extra_m longer, are dropped."""
         found = []
         for lam in SEARCH_LAMBDAS:
             found.append(self._search(src, dst, lam, credits, mode=mode))
@@ -602,7 +605,7 @@ class Area:
         kept = []  # (path, its edges, its length), shortest first
         for p in sorted(found, key=length):
             edges, lp = {ei for _, ei in p}, length(p)
-            if lp > MAX_DETOUR * fastest or (max_extra_m is not None and lp > fastest + max_extra_m):
+            if lp > max(MAX_DETOUR * fastest, fastest + DETOUR_FLOOR_M) or (max_extra_m is not None and lp > fastest + max_extra_m):
                 continue
             # sharing 90% of its length with a kept candidate makes it the same way with a small wiggle
             if any(sum(self.edges[ei]["length"] for ei in edges & k) >= 0.9 * min(lp, lk) for _, k, lk in kept):
@@ -689,8 +692,8 @@ class Area:
         weak_i = min((i for i, _ in known), key=lambda i: rated[path[i][1]][0], default=None)
 
         isolated = run = 0.0
-        haven_gap = gap = help_gap = hgap = 0.0
-        factor_sum, factor_len, factor_q = defaultdict(float), defaultdict(float), defaultdict(float)
+        haven_gap = gap = help_gap = hgap = quiet = quiet_gap = 0.0
+        factor_sum, factor_len, factor_q, factor_est = defaultdict(float), defaultdict(float), defaultdict(float), defaultdict(float)
         places, havens, cctv, unknown_hours, mapped, sources = set(), {}, set(), set(), set(), set()
         place_at, place_open = {}, {}  # place -> metres into the trip, open when the trip passes it
         gaps, darks, dark_from = [], [], None
@@ -709,6 +712,7 @@ class Area:
                     factor_sum[k] += f["value"] * e["length"]
                     factor_len[k] += e["length"]
                     factor_q[k] += f["quality"] * e["length"]
+                    factor_est[k] += e["length"] if rating.estimated(f) else 0.0
                     sources.update(f["sources"])
             run = run + e["length"] if rated[ei][1] >= rating.MIN_CONFIDENCE and rated[ei][0] < 40 else 0.0
             isolated = max(isolated, run)
@@ -729,6 +733,9 @@ class Area:
             else:
                 gap += e["length"]
             haven_gap = max(haven_gap, gap)
+            # the stretch that costs points is judged against the road type: a main road with no shops is not deserted
+            quiet = 0.0 if open_here or unknown_here or e["highway"] in rating.MAIN_ROADS else quiet + e["length"]
+            quiet_gap = max(quiet_gap, quiet)
             helped = any(self.pois[i]["group"] in HELP_GROUPS and place_open[i] for i in open_here) or e["police_m"] <= 150
             hgap = 0.0 if helped else hgap + e["length"]
             help_gap = max(help_gap, hgap)
@@ -769,7 +776,7 @@ class Area:
         else:
             score = 0.6 * avg + 0.4 * rated[path[weak_i][1]][0]  # weakest link drags the whole route down
             score -= min(15, isolated / 50)
-            score -= min(10, max(0, haven_gap - 300) / 50) if places else 0
+            score -= min(10, max(0, quiet_gap - 300) / 50) if places else 0
             score -= max(0, length / fastest_len - 1.3) * 20
             score *= rated_len / length  # streets too thinly mapped to rate earn nothing, so a mostly unknown way can't top the list
         wanted, bonus = [], 0.0
@@ -863,7 +870,8 @@ class Area:
             "warnings": warnings,
             # per factor: average value and how well it was measured along the route, None when nothing measured it
             "factors": {LABELS[k]: {"score": round(100 * factor_sum[k] / factor_len[k]),
-                                    "measured": round(100 * factor_q[k] / length)} if factor_len[k] else None
+                                    "measured": round(100 * factor_q[k] / length),
+                                    "estimated": round(100 * factor_est[k] / factor_len[k])} if factor_len[k] else None
                         for k in rating.WEIGHTS if rating.weights(light, mode)[k] > 0},
             "sources": sorted(sources),
             "turns": turns,

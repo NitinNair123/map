@@ -53,6 +53,14 @@ QUALITY = {
     "nightlight": 0.3,    # NASA satellite brightness, 2016, about 500 m per pixel
 }
 HIGH, MEDIUM, MIN_CONFIDENCE = 0.7, 0.5, 0.35
+# Sources that are a guess about this street, not a measurement of it. A model's estimate must carry "estimate" in its source name.
+ESTIMATES = ("NASA night lights", "Gemini", "Main road (OpenStreetMap)", "estimate")
+
+
+def estimated(f):
+    """True when a factor rests on estimates: nothing in it was measured on this street, or AI-read hours are mixed in."""
+    est = [any(m in s for m in ESTIMATES) for s in f["sources"]]
+    return all(est) or any("Gemini" in s for s in f["sources"])
 OBSERVATION_RADIUS_M = 50
 
 LIT_TAGS = {"yes": 1.0, "24/7": 1.0, "automatic": 1.0, "sunset-sunrise": 1.0, "interval": 0.7, "limited": 0.6,
@@ -168,7 +176,9 @@ def factors(area, e, when, light, now=None):
         activity.append((min(1, len(passed) / 3), QUALITY["live_bus"], "Live buses (Delhi Open Transit Data)"))
     if e["highway"] in MAIN_ROADS and traffic.LIVE.jammed(e["mid"], when, now):
         activity.append((1.0, QUALITY["traffic"], "Live traffic (TomTom)"))
-    if not places and not activity and e.get("places_mapped", True):  # with nothing mapped within 500 m the block is just unmapped
+    # with nothing mapped within 500 m the block is just unmapped; and activity is judged against the road type:
+    # a main road without shops still has traffic passing, so "nothing mapped" is not a sign that it is deserted
+    if not places and not activity and e.get("places_mapped", True) and e["highway"] not in MAIN_ROADS:
         activity.append((0.0, QUALITY["nothing_mapped"], "No shops or services mapped nearby"))
     if e["highway"] in MAIN_ROADS:
         activity.append((0.6, QUALITY["main_road"], "Main road (OpenStreetMap)"))
