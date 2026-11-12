@@ -687,6 +687,65 @@ class CrimeContextTest(unittest.TestCase):
         self.assertEqual(crime.counts(new)["central"]["2024"], {"assault": 57, "insult": 19})
 
 
+class FlyoverTest(unittest.TestCase):
+    """A walking route must never run along a flyover deck; the service road beside it stays walkable."""
+
+    def els(self, **deck_tags):
+        return [way(1, [1, 2], [A, B], highway="trunk", bridge="yes", layer="1", name="Flyover", **deck_tags),
+                way(2, [1, 10, 11, 12, 13, 2], NORTH, highway="service", name="Service Road")]
+
+    def test_walk_avoids_the_deck_but_a_car_may_use_it(self):
+        area = Area({"elements": self.els()})
+        self.assertTrue(all(r["length_m"] > 350 for r in area.routes(A, B, NIGHT)))  # every walking route takes the service road
+        self.assertLess(area.routes(A, B, NIGHT, mode="car")[0]["length_m"], 300)
+        deck = next(e for e in area.edges if e["name"] == "Flyover")
+        self.assertTrue(deck["flyover_deck"])
+        self.assertIsNone(deck["modes"]["walk"])
+
+    def test_deck_with_a_mapped_footpath_or_foot_access_stays_walkable(self):
+        for tags in ({"sidewalk": "both"}, {"sidewalk": "left"}, {"foot": "yes"}):
+            area = Area({"elements": self.els(**tags)})
+            self.assertLess(min(r["length_m"] for r in area.routes(A, B, NIGHT)), 300, tags)
+
+    def test_short_bridge_over_a_drain_and_footbridges_stay_walkable(self):
+        near = (28.0, 77.0005)  # about 50 m
+        els = [way(1, [1, 2], [A, near], highway="primary", bridge="yes")]
+        self.assertEqual(Area({"elements": els}).routes(A, near, NIGHT)[0]["mode"], "walk")
+        fob = [way(1, [1, 2], [A, B], highway="footway", bridge="yes", layer="1")]
+        self.assertLess(Area({"elements": fob}).routes(A, B, NIGHT)[0]["length_m"], 300)
+
+    def test_only_a_deck_is_a_clear_error_not_a_route_over_it(self):
+        with self.assertRaises(ValueError):
+            Area({"elements": [self.els()[0]]}).routes(A, B, NIGHT)
+
+    def test_overture_deck_takes_the_bridge_tag_from_osm(self):
+        els = self.els()
+        ov = [{**el, "id": f"ovr{el['id']}", "tags": {"highway": el["tags"]["highway"], "overture_road": "yes", "osm_way": el["id"]}}
+              for el in els]
+        area = Area({"elements": els + ov})
+        self.assertTrue(all(r["length_m"] > 350 for r in area.routes(A, B, NIGHT)))
+
+
+class UnknownHoursTest(unittest.TestCase):
+    """Shops with no published hours are unknown, not closed: they must not lengthen the 'nothing open' stretch."""
+
+    def route(self, **hours):
+        far = (28.0, 77.008)  # about 780 m of one street with three shops along it
+        els = [way(1, [1, 2, 3, 4], [A, (28.0, 77.0027), (28.0, 77.0053), far], highway="residential")]
+        for k, lon in enumerate((77.0013, 77.004, 77.0067)):
+            els.append(node(50 + k, (28.0002, lon), shop="convenience", name=f"Shop {k}", **hours))
+        return Area({"elements": els}).routes(A, far, LATE)[0]["stats"]
+
+    def test_unknown_hours_are_not_counted_as_nothing_open(self):
+        unknown = self.route()  # no opening_hours at all
+        shut = self.route(opening_hours="Mo-Su 08:00-20:00")  # known to be shut at 02:00
+        self.assertGreater(shut["nothing_open_m"], 700)
+        self.assertLess(unknown["nothing_open_m"], 300)
+        self.assertGreater(unknown["hours_unknown_m"], 700)  # reported as unknown instead
+        self.assertEqual(shut["hours_unknown_m"], 0)
+        self.assertEqual(unknown["open_now"], 0)  # and never counted as open
+
+
 class ModeTest(unittest.TestCase):
     def test_shop_that_shuts_before_you_get_there_counts_as_closed(self):
         far = (28.0, 77.012)  # about 1.2 km, so a walk reaches the shop about 14 minutes after leaving
