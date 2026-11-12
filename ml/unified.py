@@ -180,7 +180,7 @@ def stage1(tables, params):
     """Belief models per head: one per fold (fitted without that fold and without the locked blocks), "outside" (fitted on
     every unlocked block, used for the locked ones) and "all" (fitted on everything, stored in the finished model)."""
     out = {}
-    for head, d in tables.items():
+    for head, d in (tables.items() if isinstance(tables, dict) else tables):  # pairs may come one at a time, to save memory
         un = d[d["fold"] >= 0] if len(d) else d
         if enough(head, un):
             continue
@@ -572,13 +572,13 @@ def run_training(trials=TRIALS, budget=BUDGET_S, seeds=None, folder=None):
     e, s = train.load(folder)
     old = read_metrics(current_dir()).get("heads", {})
     params = {h: m.get("params") for h, m in old.items() if m.get("params")}
-    tables = {h: rows_for(h, e, s) for h in HEADS}
-    s1 = stage1(tables, params)
+    # one head's rows in memory at a time (an hourly table is up to 3M rows x ~105 columns): built once for the beliefs,
+    # dropped, and built again for the head itself. rows_for samples with a fixed seed, so both builds are the same rows.
+    s1 = stage1(((h, rows_for(h, e, s)) for h in HEADS), params)
     believe = crossfit(s1)
     heads, metrics = {}, {}
     for head in HEADS:
-        d = add_beliefs(head, tables[head], s, believe)
-        tables[head] = None  # free the memory before the next head
+        d = add_beliefs(head, rows_for(head, e, s), s, believe)
         saved, metrics[head] = fit_head(head, d, e, trials, budget, params.get(head), seeds)
         if saved is None:
             continue
