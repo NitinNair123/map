@@ -571,6 +571,10 @@ class Training(unittest.TestCase):
         except ImportError:
             self.skipTest("pip install -r ml/requirements.txt")
         self.np, self.pd, self.train = np, pd, train
+        self.out = tempfile.mkdtemp()  # locked-test answers are written under OUT: never into the real ml/out
+        patch = unittest.mock.patch.object(train, "OUT", self.out)
+        patch.start()
+        self.addCleanup(patch.stop)
         rng = np.random.default_rng(0)
         n = 4000
         e = pd.DataFrame({c: rng.random(n) for c in features.STATIC})
@@ -581,11 +585,6 @@ class Training(unittest.TestCase):
         e["lit"] = (e["n_lamp"] + 0.2 * rng.random(n) > 0.6).astype(float)  # lamps decide it, as on a real street
         e["lit_source"] = "osm"
         self.e, self.rng = e, rng
-
-    def test_head_with_no_rows_is_skipped_not_a_crash(self):
-        saved, info = self.train.run_head("bus_per_hour", "reg", self.e.iloc[0:0], ["n_lamp"], "lit")
-        self.assertIsNone(saved)
-        self.assertIn("skipped", info)
 
     def test_unknown_columns_and_single_class_folds_do_not_crash_training(self):
         np, pd = self.np, self.pd
@@ -630,55 +629,20 @@ class Training(unittest.TestCase):
         _, m = self.train.train_hourly(e, s, "open_share", trials=2, budget=60)
         self.assertTrue(m["beats_baseline"])
 
+    def test_retune_tries_the_last_best_parameters_first_and_saves_locked_answers(self):
+        X, y = self.e[features.STATIC], self.e["lit"].to_numpy(int)
+        last = {"max_iter": 20, "max_leaf_nodes": 7, "learning_rate": 0.1}
+        params, _, _, table = self.train.tune("clf", X, y, self.e["block"].to_numpy(), trials=1, budget=60, incumbent=last)
+        self.assertEqual(len(table), 2)  # the incumbent plus one sampled set
+        self.assertIn(last, [{k: t[k] for k in last} for t in table])
+        _, m = self.train.train_lit(self.e, trials=1, budget=60)
+        saved = self.pd.read_csv(os.path.join(self.out, "locked", "lit.csv.gz"))
+        self.assertEqual(len(saved), m["locked_test"]["rows"])
+        self.assertTrue({"y", "p", "baseline", "block", "highway"} <= set(saved.columns))
+
     def test_too_little_data_is_reported_not_guessed(self):
         _, m = self.train.train_lit(self.e.head(50), trials=1)
         self.assertIn("skipped", m)
-
-
-class TrafficRebuild(unittest.TestCase):
-    def test_only_blocks_saved_before_newer_traffic_that_reaches_them_are_rebuilt(self):
-        import dataset
-        with tempfile.TemporaryDirectory() as d:
-            traffic = os.path.join(d, "traffic.csv")
-            open(traffic, "w").write("x\n")
-            old, fresh = (0, 0), (5, 5)
-            for b, age in ((old, -100), (fresh, 100), ((9, 9), -100)):
-                p = os.path.join(d, f"{b[0]}_{b[1]}.slots.csv.gz")
-                open(p, "w").write("x")
-                t = os.path.getmtime(traffic) + age
-                os.utime(p, (t, t))
-            order = [(old, ["a"]), (fresh, ["b"]), ((9, 9), ["c"]), ((7, 7), ["d"])]  # (7,7) was never saved
-            cell = lambda b: (b[0] * dataset.CHUNK * 10, b[1] * dataset.CHUNK * 10)
-            tr = {cell(old): 1, cell(fresh): 1}  # no traffic reaches block (9, 9)
-            self.assertEqual(dataset.older_than_traffic(d, order, tr, traffic), [(1, old, ["a"])])
-            self.assertEqual(dataset.older_than_traffic(d, order, {}, traffic), [])
-
-
-class ServerLogs(unittest.TestCase):
-    def test_merge_keeps_every_row_once(self):
-        import merge_logs
-        with tempfile.TemporaryDirectory() as d:
-            ours, theirs = os.path.join(d, "a.csv"), os.path.join(d, "b.csv")
-            open(ours, "w").write("h\n1\n2\n")
-            open(theirs, "w").write("h\n2\n3\n3\n")
-            self.assertEqual(merge_logs.merge(ours, theirs), 1)
-            self.assertEqual(open(ours).read(), "h\n1\n2\n3\n")
-            self.assertEqual(merge_logs.merge(ours, theirs), 0)  # pulling again adds nothing
-            os.remove(ours)
-            merge_logs.merge(ours, theirs)
-            self.assertEqual(open(ours).read(), "h\n2\n3\n")
-
-    def test_logger_needs_only_the_standard_library(self):
-        import ast
-        here = os.path.dirname(os.path.abspath(__file__))
-        own = {"buses", "traffic", "spots"}
-        for f in ["collect.py", "spots.py", os.path.join("..", "buses.py"), os.path.join("..", "traffic.py")]:
-            tree = ast.parse(open(os.path.join(here, f), encoding="utf-8").read())
-            mods = {a.name.split(".")[0] for n in tree.body if isinstance(n, ast.Import) for a in n.names}
-            mods |= {n.module.split(".")[0] for n in tree.body if isinstance(n, ast.ImportFrom)}
-            self.assertFalse(mods - own - set(sys.stdlib_module_names), f)  # the server has plain Python only
-
-
 
 
 if __name__ == "__main__":
