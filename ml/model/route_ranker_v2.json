@@ -1,0 +1,144 @@
+{
+ "features": [
+  "lit_pct",
+  "dark_pct",
+  "main_pct",
+  "open_now",
+  "isolated_m",
+  "nothing_open_m",
+  "help_gap_m",
+  "cctv",
+  "police_m",
+  "unrated_pct",
+  "food_found",
+  "shop_found",
+  "pharmacy_found",
+  "hospital_found",
+  "fuel_found",
+  "other_found",
+  "transit_found",
+  "extra_length"
+ ],
+ "caps": {
+  "lit_pct": 100,
+  "dark_pct": 100,
+  "main_pct": 100,
+  "open_now": 10,
+  "isolated_m": 1500,
+  "nothing_open_m": 1500,
+  "help_gap_m": 1500,
+  "cctv": 5,
+  "police_m": 3000,
+  "unrated_pct": 100,
+  "food_found": 10,
+  "shop_found": 50,
+  "pharmacy_found": 5,
+  "hospital_found": 5,
+  "fuel_found": 3,
+  "other_found": 15,
+  "transit_found": 5
+ },
+ "day": {
+  "lit_pct": 2.6396,
+  "dark_pct": -0.5188,
+  "main_pct": 4.327,
+  "open_now": 4.2701,
+  "isolated_m": -4.9675,
+  "nothing_open_m": -2.682,
+  "help_gap_m": -2.7332,
+  "cctv": 1.6305,
+  "police_m": -2.249,
+  "unrated_pct": 0.0,
+  "food_found": 0.256,
+  "shop_found": 1.0152,
+  "pharmacy_found": 0.1442,
+  "hospital_found": 0.3032,
+  "fuel_found": 0.3081,
+  "other_found": 2.013,
+  "transit_found": 0.3482,
+  "extra_length": -3.6413
+ },
+ "night": {
+  "lit_pct": 6.1428,
+  "dark_pct": -1.5288,
+  "main_pct": 5.1453,
+  "open_now": 4.017,
+  "isolated_m": -5.2302,
+  "nothing_open_m": -2.7391,
+  "help_gap_m": -2.9885,
+  "cctv": 1.3084,
+  "police_m": -2.435,
+  "unrated_pct": -0.4317,
+  "food_found": 1.0132,
+  "shop_found": 0.2721,
+  "pharmacy_found": 0.0,
+  "hospital_found": 0.5888,
+  "fuel_found": 0.5461,
+  "other_found": 0.0,
+  "transit_found": 0.5802,
+  "extra_length": -4.7413
+ },
+ "metrics": {
+  "people": 11,
+  "claude_criteria_only": 934,
+  "qwen_and_claude_agree": 194,
+  "qwen_only": 86,
+  "claude_hand": 61,
+  "claude_hand_same": 19,
+  "qwen_and_claude_disagree_left_out": 27,
+  "pairs_generated": 2000,
+  "answered_by_people": 11,
+  "labelled_by_qwen": 329,
+  "labelled_by_claude": 2000,
+  "qwen_agrees_with_claude": 0.866,
+  "held_out_areas": {
+   "all_training_labels": 0.934,
+   "vs_qwen": {
+    "agree": 0.889,
+    "n": 298
+   },
+   "vs_people": {
+    "agree": 0.727,
+    "n": 11
+   },
+   "vs_claude_hand": {
+    "agree": 0.934,
+    "n": 61
+   },
+   "baseline_always_the_shorter_route": 0.594
+  },
+  "sanity_checks": {
+   "more lit": {
+    "day": 2.11,
+    "night": 4.91,
+    "ok": true
+   },
+   "more open places": {
+    "day": 2.14,
+    "night": 2.01,
+    "ok": true
+   },
+   "police closer": {
+    "day": 2.17,
+    "night": 2.35,
+    "ok": true
+   },
+   "less isolated": {
+    "day": 2.65,
+    "night": 2.79,
+    "ok": true
+   },
+   "CCTV": {
+    "day": 1.63,
+    "night": 1.31,
+    "ok": true
+   },
+   "shorter": {
+    "day": 3.64,
+    "night": 4.74,
+    "ok": true
+   }
+  }
+ },
+ "note": "score > 0 means route A is safer. Learned from Qwen (taught Claude's method) and Claude answers (and people's when present). Not checked against people."
+}

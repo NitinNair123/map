@@ -439,7 +439,7 @@ function renderRoutes() {
   const tabs = state.routes.filter(isMain).map((x) => {
     const extra = x.minutes - fastest.minutes;
     return `<button class="tab" role="tab" aria-selected="${x.kind === state.sel}" data-kind="${x.kind}">
-      <b>${LABEL[x.kind]}</b><span class="num ${x.confidence_level === "none" ? "" : scoreClass(x.score)}">${x.confidence_level === "none" ? "–" : x.score}</span>
+      <b>${LABEL[x.kind]}</b>${x.ai_pick ? '<em class="ai-pick" title="The learned route model prefers this one">AI pick</em>' : ""}<span class="num ${x.confidence_level === "none" ? "" : scoreClass(x.score)}">${x.confidence_level === "none" ? "–" : x.score}</span>
       <small>${x.same_as ? `Same as ${LABEL[x.same_as].toLowerCase()}` : `${x.minutes} min${extra > 0 ? ` · +${extra}` : ""}`}</small></button>`;
   }).join("");
   const factors = Object.entries(r.factors).map(([k, v]) =>
@@ -453,6 +453,7 @@ function renderRoutes() {
   const unknown = (r.places || []).filter((pl) => pl.open === null).length;
   if (unknown) notes.push(["info", `Faded pins on the map are ${unknown} places with no published hours, so we can't say if they're open. Bright pins are open when you pass. Tap "Report" and "Shops open now" to fix that for everyone.`]);
   if (r.headline) notes.unshift(["info", r.headline]);
+  if (r.ai_pick) notes.push(["info", "AI pick: a route model learned from judgments of measured street data (lighting, open places, isolation, police distance, detour) prefers this one. It is a second opinion, not proof of safety."]);
   if (r.checked > 1) notes.push(["info", `We scored ${r.checked} different ways there${r.max_extra_min ? `, up to ${r.max_extra_min} min longer than the fastest` : ""}. This one ranks #${r.rank} for safety.`]);
   else if (r.checked === 1) notes.push(["info", "This is the only sensible way there on the map, so all three options are the same."]);
   if (r.same_as) notes.push(["info", `This is the same way as the ${LABEL[r.same_as].toLowerCase()} route.`]);

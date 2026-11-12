@@ -116,6 +116,16 @@ class ServerTest(unittest.TestCase):
             self.assertEqual([r["score"] for r in routes], before)
             self.assertEqual(len(open(os.path.join(server.DATA_DIR, "model_shadow.csv")).read().splitlines()), 2)  # header and one line
 
+    def test_shipped_v2_model_marks_one_route_and_changes_no_score(self):
+        _, out = self.call("/api/route?from=28.0,77.0&to=28.0,77.003&when=2026-10-25T22:00")
+        routes = out["routes"]
+        self.assertIn("day", server.RANKER)  # ml/model/route_ranker_v2.json
+        picked = [r for r in routes if r.get("ai_pick")]
+        self.assertTrue(picked)
+        self.assertEqual(len({json.dumps(r["coords"]) for r in picked}), 1)  # one way, possibly under two names
+        self.assertEqual({r["kind"]: r for r in routes}["safest"]["rank"], 1)  # ranking is still the rules' own
+        self.assertAlmostEqual(server.v2_margin(server.RANKER, routes[0], routes[0], 0.0), 0.0)
+
     def test_route_feel_keeps_measures_and_area_but_no_position(self):
         import server
         body = {"feel": "uneasy", "mid": [28.4741, 77.4998], "hour": 22, "weekend": False, "measures": {"lit_pct": 40, "length_m": 900, "police_m": None}}
