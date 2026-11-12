@@ -37,6 +37,26 @@ async function routeToPharmacy(page) {
   await page.waitForSelector("#startBtn", { timeout: 15000 });
 }
 
+test("Settings: Rules keeps Safest selected, AI model opens on the model's pick", async () => {
+  const { ctx, page, errors } = await phone();
+  // the fixture has one way there, so make Fastest a separate route the model prefers
+  await page.route("**/api/route?*", async (route) => {
+    const res = await route.fetch(), j = await res.json();
+    j.routes.forEach((r) => { r.ai_pick = r.kind === "fastest"; if (r.kind === "fastest") r.same_as = null; });
+    await route.fulfill({ response: res, json: j });
+  });
+  const selected = async () => (await page.locator('.tab[aria-selected="true"] b').textContent()).trim();
+  await routeToPharmacy(page);
+  assert.equal(await selected(), "Safest");
+  await page.click("#settingsBtn");
+  assert.equal(await page.locator("#routeModel").inputValue(), "rules");
+  await page.selectOption("#routeModel", "ai");
+  await page.evaluate(() => (document.querySelector("#drawer").hidden = true));
+  await page.waitForFunction(() => document.querySelector('.tab[aria-selected="true"] b')?.textContent.trim() === "Fastest", null, { timeout: 15000 });
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
 test("plan a route and start a trip on a phone screen", async () => {
   const { ctx, page, errors } = await phone();
   await routeToPharmacy(page);

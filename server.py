@@ -49,22 +49,43 @@ MAX_TRIPS = 20000
 # requests allowed per network address in a window of seconds, so one script can't flood reports or fill the trip table.
 # One address can be many phones (mobile carriers share them), so reports are also limited per device in reports.py.
 def load_ranker():
-    """The route weights learned in ml/rank.py from people's A-or-B answers, if a trained file has been copied to data/model/."""
-    try:
-        return json.load(open(os.path.join(DATA_DIR, "model", "route_ranker.json")))
-    except (OSError, ValueError):
-        return None
+    """The learned route model: data/model/route_ranker.json (v1, copied by hand) wins, else the v2 file shipped in ml/model/."""
+    for p in (os.path.join(DATA_DIR, "model", "route_ranker.json"),
+              os.path.join(os.path.dirname(os.path.abspath(__file__)), "ml", "model", "route_ranker_v2.json")):
+        try:
+            return json.load(open(p))
+        except (OSError, ValueError):
+            pass
+    return None
+
+
+def route_measures(r):
+    s, groups = r["stats"], r["look"]["groups"]
+    f = {**{k: s[k] for k in ("lit_pct", "dark_pct", "main_pct", "open_now", "isolated_m", "nothing_open_m", "help_gap_m", "cctv")},
+         "length_m": r["length_m"], "unrated_pct": r["unrated_pct"], "no_light_data_pct": max(0, 100 - s["lit_pct"] - s["dark_pct"]),
+         "police_m": 5000 if s["police_m"] is None else min(5000, s["police_m"])}
+    f.update({f"{g}_found": groups.get(g, {}).get("found", 0) for g in ("food", "shop", "pharmacy", "hospital", "fuel", "other", "transit")})
+    return f
+
+
+def v2_margin(saved, a, b, daylight):
+    """> 0 when route a is judged safer than b (same maths as ml/rank_v2.py score): capped, 0-1 scaled measure differences
+    times the day or night weights, plus the relative extra length of a over b."""
+    w = saved["night" if daylight < 0.5 else "day"]
+    fa, fb = route_measures(a), route_measures(b)
+    caps = saved["caps"]
+    total = sum(w[k] * (min(fa[k], c) / c - min(fb[k], c) / c) for k, c in caps.items())
+    short = max(1.0, min(fa["length_m"], fb["length_m"]))
+    return total + w["extra_length"] * max(-1.0, min(1.0, (fa["length_m"] - fb["length_m"]) / short))
 
 
 def learned_pick(routes, saved):
-    """The route the learned weights would choose: each route's total of measure x weight (the weights are linear, so
-    comparing two routes' totals is the same as comparing their differences). Measures are those of ml/pairs.py."""
+    """The route the learned model would choose. v2 (day/night weights, compares routes in pairs): the one with the biggest
+    total margin over the others. v1: each route's total of measure x weight (linear, so totals compare like differences)."""
+    if "day" in saved:
+        return max(routes, key=lambda r: sum(v2_margin(saved, r, o, r["daylight"]) for o in routes if o is not r))
     def value(r):
-        s, groups = r["stats"], r["look"]["groups"]
-        f = {**{k: s[k] for k in ("lit_pct", "dark_pct", "main_pct", "open_now", "isolated_m", "nothing_open_m", "help_gap_m", "cctv")},
-             "length_m": r["length_m"], "unrated_pct": r["unrated_pct"], "no_light_data_pct": max(0, 100 - s["lit_pct"] - s["dark_pct"]),
-             "police_m": 5000 if s["police_m"] is None else min(5000, s["police_m"])}
-        f.update({f"{g}_found": groups.get(g, {}).get("found", 0) for g in ("food", "shop", "pharmacy", "hospital", "fuel", "other", "transit")})
+        f = route_measures(r)
         w, dark = saved["weights"], r["daylight"] < 0.5
         return sum(f[k] * (w[k] + w[f"{k}_dark"] * dark) for k in saved["features"])
     return max(routes, key=value)
@@ -90,6 +111,31 @@ def learned_shadow(routes, when, mode):
 
 
 RANKER = load_ranker()
+
+
+AI_MIN_MARGIN = 1.0  # logit margin over every other route: about 73% sure it is the better one
+AI_MAX_SCORE_GAP = 5  # points below the best rules score at which the model is not allowed to recommend a route
+
+
+def ai_pick(routes, mode):
+    """Marks the main route (safest, balanced or fastest) the learned model prefers with ai_pick=True. Walking only (that is what
+    it was trained on). Scores, ranks and the order of routes are untouched; the model learned from Qwen's and Claude's
+    judgments of measured numbers, so the app shows it as a second opinion, not as proof of safety."""
+    if not RANKER or mode != "walk" or len(routes) < 2 or not routes[0].get("stats"):
+        return
+    try:
+        main = [r for r in routes if r["kind"] in ("safest", "balanced", "fastest") and not r.get("same_as")]
+        pick = learned_pick(main, RANKER) if len(main) > 1 else None
+        if pick and "day" in RANKER:
+            # the model only speaks up when it is clearly sure and the rules don't rate the route far worse (a coin-flip
+            # between near-equal routes, or a pick the rules call "avoid", is not a recommendation)
+            margin = min(v2_margin(RANKER, pick, o, pick["daylight"]) for o in main if o is not pick)
+            if margin < AI_MIN_MARGIN or pick["score"] < max(r["score"] for r in main) - AI_MAX_SCORE_GAP:
+                pick = None
+        for r in routes:
+            r["ai_pick"] = bool(pick) and (r is pick or r.get("same_as") == pick["kind"])
+    except Exception:  # the model must never break a route request
+        traceback.print_exc()
 FEELS = ("safe", "uneasy", "unsafe")
 FEEL_MEASURES = ("length_m", "lit_pct", "dark_pct", "main_pct", "open_now", "isolated_m", "nothing_open_m", "help_gap_m", "cctv",
                  "police_m", "unrated_pct")
@@ -540,6 +586,7 @@ class Handler(SimpleHTTPRequestHandler):
                 if places.LIVE.fill_hours(area, lambda p: any(dist(p, c) <= 80 for c in pts)):
                     routes = area.routes(a, b, when, rain, mode, extra, via, prefer)
                 learned_shadow(routes, when, mode)
+                ai_pick(routes, mode)
                 for r in routes:  # the districts each route passes through, as background only (never scored)
                     r["area"] = crime.around(CRIME, crime.along(r["coords"]))
                 return self.send_json({"routes": routes, "rain": rain, "alerts": alerts, "sources": area.sources})

@@ -337,7 +337,8 @@ async function maybeRoute() {
     const res = await api("/api/route?" + q);
     if (seq !== routeSeq) return; // the user picked something else meanwhile
     state.routes = res.routes; state.rain = res.rain; state.alerts = res.alerts || []; state.routeFrom = from; state.sources = res.sources || {};
-    state.sel = "safest";
+    // Settings > Recommended route: "ai" opens on the route the learned model prefers; the default keeps the rules' safest
+    state.sel = (store.get("routeModel", "rules") === "ai" && res.routes.find((r) => r.ai_pick && isMain(r) && !r.same_as)?.kind) || "safest";
     renderRoutes();
     drawRoutes(true);  // after the sheet is drawn, so the route is fitted into the map left above it
   } catch (err) {
@@ -439,7 +440,7 @@ function renderRoutes() {
   const tabs = state.routes.filter(isMain).map((x) => {
     const extra = x.minutes - fastest.minutes;
     return `<button class="tab" role="tab" aria-selected="${x.kind === state.sel}" data-kind="${x.kind}">
-      <b>${LABEL[x.kind]}</b><span class="num ${x.confidence_level === "none" ? "" : scoreClass(x.score)}">${x.confidence_level === "none" ? "–" : x.score}</span>
+      <b>${LABEL[x.kind]}</b>${x.ai_pick ? '<em class="ai-pick" title="The learned route model prefers this one">AI pick</em>' : ""}<span class="num ${x.confidence_level === "none" ? "" : scoreClass(x.score)}">${x.confidence_level === "none" ? "–" : x.score}</span>
       <small>${x.same_as ? `Same as ${LABEL[x.same_as].toLowerCase()}` : `${x.minutes} min${extra > 0 ? ` · +${extra}` : ""}`}</small></button>`;
   }).join("");
   const factors = Object.entries(r.factors).map(([k, v]) =>
@@ -453,6 +454,7 @@ function renderRoutes() {
   const unknown = (r.places || []).filter((pl) => pl.open === null).length;
   if (unknown) notes.push(["info", `Faded pins on the map are ${unknown} places with no published hours, so we can't say if they're open. Bright pins are open when you pass. Tap "Report" and "Shops open now" to fix that for everyone.`]);
   if (r.headline) notes.unshift(["info", r.headline]);
+  if (r.ai_pick) notes.push(["info", "AI pick: a route model learned from judgments of measured street data (lighting, open places, isolation, police distance, detour) prefers this one. It is a second opinion, not proof of safety."]);
   if (r.checked > 1) notes.push(["info", `We scored ${r.checked} different ways there${r.max_extra_min ? `, up to ${r.max_extra_min} min longer than the fastest` : ""}. This one ranks #${r.rank} for safety.`]);
   else if (r.checked === 1) notes.push(["info", "This is the only sensible way there on the map, so all three options are the same."]);
   if (r.same_as) notes.push(["info", `This is the same way as the ${LABEL[r.same_as].toLowerCase()} route.`]);
@@ -1097,6 +1099,8 @@ function openSettings() {
     <div class="row"><label for="caller">Fake caller name</label><input id="caller" class="input" style="width:50%" maxlength="30" value="${esc(store.get("caller", "Mom"))}"></div>
     <div class="row"><span>Fake call</span><button class="btn" id="fakeIn10">Ring me in 10 s</button></div>
     <div class="row"><label for="extra">Consider routes up to</label>${sel("extra", store.get("extra", ""), [["", "Any reasonable detour"], [5, "5 min longer"], [10, "10 min longer"], [15, "15 min longer"], [20, "20 min longer"]])}</div>
+    <div class="row"><label for="routeModel">Recommended route</label>${sel("routeModel", store.get("routeModel", "rules"), [["rules", "Rules (default)"], ["ai", "AI model"]])}</div>
+    <p class="muted">Rules picks by SafeRoute's own score. AI model opens on the route a model trained on judgments of measured street data prefers (walking only). Scores are the same either way, and neither proves a route is safe.</p>
     <h3 style="font-size:16px;margin-top:6px">More of these on my way</h3>
     ${Object.entries(PRIORITY).map(([k, l]) => `<div class="row prio-row"><label for="prio-${k}">${l} <span class="muted" id="prio-${k}-v"></span></label>
       <input type="range" id="prio-${k}" data-prio="${k}" min="0" max="3" step="1" value="${store.get("prefer", {})[k] || 0}"></div>`).join("")}
@@ -1110,6 +1114,7 @@ function openSettings() {
   $("#buffer").onchange = (e) => store.set("buffer", +e.target.value);
   MEDICAL.forEach(([k]) => ($(`#med_${k}`).onchange = (e) => store.set("medical", { ...store.get("medical", {}), [k]: e.target.value.trim() })));
   $("#theme").onchange = (e) => { store.set("theme", e.target.value); applyTheme(); setBaseMap(); };
+  $("#routeModel").onchange = (e) => { store.set("routeModel", e.target.value); if (state.to && !state.trip) maybeRoute(); };
   $("#extra").onchange = (e) => { store.set("extra", e.target.value); if (state.to) maybeRoute(); };
   const LEVEL = ["Don't mind", "A little", "More", "Most"];
   document.querySelectorAll("[data-prio]").forEach((input) => {
