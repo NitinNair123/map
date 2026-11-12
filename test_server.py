@@ -116,15 +116,18 @@ class ServerTest(unittest.TestCase):
             self.assertEqual([r["score"] for r in routes], before)
             self.assertEqual(len(open(os.path.join(server.DATA_DIR, "model_shadow.csv")).read().splitlines()), 2)  # header and one line
 
-    def test_shipped_v2_model_marks_one_route_and_changes_no_score(self):
-        _, out = self.call("/api/route?from=28.0,77.0&to=28.0,77.003&when=2026-10-25T22:00")
-        routes = out["routes"]
-        self.assertIn("day", server.RANKER)  # ml/model/route_ranker_v2.json
-        picked = [r for r in routes if r.get("ai_pick")]
-        self.assertTrue(picked)
-        self.assertEqual(len({json.dumps(r["coords"]) for r in picked}), 1)  # one way, possibly under two names
-        self.assertEqual({r["kind"]: r for r in routes}["safest"]["rank"], 1)  # ranking is still the rules' own
-        self.assertAlmostEqual(server.v2_margin(server.RANKER, routes[0], routes[0], 0.0), 0.0)
+    def test_ai_pick_needs_a_clear_win_and_a_rules_score_close_to_the_best(self):
+        def route(kind, score, **m):
+            g = {k: {"found": 0} for k in ("food", "shop", "pharmacy", "hospital", "fuel", "other", "transit")}
+            st = {**dict(lit_pct=50, dark_pct=10, main_pct=50, open_now=2, isolated_m=300, nothing_open_m=300, help_gap_m=300, cctv=1, police_m=500), **m}
+            return {"kind": kind, "score": score, "length_m": 1000, "unrated_pct": 0, "daylight": 1.0, "stats": st, "look": {"groups": g}, "coords": [kind]}
+        better = dict(lit_pct=90, isolated_m=0)
+        def picks(routes):
+            server.ai_pick(routes, "walk")
+            return [r["kind"] for r in routes if r["ai_pick"]]
+        self.assertEqual(picks([route("safest", 50), route("fastest", 48, **better)]), ["fastest"])  # clear win, score close
+        self.assertEqual(picks([route("safest", 50), route("fastest", 38, **better)]), [])  # rules rate it 12 lower: no pick
+        self.assertEqual(picks([route("safest", 50), route("fastest", 50, lit_pct=51)]), [])  # near tie: no pick
 
     def test_route_feel_keeps_measures_and_area_but_no_position(self):
         import server

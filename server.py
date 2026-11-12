@@ -113,6 +113,10 @@ def learned_shadow(routes, when, mode):
 RANKER = load_ranker()
 
 
+AI_MIN_MARGIN = 1.0  # logit margin over every other route: about 73% sure it is the better one
+AI_MAX_SCORE_GAP = 5  # points below the best rules score at which the model is not allowed to recommend a route
+
+
 def ai_pick(routes, mode):
     """Marks the main route (safest, balanced or fastest) the learned model prefers with ai_pick=True. Walking only (that is what
     it was trained on). Scores, ranks and the order of routes are untouched; the model learned from Qwen's and Claude's
@@ -121,7 +125,13 @@ def ai_pick(routes, mode):
         return
     try:
         main = [r for r in routes if r["kind"] in ("safest", "balanced", "fastest") and not r.get("same_as")]
-        pick = learned_pick(main, RANKER) if len(main) > 1 else main[0] if main else None
+        pick = learned_pick(main, RANKER) if len(main) > 1 else None
+        if pick and "day" in RANKER:
+            # the model only speaks up when it is clearly sure and the rules don't rate the route far worse (a coin-flip
+            # between near-equal routes, or a pick the rules call "avoid", is not a recommendation)
+            margin = min(v2_margin(RANKER, pick, o, pick["daylight"]) for o in main if o is not pick)
+            if margin < AI_MIN_MARGIN or pick["score"] < max(r["score"] for r in main) - AI_MAX_SCORE_GAP:
+                pick = None
         for r in routes:
             r["ai_pick"] = bool(pick) and (r is pick or r.get("same_as") == pick["kind"])
     except Exception:  # the model must never break a route request
