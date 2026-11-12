@@ -11,21 +11,29 @@ import traffic
 
 # (full daylight, full dark) weight per factor; each column sums to 100. Twilight blends the two.
 # A stated design choice based on Safetipin's audit parameters, to be refitted once audited streets exist.
-WEIGHTS = {
-    "lighting": (0, 30),
-    "activity": (30, 30),
-    "frontage": (20, 15),
+WEIGHTS = {  # (by day, after dark), each column adds up to 100
+    # Product decision (Nitin, 12 Nov 2026): main roads are the strongest sign of a safe walk in Delhi (people, traffic,
+    # shops, police patrols, buses), so walking prefers them clearly; street lighting alone is a small part of safety.
+    # Flyover decks without a footpath are still never walkable (safety.py), whatever these weights say.
+    "main_road": (25, 35),
+    "lighting": (0, 5),
+    "activity": (25, 25),
+    "frontage": (15, 10),
     "security": (10, 10),
-    "walkability": (40, 15),
+    "walkability": (25, 15),
 }
+# how much each kind of road counts as a main road (fast roads with no mapped footpath count a little less)
+MAIN_ROAD_VALUE = {"primary": 1.0, "secondary": 1.0, "tertiary": 0.9, "trunk": 0.9, "primary_link": 0.9, "secondary_link": 0.9,
+                   "tertiary_link": 0.8, "trunk_link": 0.8, "pedestrian": 0.5, "residential": 0.35, "living_street": 0.35,
+                   "unclassified": 0.25, "service": 0.1, "footway": 0.1, "path": 0.05, "cycleway": 0.1, "steps": 0.05, "track": 0.0}
 # Other ways to travel weigh the same evidence differently: in a car the footpath matters little and help points
 # (open places, police) matter most; on a bike the road surface and lighting matter about as much as for walking.
 MODE_WEIGHTS = {
     "walk": WEIGHTS,
-    "bike": {"lighting": (0, 30), "activity": (30, 25), "frontage": (20, 15), "security": (10, 10), "walkability": (40, 20)},
-    "car": {"lighting": (0, 15), "activity": (45, 40), "frontage": (20, 15), "security": (25, 20), "walkability": (10, 10)},
+    "bike": {"main_road": (0, 0), "lighting": (0, 30), "activity": (30, 25), "frontage": (20, 15), "security": (10, 10), "walkability": (40, 20)},
+    "car": {"main_road": (0, 0), "lighting": (0, 15), "activity": (45, 40), "frontage": (20, 15), "security": (25, 20), "walkability": (10, 10)},
 }
-LABELS = {"lighting": "Lighting", "activity": "People and open places", "frontage": "Buildings and surroundings",
+LABELS = {"main_road": "Main road", "lighting": "Lighting", "activity": "People and open places", "frontage": "Buildings and surroundings",
           "security": "Police and CCTV", "walkability": "Footpath and ways out"}
 
 # How directly each kind of evidence measures its factor (1 = someone checked this street)
@@ -202,6 +210,11 @@ def factors(area, e, when, light, now=None):
     if near["blackspot"]:
         walk[0] = walk[0][:2] + ("Street map (OpenStreetMap) and accident blackspots",)
     out["walkability"] = combine(walk + obs["walkability"])
+
+    main = MAIN_ROAD_VALUE.get(e["highway"], 0.25)
+    if fast and e["highway"] in MAIN_ROADS and e["sidewalk"] not in ("yes", "both", "left", "right", "separate"):
+        main *= 0.8  # still a main road, but walking beside fast traffic with no footpath mapped
+    out["main_road"] = combine([(main, QUALITY["road"], "Road type (OpenStreetMap)")])
     return out
 
 
@@ -215,7 +228,10 @@ def rate(area, e, when, light, rain=False, now=None, mode="walk"):
     feats = factors(area, e, when, light, now)
     w = weights(light, mode)
     have = {k: f for k, f in feats.items() if f and w[k] > 0}
-    confidence = sum(w[k] * f["quality"] for k, f in have.items()) / sum(w.values())
+    # the road type is known for every mapped street, so it steers the score but is not evidence that a street is rated:
+    # confidence comes from the other factors only (a street known only from the map stays "not rated")
+    evid = {k: f for k, f in have.items() if k != "main_road"}
+    confidence = sum(w[k] * f["quality"] for k, f in evid.items()) / max(1e-9, sum(v for k, v in w.items() if k != "main_road"))
     if not have:
         return 0.0, 0.0, feats
     s = 100 * sum(w[k] * f["quality"] * f["value"] for k, f in have.items()) / sum(w[k] * f["quality"] for k, f in have.items())

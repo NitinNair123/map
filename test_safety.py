@@ -726,6 +726,27 @@ class FlyoverTest(unittest.TestCase):
         self.assertTrue(all(r["length_m"] > 350 for r in area.routes(A, B, NIGHT)))
 
 
+class MainRoadTest(unittest.TestCase):
+    """Walking prefers main roads (Nitin, 12 Nov 2026): a main road beats a lit back street, by day and at night."""
+
+    def test_safest_takes_the_main_road_over_a_lit_lane(self):
+        els = fixture()["elements"]
+        els[0] = way(1, [1, 2], [A, B], highway="primary", name="Main Road")  # the direct way is now a main road, no lit tag
+        els[1] = way(2, [1, 10, 11, 12, 13, 2], NORTH, highway="residential", name="Back Lane", lit="yes")
+        area = Area({"elements": els})
+        for when in (NIGHT, NOON):
+            safest = next(r for r in area.routes(A, B, when) if r["kind"] == "safest")
+            self.assertLess(safest["length_m"], 300, when)  # along the main road, not the lit lane
+            self.assertIn("Main road", safest["factors"])
+
+    def test_bikes_and_cars_are_not_affected(self):
+        self.assertEqual(rating.weights(0.0, "bike")["main_road"], 0)
+        self.assertEqual(rating.weights(0.0, "car")["main_road"], 0)
+        night = rating.weights(0.0)
+        self.assertAlmostEqual(sum(night.values()), 100)
+        self.assertGreater(night["main_road"], 5 * night["lighting"])
+
+
 class UnknownHoursTest(unittest.TestCase):
     """Shops with no published hours are unknown, not closed: they must not lengthen the 'nothing open' stretch."""
 
