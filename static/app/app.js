@@ -14,7 +14,7 @@ const scoreWord = (s) => (s >= 65 ? "Safer" : s >= 40 ? "Take care" : "Avoid if 
 const COLOR = { good: "#12b76a", ok: "#f79009", bad: "#f04438", none: "#98a2b3" };
 const CONF = { high: "High confidence", medium: "Medium confidence", low: "Low confidence", none: "Not rated" };
 const MIN_CONF = 0.35; // below this a street has too little data to rate
-const LABEL = { safest: "Safest", balanced: "Balanced", fastest: "Fastest" };
+const LABEL = { safest: "Recommended", balanced: "Balanced", fastest: "Fastest" };
 const isMain = (r) => r.kind in LABEL;  // the other scanned routes ("#4"...) are drawn only when picked from the table
 const MODE = { walk: { verb: "walking", noun: "walk", start: "Start walking", icon: "walk" },
   bike: { verb: "riding", noun: "ride", start: "Start riding", icon: "bike" }, car: { verb: "driving", noun: "drive", start: "Start driving", icon: "car" } };
@@ -427,7 +427,7 @@ function lookTable(r) {
 
 function gauge(score) {
   const c = 2 * Math.PI * 36, cls = scoreClass(score);
-  return `<div class="gauge" role="img" aria-label="Safety score ${score} out of 100">
+  return `<div class="gauge" role="img" aria-label="Route score ${score} out of 100">
     <svg viewBox="0 0 84 84"><circle class="track" cx="42" cy="42" r="36"/><circle class="val" cx="42" cy="42" r="36" stroke="${COLOR[cls]}" stroke-dasharray="${c}" stroke-dashoffset="${c * (1 - score / 100)}"/></svg>
     <div><span>${score}<small>SCORE</small></span></div></div>`;
 }
@@ -444,7 +444,7 @@ function renderRoutes() {
   }).join("");
   const factors = Object.entries(r.factors).map(([k, v]) =>
     v === null ? `<div class="bar"><span>${esc(k)}</span><span class="track"></span><span class="muted">No data</span></div>`
-      : `<div class="bar"><span>${esc(k)}<small class="muted"> · ${v.measured}% measured</small></span><span class="track"><span class="fill" style="display:block;width:${v.score}%;background:${COLOR[scoreClass(v.score)]}"></span></span><span>${v.score}</span></div>`).join("");
+      : `<div class="bar"><span>${esc(k)}<small class="muted"> · ${v.measured}% measured${v.estimated ? `, ${v.estimated}% estimated` : ""}</small></span><span class="track"><span class="fill" style="display:block;width:${v.score}%;background:${COLOR[scoreClass(v.score)]}"></span></span><span>${v.score}</span></div>`).join("");
   const notes = [];
   if (r.confidence_level === "none") notes.push(["", "There isn't enough real data on these streets to rate this route yet. Grey dashes mark the unrated parts. Reports and the street survey fill this in."]);
   else if (r.unrated_pct >= 10) notes.push(["", `${r.unrated_pct}% of this route is too thinly mapped to rate. It's shown in grey dashes, and those streets earn no points, which pulls the score down.`]);
@@ -453,7 +453,7 @@ function renderRoutes() {
   const unknown = (r.places || []).filter((pl) => pl.open === null).length;
   if (unknown) notes.push(["info", `Faded pins on the map are ${unknown} places with no published hours, so we can't say if they're open. Bright pins are open when you pass. Tap "Report" and "Shops open now" to fix that for everyone.`]);
   if (r.headline) notes.unshift(["info", r.headline]);
-  if (r.checked > 1) notes.push(["info", `We scored ${r.checked} different ways there${r.max_extra_min ? `, up to ${r.max_extra_min} min longer than the fastest` : ""}. This one ranks #${r.rank} for safety.`]);
+  if (r.checked > 1) notes.push(["info", `We scored ${r.checked} different ways there${r.max_extra_min ? `, up to ${r.max_extra_min} min longer than the fastest` : ""}. This one ranks #${r.rank}.`]);
   else if (r.checked === 1) notes.push(["info", "This is the only sensible way there on the map, so all three options are the same."]);
   if (r.same_as) notes.push(["info", `This is the same way as the ${LABEL[r.same_as].toLowerCase()} route.`]);
   const dusk = r.daylight > 0 && r.daylight < 1;
@@ -485,7 +485,7 @@ function renderRoutes() {
       <div class="strip-key"><span><i style="background:var(--risk)"></i>300 m or more with nothing open</span><span><i style="background:#6941c6"></i>unlit</span><span><i style="background:var(--safe);width:8px;height:8px;border-radius:50%"></i>open</span><span><i style="background:#c0c5d0;width:8px;height:8px;border-radius:50%"></i>hours unknown</span></div></div>
     ${notes.map(([kind, n]) => `<div class="note ${kind}">${icon(kind === "info" ? "shield" : "alert")}<span>${esc(n)}</span></div>`).join("")}
     ${lookTable(r)}
-    ${r.compared && r.compared.length > 1 ? `<details class="why"><summary>${r.rank === 1 ? "Why this is the safest" : `Why this ranks #${r.rank}`} · ${r.checked} ways scanned</summary>
+    ${r.compared && r.compared.length > 1 ? `<details class="why"><summary>${r.rank === 1 ? "Why this is recommended" : `Why this ranks #${r.rank}`} · ${r.checked} ways scanned</summary>
       <ul class="why-list">${(r.why || []).map((t) => `<li class="${t.startsWith("But:") ? "warn" : ""}">${esc(t)}</li>`).join("")}</ul>
       <div class="compare"><table><thead><tr><th>#</th><th>Score</th><th>Time</th><th>Lit</th><th>Open</th><th>Unrated</th></tr></thead><tbody>
       ${r.compared.map((c) => `<tr class="${c.rank === r.rank ? "this" : ""}" data-kind="${state.routes.find((x) => x.rank === c.rank && !x.same_as)?.kind || ""}"><td>${c.rank}</td><td><b class="${c.confidence_level === "none" ? "" : scoreClass(c.score)}">${c.confidence_level === "none" ? "–" : c.score}</b></td><td>${c.minutes} min</td><td>${c.stats.lit_pct || c.stats.dark_pct ? `${c.stats.lit_pct}%` : "–"}</td><td>${c.stats.open_now ?? 0}</td><td>${c.unrated_pct}%</td></tr>`).join("")}
@@ -497,7 +497,7 @@ function renderRoutes() {
     <details class="why"><summary>Directions · ${r.steps.length - 1} ${r.steps.length === 2 ? "step" : "steps"}</summary><ol class="steps-list">${r.steps.map((st) =>
       `<li><span class="turn">${turnIcon(st.turn)}</span>${esc(st.text)}<small>${st.dist ? fmtDist(st.dist) : ""}</small></li>`).join("")}</ol></details>
     <details class="why"><summary>Why this score?</summary><div class="bars">${factors}</div>
-      <p class="muted" style="margin:0 0 8px">Data used: ${r.sources.map(esc).join(", ") || "none"}. Downloaded: ${Object.entries(state.sources).map(([k, ts]) => `${esc(k)} ${daysAgo(ts)}`).join(", ") || "unknown"}. "No data" means nothing is mapped there, which is not the same as bad.</p>
+      <p class="muted" style="margin:0 0 8px">Data used: ${r.sources.map(esc).join(", ") || "none"}. Downloaded: ${Object.entries(state.sources).map(([k, ts]) => `${esc(k)} ${daysAgo(ts)}`).join(", ") || "unknown"}. "No data" means nothing is mapped there, which is not the same as bad. "Estimated" means a guess from the road type, area brightness or AI-read hours, not something measured on that street.</p>
       <p class="muted" style="margin:0 0 12px">Scores compare routes. They mean <b>safer</b>, never guaranteed safe. Trust your instincts.</p></details>`, true);
   document.querySelectorAll(".tab, .strip-row, .compare tr[data-kind]").forEach((t) => (t.onclick = () => { if (state.trip || !t.dataset.kind) return; state.sel = t.dataset.kind; drawRoutes(); renderRoutes(); }));
   document.querySelectorAll("[data-group]").forEach((b) => (b.onclick = () => {
@@ -542,7 +542,7 @@ async function renderIdle() {
     ? `<button class="btn btn-block" id="installBtn">${icon("check")}Install SafeRoute on this phone</button>`
     : isIOS() && !standalone() ? `<p class="muted">Install: tap <b>Share</b> then <b>Add to Home Screen</b>.</p>` : "";
   renderSheet(`
-    <div class="sheet-head"><div><h3>${greet}</h3><p class="muted" style="margin:0">Search a place or tap the map to see the safest way there.</p></div></div>
+    <div class="sheet-head"><div><h3>${greet}</h3><p class="muted" style="margin:0">Search a place or tap the map to see the recommended way there.</p></div></div>
     ${contacts.length ? "" : `<button class="btn btn-block" id="addContactsBtn">${icon("user")}Add a trusted contact for SOS</button>`}
     <div id="nearby"></div>
     ${install}`);
@@ -648,8 +648,8 @@ async function reroute(pt) {
   const t = state.trip;
   if (Date.now() - t.lastReroute < 20000) return;
   t.lastReroute = Date.now();
-  speak("Off route. Finding the safest way from here.");
-  toast("Off route. Finding the safest way from here…");
+  speak("Off route. Finding the recommended way from here.");
+  toast("Off route. Finding the recommended way from here…");
   try {
     const res = await api("/api/route?" + routeQuery(pt, whenParam(), t.nextStop), null, 60000);
     if (state.trip !== t) return;
