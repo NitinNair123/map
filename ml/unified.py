@@ -605,8 +605,13 @@ def main(argv=None):
     ap.add_argument("--budget", type=int, default=BUDGET_S, help="most seconds spent searching parameters for one part")
     ap.add_argument("--quick", action="store_true", help="2 trials and 1 seed: checks the script runs; never promote a quick run")
     ap.add_argument("--force", action="store_true", help="retrain even when the data has not changed")
+    ap.add_argument("--engine", choices=["sklearn", "xgb"], default="sklearn",
+                    help="xgb: XGBoost on the GPU when CUDA works (ml/train.py's engine); keep Ollama off while it runs")
     a = ap.parse_args(argv)
     trials, seeds = (2, 1) if a.quick else (a.trials, None)
+    if a.engine == "xgb" and hasattr(train, "xgb_device"):
+        train.ENGINE, train.XGB_DEVICE = "xgb", train.xgb_device()
+        print(f"Engine: XGBoost on {train.XGB_DEVICE}", flush=True)
     if a.command == "train":
         run_training(trials, a.budget, seeds)
     elif a.command == "retrain":
