@@ -13,8 +13,26 @@ from safety import Area  # noqa: E402
 from test_safety import fixture  # noqa: E402
 
 
+def pyarrow_blocked():
+    """True on a PC where Windows Smart App Control blocks pyarrow's unsigned compute DLLs (the Overture filter needs
+    them). Checked once without importing them, so the test run itself never triggers the Windows popup: set
+    SAFEROUTE_PYARROW_BLOCKED=1 there, or it is detected from Windows' Code Integrity policy for Smart App Control."""
+    if os.environ.get("SAFEROUTE_PYARROW_BLOCKED") in ("0", "1"):
+        return os.environ["SAFEROUTE_PYARROW_BLOCKED"] == "1"
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\CI\Policy") as k:
+            return winreg.QueryValueEx(k, "VerifiedAndReputablePolicyState")[0] == 1  # 1 = Smart App Control on
+    except OSError:
+        return False
+
+
 class Features(unittest.TestCase):
     def setUp(self):
+        if self._testMethodName.startswith("test_overture") and pyarrow_blocked():
+            self.skipTest("Windows Smart App Control blocks pyarrow's unsigned dataset/acero DLLs on this PC")
         self.area = Area(fixture())
         self.rows = {r["edge_id"]: r for r in features.static_rows(self.area)}
 
@@ -639,6 +657,19 @@ class Training(unittest.TestCase):
         saved = self.pd.read_csv(os.path.join(self.out, "locked", "lit.csv.gz"))
         self.assertEqual(len(saved), m["locked_test"]["rows"])
         self.assertTrue({"y", "p", "baseline", "block", "highway"} <= set(saved.columns))
+
+    def test_xgboost_engine_learns_the_same_signal(self):
+        try:
+            import xgboost  # noqa: F401
+        except ImportError:
+            self.skipTest("pip install xgboost")
+        with unittest.mock.patch.object(self.train, "ENGINE", "xgb"), \
+                unittest.mock.patch.object(self.train, "XGB_DEVICE", self.train.xgb_device()):
+            saved, m = self.train.train_lit(self.e, trials=1, budget=60)
+        self.assertGreater(m["locked_test"]["auroc"], 0.9)
+        self.assertEqual(list(m["most_useful_parameters"])[0], "n_lamp")
+        p = saved["model"].predict_proba(self.e[features.STATIC])[:, 1]
+        self.assertTrue(((p >= 0) & (p <= 1)).all())
 
     def test_too_little_data_is_reported_not_guessed(self):
         _, m = self.train.train_lit(self.e.head(50), trials=1)

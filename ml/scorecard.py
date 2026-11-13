@@ -85,6 +85,15 @@ def lit_card(metrics):
                 sl[str(h)] = {"n": len(g), "error": round(float(((g["p"] >= 0.5) != g["y"]).mean()), 3)}
         card["by_road_type"] = sl
         card["worst_slice_gap"] = max([v["error"] for v in sl.values()], default=err) - err
+        # the model may say "unknown": answer only where it is confident, and count the dangerous mistake (dark called lit)
+        sel = []
+        for t in (0.5, 0.6, 0.7, 0.8, 0.9):
+            sure = (p >= t) | (p <= 1 - t)
+            said_lit = sure & (p >= t)
+            sel.append({"confidence_at_least": t, "answers_for": round(float(sure.mean()), 3),
+                        "error_when_answering": round(float(((p[sure] >= 0.5) != y[sure]).mean()), 4) if sure.any() else None,
+                        "dark_called_lit": round(float((said_lit & dark).sum() / max(1, said_lit.sum())), 4)})
+        card["answer_or_unknown"] = sel
     else:
         card.update(auroc=t.get("auroc"), ece=t.get("ece"), error=t.get("error_rate"),
                     baseline_error=t.get("baseline_error_rate (road type only)"), false_safe=None,
@@ -256,10 +265,14 @@ def pct(x):
 
 
 def report(c):
-    L = ["# SafeRoute model scorecard", "", f"{c['when']}. Every number is on areas the model never trained on.", "",
-         f"**Verdict:** {c['verdict']}", "", "## Grades at a glance", "", "| Part | What is measured | Result | Grade |", "|---|---|---|---|"]
     lit, rt = c["street"]["lit"], c["route"]
-    rows = [("Route choice", "agrees with its labels on unseen areas", pct(rt["agreement_all_labels"]), rt["grades"]["agreement"]),
+    L = ["# SafeRoute model scorecard", "", f"{c['when']}. Every number is on areas the model never trained on.", "",
+         f"**Checked against real people: n = {rt['vs_people']['n']}"
+         + (" (not enough to grade).**" if rt["vs_people"]["n"] < MIN_N else ".**"), "",
+         "Routes are decided by written rules with Nitin's priorities (rating.py). The models below only estimate measurable "
+         "things; the route ranker is research and is not graded on agreeing with labels it was trained to copy.", "",
+         f"**Verdict:** {c['verdict']}", "", "## Grades at a glance", "", "| Part | What is measured | Result | Grade |", "|---|---|---|---|"]
+    rows = [("Route ranker (research)", "agrees with its own rule-made labels", pct(rt["agreement_all_labels"]), "not graded"),
             ("Route choice", "agrees with Claude's hand answers", f"{pct(rt['vs_claude_hand']['agreement'])} (n={rt['vs_claude_hand']['n']})", rt["grades"]["vs_claude_hand"]),
             ("Route choice", "agrees with real people", f"{pct(rt['vs_people']['agreement'])} (n={rt['vs_people']['n']})", rt["grades"]["people_agreement"]),
             ("Route choice", "night-time pairs", f"{pct(rt['night']['agreement'])} (n={rt['night']['n']})", rt["grades"]["night"]),
@@ -292,6 +305,11 @@ def report(c):
     L += [f"| {k} | {v['score']:+} | {'yes' if v['pass'] else '**NO**'} |" for k, v in rt["behaviour_tests"].items()]
     L += ["", "## Lit streets in detail", ""]
     L += [f"- {k}: {v}" for k, v in lit.items() if k not in ("grades", "by_road_type")]
+    if lit.get("answer_or_unknown"):
+        L += ["", "Answer only when confident, otherwise say unknown (unknown is neutral in the route score):", "",
+              "| Confidence at least | Answers for | Error when answering | Dark called lit |", "|---|---|---|---|"]
+        L += [f"| {s['confidence_at_least']} | {s['answers_for']:.0%} | {pct(s['error_when_answering'])} | {pct(s['dark_called_lit'])} |"
+              for s in lit["answer_or_unknown"]]
     if lit.get("by_road_type"):
         L += ["", "| Road type code | Streets | Error |", "|---|---|---|"] + [f"| {k} | {v['n']} | {v['error']:.1%} |" for k, v in lit["by_road_type"].items()]
     L += ["", "## Hourly heads", ""]

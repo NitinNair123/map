@@ -52,6 +52,8 @@ SEEDS = 5
 SPACE = {"learning_rate": [0.015, 0.03, 0.06, 0.1], "max_leaf_nodes": [7, 15, 31, 63, 127], "max_iter": [300, 600, 1000, 1500],
          "min_samples_leaf": [20, 50, 100, 200, 400], "l2_regularization": [0.0, 1.0, 10.0, 30.0], "max_features": [0.3, 0.5, 0.8, 1.0]}
 SPACE_CLF = {**SPACE, "class_weight": [None, "balanced"]}  # the lit head: dark streets are the minority and the costly mistake
+ENGINE = "sklearn"  # --engine xgb: XGBoost, on the GPU when CUDA is available (scikit-learn cannot use a GPU)
+XGB_DEVICE = "cpu"
 # the bar from the plan (section 5c) for the lit head before it may be considered for the app
 LIT_AUROC, LIT_ECE = 0.85, 0.05
 TARGET_ERROR = 0.01
@@ -71,6 +73,18 @@ def load(folder):
         e["region"] = "ncr"
     e["block"] = e["tile"].map(block_of)
     return e, s
+
+
+def xgb_device():
+    """'cuda' when XGBoost was built with CUDA and a GPU answers a tiny fit, else 'cpu'."""
+    try:
+        import xgboost as xgb
+        if not xgb.build_info().get("USE_CUDA"):
+            return "cpu"
+        xgb.XGBRegressor(n_estimators=2, device="cuda", tree_method="hist").fit(np.random.rand(64, 3), np.random.rand(64))
+        return "cuda"
+    except Exception:
+        return "cpu"
 
 
 def blocks_hash(folder):
@@ -129,21 +143,60 @@ class Safe:
                 self.const = float(np.asarray(y)[0])
                 return self
             stop = counts.min() >= 2  # early stopping holds out a stratified slice, which needs two of every class
+        if ENGINE == "xgb":
+            return self._fit_xgb(X, y, stop)
+        params = {k: v for k, v in self.params.items() if k in SPACE_CLF}
         kw = dict(early_stopping=stop, validation_fraction=0.1, n_iter_no_change=25, random_state=self.seed,
-                  categorical_features=[c in CATEGORICAL for c in self.keep], **self.params)
+                  categorical_features=[c in CATEGORICAL for c in self.keep], **params)
         self.model = (HistGradientBoostingClassifier if self.kind == "clf" else HistGradientBoostingRegressor)(**kw)
         self.model.fit(X[self.keep], y)
         return self
 
+    def _xgb_frame(self, X):
+        X = X[self.keep].copy()
+        for c in self.keep:
+            if c in CATEGORICAL:  # road class and footpath codes: the same fixed categories at fit and predict time
+                X[c] = X[c].astype(pd.CategoricalDtype(categories=list(range(64))))
+            elif X[c].dtype == object:  # e.g. hour/weekend read back as text after a merge: XGBoost needs numbers
+                X[c] = pd.to_numeric(X[c], errors="coerce").astype("float32")
+        return X
+
+    def _fit_xgb(self, X, y, stop):
+        """XGBoost on the GPU (CUDA) when there is one, else on the CPU. The same search space, translated."""
+        import xgboost as xgb
+        p, y = self.params, np.asarray(y)
+        kw = dict(n_estimators=p.get("max_iter", 600), learning_rate=p.get("learning_rate", 0.06), grow_policy="lossguide",
+                  max_depth=0, max_leaves=p.get("max_leaf_nodes", 31), min_child_weight=p.get("min_samples_leaf", 20),
+                  reg_lambda=p.get("l2_regularization", 1.0), colsample_bynode=p.get("max_features", 1.0), tree_method="hist",
+                  device=XGB_DEVICE, enable_categorical=True, max_cat_to_onehot=1, random_state=self.seed, max_bin=256)
+        if self.kind == "clf" and p.get("class_weight") == "balanced":
+            kw["scale_pos_weight"] = float((y == 0).sum()) / max(1.0, float((y == 1).sum()))
+        Xf = self._xgb_frame(X)
+        rng = np.random.default_rng(self.seed)
+        val = rng.random(len(y)) < 0.1
+        if self.kind == "clf":
+            stop = stop and len(set(y[val])) == 2 and len(set(y[~val])) == 2
+        if stop and val.sum() >= 20:
+            kw["early_stopping_rounds"] = 25
+            self.model = (xgb.XGBClassifier if self.kind == "clf" else xgb.XGBRegressor)(**kw)
+            self.model.fit(Xf[~val], y[~val], eval_set=[(Xf[val], y[val])], verbose=False)
+        else:
+            self.model = (xgb.XGBClassifier if self.kind == "clf" else xgb.XGBRegressor)(**kw)
+            self.model.fit(Xf, y, verbose=False)
+        return self
+
+    def _x(self, X):
+        return self._xgb_frame(X) if ENGINE == "xgb" else X[self.keep]
+
     def predict(self, X):
         if self.const is not None:
             return np.full(len(X), int(self.const))
-        return self.model.predict(X[self.keep])
+        return self.model.predict(self._x(X))
 
     def predict_proba(self, X):
         if self.const is not None:
             return np.column_stack([np.full(len(X), 1 - self.const), np.full(len(X), self.const)])
-        return self.model.predict_proba(X[self.keep])
+        return self.model.predict_proba(self._x(X))
 
 
 def make(kind, cols, params, seed=0):
@@ -325,9 +378,10 @@ def run_head(name, kind, d, cols, target, trials=None, budget=None, incumbent=No
     if test.sum() >= MIN_ROWS and d.loc[test, "block"].nunique() >= 3:
         fitted = bag(kind, X.iloc[idx], y[idx], v["params"])
         p = predict(kind, fitted, X[test])
-        imp = importance(kind, fitted, X[test], y[test])
-        info["most_useful_parameters"] = {k: round(x, 4) for k, x in list(imp.items())[:15]}
-        info["parameters_with_no_measurable_effect"] = [k for k, x in imp.items() if x <= 0.0002]
+        if TRIALS != 0:  # a re-score (--trials 0) only needs the locked score; the importance scan is the slowest step
+            imp = importance(kind, fitted, X[test], y[test])
+            info["most_useful_parameters"] = {k: round(x, 4) for k, x in list(imp.items())[:15]}
+            info["parameters_with_no_measurable_effect"] = [k for k, x in imp.items() if x <= 0.0002]
         if kind == "clf":
             ok = ~np.isnan(v["oof"]) & ncr[idx]
             cal = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0).fit(v["oof"][ok], y[idx][ok])
@@ -414,14 +468,19 @@ def report(metrics, e, s):
 
 
 def main():
-    global TRIALS, BUDGET_S, OUT
+    global TRIALS, BUDGET_S, OUT, ENGINE, XGB_DEVICE
     ap = argparse.ArgumentParser()
     ap.add_argument("--trials", type=int, default=TRIALS)
     ap.add_argument("--budget", type=int, default=BUDGET_S, help="most seconds spent tuning one head")
     ap.add_argument("--heads", default="all", help="e.g. lit,traffic_ratio: retrain only these; the others keep their saved "
                                                     "model and metrics (fine-tuning one head without a full run)")
+    ap.add_argument("--engine", choices=["sklearn", "xgb"], default="sklearn",
+                    help="xgb: XGBoost, on the GPU when CUDA is available (the GPU must not be busy with Ollama)")
     a = ap.parse_args()
-    TRIALS, BUDGET_S = a.trials, a.budget
+    TRIALS, BUDGET_S, ENGINE = a.trials, a.budget, a.engine
+    if ENGINE == "xgb":
+        XGB_DEVICE = xgb_device()
+        print(f"Engine: XGBoost on {XGB_DEVICE}", flush=True)
     heads = ["lit"] + HOURLY if a.heads == "all" else [h.strip() for h in a.heads.split(",")]
     bad = [h for h in heads if h not in ["lit"] + HOURLY]
     if bad:
@@ -433,7 +492,8 @@ def main():
     # in use. ml/registry.py checks a candidate against the release gate and only then promotes it.
     OUT = os.path.join(OUT, "candidates", time.strftime("%Y%m%d-%H%M%S"))
     os.makedirs(OUT, exist_ok=True)
-    json.dump({"heads": heads, "trials": TRIALS, "budget_s": BUDGET_S, "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+    json.dump({"heads": heads, "trials": TRIALS, "budget_s": BUDGET_S, "engine": ENGINE,
+               "device": XGB_DEVICE if ENGINE == "xgb" else "cpu", "started": time.strftime("%Y-%m-%d %H:%M:%S"),
                "data_blocks_sha256": blocks_hash(os.path.join(ML, "data", "blocks"))},
               open(os.path.join(OUT, "run.json"), "w"), indent=1)
     print(f"Candidate run: {OUT}", flush=True)
