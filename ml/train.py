@@ -49,8 +49,11 @@ BUDGET_S = 3600         # most time spent tuning one head (was 1500); a few tria
 MAX_ROWS = 3_000_000    # street-hour rows kept per hourly head, so the full NCR build fits in a laptop's memory
 MAX_TUNE_ROWS = 300_000  # tuning looks at a random subset of blocks beyond this; the final fit uses everything
 SEEDS = 5
-SPACE = {"learning_rate": [0.03, 0.06, 0.1], "max_leaf_nodes": [15, 31, 63, 127], "max_iter": [300, 600, 1000],
-         "min_samples_leaf": [20, 50, 100, 200], "l2_regularization": [0.0, 1.0, 10.0], "max_features": [0.5, 0.8, 1.0]}
+SPACE = {"learning_rate": [0.015, 0.03, 0.06, 0.1], "max_leaf_nodes": [7, 15, 31, 63, 127], "max_iter": [300, 600, 1000, 1500],
+         "min_samples_leaf": [20, 50, 100, 200, 400], "l2_regularization": [0.0, 1.0, 10.0, 30.0], "max_features": [0.3, 0.5, 0.8, 1.0]}
+SPACE_CLF = {**SPACE, "class_weight": [None, "balanced"]}  # the lit head: dark streets are the minority and the costly mistake
+ENGINE = "sklearn"  # --engine xgb: XGBoost, on the GPU when CUDA is available (scikit-learn cannot use a GPU)
+XGB_DEVICE = "cpu"
 # the bar from the plan (section 5c) for the lit head before it may be considered for the app
 LIT_AUROC, LIT_ECE = 0.85, 0.05
 TARGET_ERROR = 0.01
@@ -70,6 +73,28 @@ def load(folder):
         e["region"] = "ncr"
     e["block"] = e["tile"].map(block_of)
     return e, s
+
+
+def xgb_device():
+    """'cuda' when XGBoost was built with CUDA and a GPU answers a tiny fit, else 'cpu'."""
+    try:
+        import xgboost as xgb
+        if not xgb.build_info().get("USE_CUDA"):
+            return "cpu"
+        xgb.XGBRegressor(n_estimators=2, device="cuda", tree_method="hist").fit(np.random.rand(64, 3), np.random.rand(64))
+        return "cuda"
+    except Exception:
+        return "cpu"
+
+
+def blocks_hash(folder):
+    """One hash over every block file's name, size and time: says whether two runs saw the same data."""
+    import hashlib
+    h = hashlib.sha256()
+    for p in sorted(glob.glob(os.path.join(folder, "*"))):
+        st = os.stat(p)
+        h.update(f"{os.path.basename(p)}|{st.st_size}|{int(st.st_mtime)}\n".encode())
+    return h.hexdigest()
 
 
 def block_of(tile):
@@ -118,21 +143,60 @@ class Safe:
                 self.const = float(np.asarray(y)[0])
                 return self
             stop = counts.min() >= 2  # early stopping holds out a stratified slice, which needs two of every class
+        if ENGINE == "xgb":
+            return self._fit_xgb(X, y, stop)
+        params = {k: v for k, v in self.params.items() if k in SPACE_CLF}
         kw = dict(early_stopping=stop, validation_fraction=0.1, n_iter_no_change=25, random_state=self.seed,
-                  categorical_features=[c in CATEGORICAL for c in self.keep], **self.params)
+                  categorical_features=[c in CATEGORICAL for c in self.keep], **params)
         self.model = (HistGradientBoostingClassifier if self.kind == "clf" else HistGradientBoostingRegressor)(**kw)
         self.model.fit(X[self.keep], y)
         return self
 
+    def _xgb_frame(self, X):
+        X = X[self.keep].copy()
+        for c in self.keep:
+            if c in CATEGORICAL:  # road class and footpath codes: the same fixed categories at fit and predict time
+                X[c] = X[c].astype(pd.CategoricalDtype(categories=list(range(64))))
+            elif X[c].dtype == object:  # e.g. hour/weekend read back as text after a merge: XGBoost needs numbers
+                X[c] = pd.to_numeric(X[c], errors="coerce").astype("float32")
+        return X
+
+    def _fit_xgb(self, X, y, stop):
+        """XGBoost on the GPU (CUDA) when there is one, else on the CPU. The same search space, translated."""
+        import xgboost as xgb
+        p, y = self.params, np.asarray(y)
+        kw = dict(n_estimators=p.get("max_iter", 600), learning_rate=p.get("learning_rate", 0.06), grow_policy="lossguide",
+                  max_depth=0, max_leaves=p.get("max_leaf_nodes", 31), min_child_weight=p.get("min_samples_leaf", 20),
+                  reg_lambda=p.get("l2_regularization", 1.0), colsample_bynode=p.get("max_features", 1.0), tree_method="hist",
+                  device=XGB_DEVICE, enable_categorical=True, max_cat_to_onehot=1, random_state=self.seed, max_bin=256)
+        if self.kind == "clf" and p.get("class_weight") == "balanced":
+            kw["scale_pos_weight"] = float((y == 0).sum()) / max(1.0, float((y == 1).sum()))
+        Xf = self._xgb_frame(X)
+        rng = np.random.default_rng(self.seed)
+        val = rng.random(len(y)) < 0.1
+        if self.kind == "clf":
+            stop = stop and len(set(y[val])) == 2 and len(set(y[~val])) == 2
+        if stop and val.sum() >= 20:
+            kw["early_stopping_rounds"] = 25
+            self.model = (xgb.XGBClassifier if self.kind == "clf" else xgb.XGBRegressor)(**kw)
+            self.model.fit(Xf[~val], y[~val], eval_set=[(Xf[val], y[val])], verbose=False)
+        else:
+            self.model = (xgb.XGBClassifier if self.kind == "clf" else xgb.XGBRegressor)(**kw)
+            self.model.fit(Xf, y, verbose=False)
+        return self
+
+    def _x(self, X):
+        return self._xgb_frame(X) if ENGINE == "xgb" else X[self.keep]
+
     def predict(self, X):
         if self.const is not None:
             return np.full(len(X), int(self.const))
-        return self.model.predict(X[self.keep])
+        return self.model.predict(self._x(X))
 
     def predict_proba(self, X):
         if self.const is not None:
             return np.column_stack([np.full(len(X), 1 - self.const), np.full(len(X), self.const)])
-        return self.model.predict_proba(X[self.keep])
+        return self.model.predict_proba(self._x(X))
 
 
 def make(kind, cols, params, seed=0):
@@ -153,10 +217,13 @@ def score_fn(kind):
     return mean_absolute_error
 
 
-def tune(kind, X, y, groups, mask=None, trials=None, budget=None, name="model"):
+def tune(kind, X, y, groups, mask=None, trials=None, budget=None, name="model", incumbent=None):
     """Random search scored by block-grouped cross-validation. mask picks the rows that count for the score
-    (NCR streets, when other regions only help to learn). Returns (best params, its out-of-fold predictions, table)."""
-    trials, budget = trials or TRIALS, budget or BUDGET_S
+    (NCR streets, when other regions only help to learn). incumbent (the last run's best parameters) is tried first, so a
+    re-tune can only keep or beat it on cross-validation. Returns (best params, its out-of-fold predictions, table)."""
+    trials, budget = (TRIALS if trials is None else trials), budget or BUDGET_S
+    if trials == 0 and not incumbent:
+        raise ValueError(f"{name}: --trials 0 re-scores the model in use, but it has no saved parameters")
     mask = np.ones(len(y), bool) if mask is None else mask
     keep = np.arange(len(y))
     if len(y) > MAX_TUNE_ROWS:
@@ -167,7 +234,8 @@ def tune(kind, X, y, groups, mask=None, trials=None, budget=None, name="model"):
     Xt, yt, gt, mt = X.iloc[keep], y[keep], np.asarray(groups)[keep], mask[keep]
     cv = list(GroupKFold(n_splits=min(5, len(set(gt)))).split(Xt, yt, gt))
     score, started, table, best = score_fn(kind), time.time(), [], None
-    for n, params in enumerate(ParameterSampler(SPACE, n_iter=trials, random_state=0)):
+    sampled = list(ParameterSampler(SPACE_CLF if kind == "clf" else SPACE, n_iter=trials, random_state=0)) if trials else []
+    for n, params in enumerate(([dict(incumbent)] if incumbent else []) + sampled):
         if n >= 3 and time.time() - started > budget:
             break
         oof = np.zeros(len(yt))
@@ -256,7 +324,20 @@ def importance(kind, model, X, y, repeats=3, rows=20000):
 
 # ---------------------------------------------------------------- one head
 
-def run_head(name, kind, d, cols, target, trials=None, budget=None):
+SLICE_COLS = ["highway", "hour", "weekend", "lanes", "bld_500", "sidewalk"]  # kept next to locked predictions for ml/scorecard.py
+
+
+def save_locked(name, d, y, p, base, cal=None):
+    """The locked-test answers, so ml/scorecard.py can grade slices (night, road type, density) without retraining."""
+    out = pd.DataFrame({"y": y, "p": p, "baseline": base, "block": d["block"].to_numpy()})
+    for c in SLICE_COLS:
+        if c in d:
+            out[c] = d[c].to_numpy()
+    os.makedirs(os.path.join(OUT, "locked"), exist_ok=True)
+    out.to_csv(os.path.join(OUT, "locked", f"{name}.csv.gz"), index=False)
+
+
+def run_head(name, kind, d, cols, target, trials=None, budget=None, incumbent=None):
     """Tune, choose NCR-only vs all regions, score once on the locked blocks, then fit the final model on everything."""
     d = d.reset_index(drop=True)
     if d.empty:  # no labelled rows at all (e.g. no bus or traffic logs): ~lock below would fail on an empty array
@@ -282,7 +363,8 @@ def run_head(name, kind, d, cols, target, trials=None, budget=None):
         if d.loc[rows & ncr, "block"].nunique() < MIN_BLOCKS:
             continue
         idx = np.flatnonzero(rows)
-        params, oof, cv, table = tune(kind, d.iloc[idx][cols], y[idx], d["block"].to_numpy()[idx], ncr[idx], trials, budget, name)
+        params, oof, cv, table = tune(kind, d.iloc[idx][cols], y[idx], d["block"].to_numpy()[idx], ncr[idx], trials, budget, name,
+                                      incumbent)
         done[vname] = {"idx": idx, "params": params, "oof": oof, "cv": cv, "table": table[:5]}
     if not done:
         return None, {**info, "skipped": "too few Delhi NCR areas to hold out"}
@@ -296,20 +378,25 @@ def run_head(name, kind, d, cols, target, trials=None, budget=None):
     if test.sum() >= MIN_ROWS and d.loc[test, "block"].nunique() >= 3:
         fitted = bag(kind, X.iloc[idx], y[idx], v["params"])
         p = predict(kind, fitted, X[test])
-        imp = importance(kind, fitted, X[test], y[test])
-        info["most_useful_parameters"] = {k: round(x, 4) for k, x in list(imp.items())[:15]}
-        info["parameters_with_no_measurable_effect"] = [k for k, x in imp.items() if x <= 0.0002]
+        if TRIALS != 0:  # a re-score (--trials 0) only needs the locked score; the importance scan is the slowest step
+            imp = importance(kind, fitted, X[test], y[test])
+            info["most_useful_parameters"] = {k: round(x, 4) for k, x in list(imp.items())[:15]}
+            info["parameters_with_no_measurable_effect"] = [k for k, x in imp.items() if x <= 0.0002]
         if kind == "clf":
             ok = ~np.isnan(v["oof"]) & ncr[idx]
             cal = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0).fit(v["oof"][ok], y[idx][ok])
             info["locked_test_before_calibration"] = lit_metrics(y[test], p, groups[test], baseline_lit(d.iloc[idx], y[idx], d[test]))
             p = np.clip(cal.predict(p), 0.0, 1.0)
-            info["locked_test"] = lit_metrics(y[test], p, groups[test], baseline_lit(d.iloc[idx], y[idx], d[test]))
+            base = baseline_lit(d.iloc[idx], y[idx], d[test])
+            info["locked_test"] = lit_metrics(y[test], p, groups[test], base)
+            save_locked(name, d[test], y[test], p, base)
             t = info["locked_test"]
             info["meets_plan_bar"] = bool(t["auroc"] >= LIT_AUROC and t["ece"] <= LIT_ECE)
             info["meets_target_error_below_1_percent"] = bool(t["error_rate_ci95"][1] < TARGET_ERROR)
         else:
-            info["locked_test"] = hourly_metrics(y[test], p, groups[test], baseline_hour(d.iloc[idx], y[idx], d[test]))
+            base = baseline_hour(d.iloc[idx], y[idx], d[test])
+            info["locked_test"] = hourly_metrics(y[test], p, groups[test], base)
+            save_locked(name, d[test], y[test], p, base)
             gain = info["locked_test"]["mae_gain_over_baseline_ci95"]
             info["beats_baseline"] = bool(gain[0] > 0)  # the whole interval is on the better side
     else:
@@ -324,19 +411,19 @@ def run_head(name, kind, d, cols, target, trials=None, budget=None):
     return saved, info
 
 
-def train_lit(e, trials=None, budget=None):
+def train_lit(e, trials=None, budget=None, incumbent=None):
     d = e[e["lit"].notna()].copy()
-    return run_head("lit", "clf", d, STATIC, "lit", trials, budget)
+    return run_head("lit", "clf", d, STATIC, "lit", trials, budget, incumbent)
 
 
-def train_hourly(e, s, target, trials=None, budget=None):
+def train_hourly(e, s, target, trials=None, budget=None, incumbent=None):
     if s.empty or target not in s:
         return None, {"head": target, "rows": 0, "skipped": "no rows"}
     d = s[s[target].notna()].merge(e, on="edge_id")
     if len(d) > MAX_ROWS:
         d = d.sample(n=MAX_ROWS, random_state=0)  # a random sample of rows; blocks are still held out whole
     d[[c for c in STATIC + TIME if c not in CATEGORICAL and c in d]] = d[[c for c in STATIC + TIME if c not in CATEGORICAL and c in d]].astype("float32")
-    return run_head(target, "reg", d, STATIC + TIME, target, trials, budget)
+    return run_head(target, "reg", d, STATIC + TIME, target, trials, budget, incumbent)
 
 
 # ---------------------------------------------------------------- report
@@ -362,7 +449,7 @@ def report(metrics, e, s):
             lines += ["", "Locked test (areas the model never saw):", ""]
             lines += [f"- {k}: {v}" for k, v in t.items() if k != "error_when_sure"]
             if "error_when_sure" in t:
-                lines += ["", "Error on only the streets the model is sure about:", ""] + table(t["error_when_sure"])
+                lines += ["", "How often the model is wrong, counting only the streets it is sure about", ""] + table(t["error_when_sure"])
             if "most_useful_parameters" in m:
                 lines += ["", "Parameters that moved the held-out score most (drop when scrambled):", ""]
                 lines += table([{"parameter": k, "score_drop": v} for k, v in m["most_useful_parameters"].items()])
@@ -381,15 +468,43 @@ def report(metrics, e, s):
 
 
 def main():
-    global TRIALS
+    global TRIALS, BUDGET_S, OUT, ENGINE, XGB_DEVICE
     ap = argparse.ArgumentParser()
     ap.add_argument("--trials", type=int, default=TRIALS)
-    TRIALS = ap.parse_args().trials
+    ap.add_argument("--budget", type=int, default=BUDGET_S, help="most seconds spent tuning one head")
+    ap.add_argument("--heads", default="all", help="e.g. lit,traffic_ratio: retrain only these; the others keep their saved "
+                                                    "model and metrics (fine-tuning one head without a full run)")
+    ap.add_argument("--engine", choices=["sklearn", "xgb"], default="sklearn",
+                    help="xgb: XGBoost, on the GPU when CUDA is available (the GPU must not be busy with Ollama)")
+    a = ap.parse_args()
+    TRIALS, BUDGET_S, ENGINE = a.trials, a.budget, a.engine
+    if ENGINE == "xgb":
+        XGB_DEVICE = xgb_device()
+        print(f"Engine: XGBoost on {XGB_DEVICE}", flush=True)
+    heads = ["lit"] + HOURLY if a.heads == "all" else [h.strip() for h in a.heads.split(",")]
+    bad = [h for h in heads if h not in ["lit"] + HOURLY]
+    if bad:
+        sys.exit(f"Unknown head(s) {bad}: choose from {['lit'] + HOURLY}")
+    old = {}
+    if os.path.exists(os.path.join(OUT, "metrics.json")):
+        old = {m["head"]: m for m in json.load(open(os.path.join(OUT, "metrics.json")))}
+    # every run is a candidate: models, metrics and locked answers go to ml/out/candidates/<run>/, never over the models
+    # in use. ml/registry.py checks a candidate against the release gate and only then promotes it.
+    OUT = os.path.join(OUT, "candidates", time.strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(OUT, exist_ok=True)
+    json.dump({"heads": heads, "trials": TRIALS, "budget_s": BUDGET_S, "engine": ENGINE,
+               "device": XGB_DEVICE if ENGINE == "xgb" else "cpu", "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+               "data_blocks_sha256": blocks_hash(os.path.join(ML, "data", "blocks"))},
+              open(os.path.join(OUT, "run.json"), "w"), indent=1)
+    print(f"Candidate run: {OUT}", flush=True)
     e, s = load(os.path.join(ML, "data", "blocks"))
     os.makedirs(os.path.join(OUT, "models"), exist_ok=True)
-    metrics = []
-    lit, m = train_lit(e)
-    metrics.append(m)
+    metrics = {}
+    if "lit" in heads:
+        lit, m = train_lit(e, incumbent=old.get("lit", {}).get("params"))
+        metrics["lit"] = m
+    else:
+        lit = None
     if lit is not None:
         pickle.dump(lit, open(os.path.join(OUT, "models", "lit.pkl"), "wb"))
         unknown = e[e["lit"].isna()]
@@ -398,11 +513,13 @@ def main():
             pd.DataFrame({"edge_id": unknown["edge_id"], "lat": unknown["lat"], "lon": unknown["lon"], "region": unknown["region"],
                           "p_lit": p.round(3)}).to_csv(os.path.join(OUT, "lit_predictions.csv.gz"), index=False)
             m["unlabelled_streets_predicted"] = int(len(unknown))
-    for target in HOURLY:
-        mod, m = train_hourly(e, s, target)
-        metrics.append(m)
+    for target in [h for h in HOURLY if h in heads]:
+        mod, m = train_hourly(e, s, target, incumbent=old.get(target, {}).get("params"))
+        metrics[target] = m
         if mod is not None:
             pickle.dump(mod, open(os.path.join(OUT, "models", f"{target}.pkl"), "wb"))
+    # heads not retrained this run keep their last metrics (and saved model)
+    metrics = [metrics.get(h) or old[h] for h in ["lit"] + HOURLY if h in metrics or h in old]
     json.dump(metrics, open(os.path.join(OUT, "metrics.json"), "w"), indent=1, default=str)
     text = report(metrics, e, s)
     open(os.path.join(OUT, "report.md"), "w").write(text)
