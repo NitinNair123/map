@@ -40,6 +40,7 @@
     <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2 20h20L12 3Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v4M12 17v.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-store" viewBox="0 0 24 24"><path d="M3 9 5 4h14l2 5M4 9v11h16V9M3 9h18M9 20v-6h6v6" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
     <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M12 20V5m0 0-6 6m6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-volume" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="m16 9 6 6m0-6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-bike" viewBox="0 0 24 24"><circle cx="5.5" cy="17" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="18.5" cy="17" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5.5 17 9 9h6l3.5 8M9 9 12 17h-3M14 5h2l1 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
@@ -74,6 +75,8 @@
   <div class="chips">
     <button class="chip" id="timeChip"><svg><use href="#i-clock"/></svg><span id="timeLabel">Leave now</span></button>
     <input type="datetime-local" id="timeInput" class="sr-only" aria-label="Departure time">
+    <button class="chip round-chip" id="voiceBtn" aria-label="Say where you want to go"><svg><use href="#i-mic"/></svg></button>
+    <button class="chip" id="wishChip" hidden aria-label="Remove voice wishes"><span id="wishLabel"></span><svg><use href="#i-close"/></svg></button>
     <span class="spacer"></span>
     <button class="chip round-chip" id="addStopBtn" aria-label="Add a stop"><svg><use href="#i-plus"/></svg></button>
     <button class="chip round-chip" id="locateBtn" aria-label="Show my location"><svg><use href="#i-locate"/></svg></button>
@@ -164,5 +167,6 @@
 <script src="/vendor/maplibre/maplibre-gl.js"></script>
 <script src="/vendor/maplibre/leaflet-maplibre-gl.js"></script>
 <script src="/app/app.js"></script>
+<script src="/app/voice.js"></script>
 </body>
 </html>

@@ -24,13 +24,14 @@ from urllib.request import Request, urlopen
 import buses
 import crime
 import gemini
+import voice
 import places
 import gtfs
 import traffic
 from import_osm import search as offline_search
 from rating import REPORT_TYPES
 from reports import Reports
-from safety import MODES, SIGNALS, dist, seg_dist
+from safety import MODES, SIGNALS, WISHES, dist, seg_dist
 from tiles import (TileStore, TooFar, geoapify, mapillary, nightlights, overture_buildings, overture_places, overture_roads, tiles_near,
                    warm_overture)
 
@@ -93,7 +94,7 @@ RANKER = load_ranker()
 FEELS = ("safe", "uneasy", "unsafe")
 FEEL_MEASURES = ("length_m", "lit_pct", "dark_pct", "main_pct", "open_now", "isolated_m", "nothing_open_m", "help_gap_m", "cctv",
                  "police_m", "unrated_pct")
-LIMITS = {"report": (60, 3600), "trip": (60, 3600), "update": (120, 600), "read": (300, 600)}
+LIMITS = {"voice": (30, 600), "report": (60, 3600), "trip": (60, 3600), "update": (120, 600), "read": (300, 600)}
 # map-building requests running at once; the rest wait, so a burst of users can't run a small server out of memory
 BUSY = threading.BoundedSemaphore(6)
 HEAVY = ("/api/heat", "/api/explain", "/api/havens", "/api/route")
@@ -159,6 +160,9 @@ print("Live traffic:", "on" if traffic.LIVE.key else "off (no key in data/tomtom
 gemini.LIVE = gemini.Gemini(key_file("gemini_key.txt", "GEMINI_KEY"), os.path.join(DATA_DIR, "gemini_hours.json"))
 SIGNALS.append(gemini.signal)
 print("Gemini shop hours and live events:", "on" if gemini.LIVE.key else "off (no key in data/gemini_key.txt)", flush=True)
+SARVAM_KEY = key_file("sarvam_key.txt", "SARVAM_KEY")  # dashboard.sarvam.ai
+print("Voice requests:", "Sarvam speech-to-text on" if SARVAM_KEY else "typed only (no key in data/sarvam_key.txt)",
+      "+ Gemini" if gemini.LIVE.key else "+ rules only (no Gemini key)", flush=True)
 places.LIVE = places.Places(key_file("google_places_key.txt", "GOOGLE_PLACES_KEY"), os.path.join(DATA_DIR, "places_hours.json"))
 print("Google Places shop hours:", "on" if places.LIVE.key else "off (no key in data/google_places_key.txt)", flush=True)
 SURVEY = load_csv(SURVEY_PATH, REPORT_TYPES, source="Street survey")
@@ -525,6 +529,9 @@ class Handler(SimpleHTTPRequestHandler):
                 a, b = latlon(q["from"][0]), latlon(q["to"][0])
                 via = [latlon(v) for v in q.get("via", [""])[0].split(";") if v][:5]  # stops, in order
                 prefer = {k: min(3, max(0, int(w))) for k, _, w in (p.partition(":") for p in q.get("prefer", [""])[0].split(",") if p)}
+                wishes = {w for w in q.get("wish", [""])[0].split(",") if w}  # "main", "police": what to stay on or near
+                if not wishes <= set(WISHES):
+                    raise ValueError("wish must be main or police")
                 when = self.when(q)
                 rain = is_raining(a, when)
                 mode = q.get("mode", ["walk"])[0]
@@ -534,11 +541,11 @@ class Handler(SimpleHTTPRequestHandler):
                 area = store.for_trip(a, b, via)
                 traffic.LIVE.warm(traffic.sample(area, a, b) if traffic.is_now(when, time.time()) else [])
                 alerts = ai_extras(area, [a, *via, b], when)
-                routes = area.routes(a, b, when, rain, mode, extra, via, prefer)
+                routes = area.routes(a, b, when, rain, mode, extra, via, prefer, wishes)
                 # Google hours for the shops these routes actually pass; new hours change the scores, so score again
                 pts = [c for r in routes[:3] for c in r["coords"][::4]]  # safest, balanced, fastest: the ones people pick
                 if places.LIVE.fill_hours(area, lambda p: any(dist(p, c) <= 80 for c in pts)):
-                    routes = area.routes(a, b, when, rain, mode, extra, via, prefer)
+                    routes = area.routes(a, b, when, rain, mode, extra, via, prefer, wishes)
                 learned_shadow(routes, when, mode)
                 for r in routes:  # the districts each route passes through, as background only (never scored)
                     r["area"] = crime.around(CRIME, crime.along(r["coords"]))
@@ -573,6 +580,8 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/voice":
+            return self.voice()
         try:
             body = self.read_json()
             kind = "report" if path in ("/api/report", "/api/route-feel") else "trip" if path == "/api/trip" else "update"
@@ -593,6 +602,35 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception:
             return self.server_error()
         self.send_json({"error": "not found"}, 404)
+
+    def voice(self):
+        """One spoken (audio/* body) or typed ({"text"}) request -> {"text", "form", "by"}. Nothing is stored or logged."""
+        try:
+            kind = self.headers.get("Content-Type", "")
+            if kind.startswith("audio/"):
+                n = int(self.headers.get("Content-Length", 0))
+                if not 0 < n <= voice.MAX_AUDIO or "Transfer-Encoding" in self.headers:
+                    self.close_connection = True
+                    raise ValueError("recording too long")
+                audio, body = self.rfile.read(n), None
+            else:
+                body = self.read_json()  # read before answering, or the unread body is taken for the next request
+            if not allowed("voice", self.address()):
+                return self.send_json({"error": "Too many voice requests, please wait a few minutes."}, 429)
+            if body is None:
+                if not SARVAM_KEY:
+                    return self.send_json({"error": "Voice input is off on this server. Type your request instead."}, 503)
+                text = voice.transcribe(audio, kind.split(";")[0], SARVAM_KEY)
+                if text is None:
+                    return self.send_json({"error": "Couldn't hear that clearly. Try again or type it."}, 503)
+            else:
+                text = str(body["text"]).strip()[:voice.MAX_TEXT]
+            form, by = voice.handle(text, gemini.LIVE.key) if text else (voice.rules(""), "rules")
+            return self.send_json({"text": text, "form": form, "by": by})
+        except (KeyError, ValueError, TypeError) as e:
+            return self.send_json({"error": f"bad request: {e}"}, 400)
+        except Exception:
+            return self.server_error()
 
     def report(self, body):
         lat, lon = latlon((body["lat"], body["lon"]))

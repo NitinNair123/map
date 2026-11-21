@@ -157,6 +157,33 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(h[0]["name"], "City Pharmacy")  # the only place open at 2 am
 
 
+class WishTest(unittest.TestCase):
+    """"Stay on main roads" / "near police" from the voice assistant steer the route search itself."""
+    def area(self, highway="residential", police=False):
+        els = [way(1, [1, 2], [A, B], highway="residential"), way(2, [1, 10, 11, 12, 13, 2], NORTH, highway=highway)]
+        return Area({"elements": els + ([node(9, (28.0035, 77.0), amenity="police"), node(8, (28.0035, 77.003), amenity="police")] if police else [])})
+
+    def test_main_roads_wish_takes_the_main_road(self):
+        area = self.area(highway="primary")
+        plain = {r["kind"]: r for r in area.routes(A, B, NOON)}
+        wished = {r["kind"]: r for r in area.routes(A, B, NOON, wishes={"main"})}
+        self.assertEqual(plain["fastest"]["stats"]["main_pct"], 0)  # the short side street
+        self.assertEqual(wished["fastest"]["stats"]["main_pct"], 100)  # 1.4x longer, but on the main road
+        self.assertEqual(wished["safest"]["stats"]["main_pct"], 100)
+
+    def test_police_wish_passes_the_police_station(self):
+        area = self.area(police=True)
+        # every part of the north street is within 400 m of a police station; the middle of the direct street isn't
+        plain = {r["kind"]: r for r in area.routes(A, B, NOON)}
+        wished = {r["kind"]: r for r in area.routes(A, B, NOON, wishes={"police"})}
+        self.assertLess(plain["fastest"]["length_m"], 300)
+        self.assertGreater(wished["fastest"]["length_m"], 350)
+
+    def test_no_wish_leaves_routes_unchanged(self):
+        area = self.area(highway="primary")
+        self.assertEqual([r["coords"] for r in area.routes(A, B, NOON)], [r["coords"] for r in area.routes(A, B, NOON, wishes=())])
+
+
 class TimeTest(unittest.TestCase):
     def test_daylight(self):
         self.assertEqual(daylight(28.6, 77.2, NOON), 1.0)

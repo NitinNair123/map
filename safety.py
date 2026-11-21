@@ -24,6 +24,9 @@ CELL = 0.001  # spatial grid cell in degrees, roughly 100 m
 SEARCH_LAMBDAS = (0, 1, 3, 6, 10, 20)
 DETOUR_ROUNDS = 3
 MAX_DETOUR = 1.8  # candidates longer than this times the fastest route are dropped
+# what the person asked for on the way ("stay on main roads", "near police"): extra cost on streets that don't give it.
+# 1.0 doubles a side street's cost, so a main road up to twice as long still wins, within MAX_DETOUR.
+WISHES = {"main": 1.0, "police": 0.5}
 BALANCED_DETOUR = 1.25
 
 COMPASS = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"]
@@ -570,26 +573,39 @@ class Area:
         path.reverse()
         return path
 
-    def candidates(self, src, dst, credits, mode="walk", max_extra_m=None):
+    def wish_costs(self, wishes):
+        """{edge: extra cost} for streets that don't give what was asked for; every candidate is searched with it."""
+        cost = defaultdict(float)
+        for ei, e in enumerate(self.edges):
+            if "main" in wishes and e["highway"] not in rating.MAIN_ROADS:
+                cost[ei] += WISHES["main"]
+            if "police" in wishes and e["police_m"] > 400:  # the distance rating.py counts as police nearby
+                cost[ei] += WISHES["police"]
+        return cost
+
+    def candidates(self, src, dst, credits, mode="walk", max_extra_m=None, base=None):
         """Distinct ways from src to dst: one per safety weighting, plus detours that avoid the streets already found.
-        Ways longer than MAX_DETOUR times the shortest, or more than max_extra_m longer, are dropped."""
+        Ways costing more than MAX_DETOUR times the cheapest, or more than max_extra_m longer, are dropped; without
+        wishes cost is length. base: extra cost per street from the person's wishes, so even the fastest candidate follows them."""
         found = []
         for lam in SEARCH_LAMBDAS:
-            found.append(self._search(src, dst, lam, credits, mode=mode))
+            found.append(self._search(src, dst, lam, credits, base, mode))
         for lam in (0, 3, 10):
-            penalty = defaultdict(float)
+            penalty = defaultdict(float, base or {})
             path = found[SEARCH_LAMBDAS.index(lam)]
             for _ in range(DETOUR_ROUNDS):
                 for _, ei in path:
                     penalty[ei] += 0.6
                 path = self._search(src, dst, lam, credits, penalty, mode)
                 found.append(path)
-        length = lambda p: sum(self.edges[ei]["length"] for _, ei in p)
-        fastest = min(length(p) for p in found) or 1
-        kept = []  # (path, its edges, its length), shortest first
-        for p in sorted(found, key=length):
-            edges, lp = {ei for _, ei in p}, length(p)
-            if lp > MAX_DETOUR * fastest or (max_extra_m is not None and lp > fastest + max_extra_m):
+        real = lambda p: sum(self.edges[ei]["length"] for _, ei in p)
+        # with wishes, a street that doesn't give them counts longer, so "fastest" is the fastest way that follows them
+        cost = lambda p: sum(self.edges[ei]["length"] * (1 + (base or {}).get(ei, 0)) for _, ei in p)
+        cheapest, fastest = min(cost(p) for p in found) or 1, min(real(p) for p in found)
+        kept = []  # (path, its edges, its length), cheapest first
+        for p in sorted(found, key=cost):
+            edges, lp = {ei for _, ei in p}, real(p)
+            if cost(p) > MAX_DETOUR * cheapest or (max_extra_m is not None and lp > fastest + max_extra_m):
                 continue
             # sharing 90% of its length with a kept candidate makes it the same way with a small wiggle
             if any(sum(self.edges[ei]["length"] for ei in edges & k) >= 0.9 * min(lp, lk) for _, k, lk in kept):
@@ -597,20 +613,22 @@ class Area:
             kept.append((p, edges, lp))
         return [p for p, _, _ in kept]
 
-    def routes(self, start, end, when, rain=False, mode="walk", max_extra_min=None, via=(), prefer=None):
+    def routes(self, start, end, when, rain=False, mode="walk", max_extra_min=None, via=(), prefer=None, wishes=()):
         """Every candidate route is scored; returns the safest, a balanced one (at most 25% longer), the fastest,
         then every other scanned route by rank (kind "#4" and so on).
         Each street is rated for the moment the trip reaches it, so a shop that shuts before you get there doesn't count.
-        via: stops visited in order. prefer: {place group: 0-3} the user wants more of on the way."""
+        via: stops visited in order. prefer: {place group: 0-3} the user wants more of on the way.
+        wishes: "main" and/or "police" (see WISHES); then "fastest" is the fastest way that follows them."""
         rated = self.ratings(when, rain, mode)
         credits = [rating.credit(s, c) for s, c in rated]
         stops = [self.nearest(p, mode) for p in (start, *via, end)]
         dst = stops[-1]
         max_extra_m = None if max_extra_min is None else max_extra_min * 60 * MODES[mode]
-        legs = [self.candidates(a, b, credits, mode, max_extra_m) for a, b in zip(stops, stops[1:])]
+        base = self.wish_costs(wishes) if wishes else None
+        legs = [self.candidates(a, b, credits, mode, max_extra_m, base) for a, b in zip(stops, stops[1:])]
         # shortcut: the k-th candidate of every leg joined, not every combination; enough variety for a few stops
         paths = [[step for leg in legs for step in leg[min(k, len(leg) - 1)]] for k in range(max(map(len, legs)))]
-        fastest_len = sum(self.edges[ei]["length"] for _, ei in paths[0]) or 1  # each leg's candidates come shortest first
+        fastest_len = sum(self.edges[ei]["length"] for _, ei in paths[0]) or 1  # each leg's candidates come cheapest (shortest) first
         passing = {}  # (edge, 5-minute slot) -> (score, confidence), shared by all candidates
         scored = [self._summary("", p, when, fastest_len, dst, rain, mode, passing, prefer) for p in paths]
         ranked = sorted(scored, key=lambda r: (-r["score"], r["length_m"]))  # the score shown is the score ranked

@@ -90,6 +90,17 @@ and open the https link on the phone. Then use "Add to Home Screen".
   A second call per area and hour looks for VIP movement, barricades, closures and protests. Each alert must name a
   street or landmark that place search finds near the trip, or it is dropped. Alerts plug in through `safety.SIGNALS`:
   ones within 400 m take 20 points off those streets around that time, wider ones only show a warning. At most 300 calls a day.
+- **Voice assistant** (mic button next to "Leave now"): say or type where you want to go and what you'd like on the
+  way ("walk to Sector 18 metro at 11 pm, main roads, past a pharmacy", "mujhe CP jaana hai, main road se"). The clip
+  goes to `/api/voice`, which sends it to Sarvam speech-to-text (key from https://dashboard.sarvam.ai in
+  `data/sarvam_key.txt` or `SARVAM_KEY`; Hinglish comes back in Latin letters) and the words to Gemini
+  (`gemini-3.5-flash-lite` on the Interactions API, `store: false`), which only fills a strict form: destination,
+  stops, mode, time, places wanted (`prefer`), and "main roads"/"near police" (`wish`). The server checks every field;
+  without keys, or when Gemini fails, word rules in `voice.py` fill the same form. Routes are still picked by the rules,
+  and the app reads back only measured facts (main-road share, police distance, places on the way). "Bachao"/"help me"
+  opens the SOS countdown; voice never sends anything. Nothing said is stored or logged. Without a Sarvam key the
+  assistant takes typed requests only. `wish=main` doubles the search cost of streets that aren't main roads,
+  `wish=police` adds half for streets over 400 m from a police station (`safety.WISHES`).
 - **Google Places hours** (key from Google Cloud with the Places API (New) on, in `data/google_places_key.txt` or
   `GOOGLE_PLACES_KEY`; it stays on the server): after the routes are found, the shops the top three pass that have no
   opening hours are covered with Nearby Search circles (50 m, the 20 nearest Google places each, at most 40 calls a
