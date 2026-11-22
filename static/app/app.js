@@ -84,6 +84,7 @@ const state = {
   mode: store.get("mode", "walk"), groups: new Set(store.get("groups", Object.keys(GROUP))),
   trip: null,
   installPrompt: null,
+  wishes: [], voicePrefer: {}, // from a voice request: "main"/"police" to stay on or near, and places wanted on the way (voice.js)
 };
 
 // ---------- map ----------
@@ -314,9 +315,9 @@ const whenParam = () => isoLocal(state.when || new Date());
 // ---------- routing ----------
 // Places the user wants more of on the way, 0-3 each (settings); the server adds at most 10 points for them.
 const PRIORITY = { pharmacy: "Medical stores", hospital: "Hospitals", food: "Places to eat", shop: "Shops", fuel: "Petrol pumps", transit: "Bus and metro stops" };
-const preferParam = () => Object.entries(store.get("prefer", {})).filter(([, w]) => w > 0).map(([k, w]) => `${k}:${w}`).join(",");
+const preferParam = () => Object.entries({ ...store.get("prefer", {}), ...state.voicePrefer }).filter(([, w]) => w > 0).map(([k, w]) => `${k}:${w}`).join(",");
 const routeQuery = (from, at, stopFrom) => new URLSearchParams({ from: from.join(","), to: state.to.join(","), at, mode: state.mode,
-  extra: store.get("extra", ""), via: viaParam(stopFrom), prefer: preferParam() });
+  extra: store.get("extra", ""), via: viaParam(stopFrom), prefer: preferParam(), wish: state.wishes.join(",") });
 async function maybeRoute() {
   if (!state.to) return renderIdle();
   let from = state.from;
