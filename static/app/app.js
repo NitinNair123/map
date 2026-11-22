@@ -40,6 +40,50 @@ function segDist(p, a, b) {
   const t = Math.max(0, Math.min(1, (px * bx + py * by) / (bx * bx + by * by || 1)));
   return Math.hypot(px - t * bx, py - t * by);
 }
+// ---------- ride apps ----------
+// Uber's free deep link takes several drop points ("multi-stop", developer.uber.com deep-links docs), so a cab can be
+// steered onto our route; Ola's takes pickup and drop only. Every stop makes the driver pull over (and may cost waiting
+// time), so we add at most 2, where our route leaves the fastest drive.
+const RIDE_OFF_M = 150, RIDE_MAX_STOPS = 2;
+function rideStops(r, fastest) {
+  if (!fastest || fastest === r || r.same_as === "fastest" || (r.mode || "walk") !== "car") return [];
+  const f = fastest.coords, off = (p) => { let d = Infinity; for (let i = 0; i < f.length - 1; i++) d = Math.min(d, segDist(p, f[i], f[i + 1])); return d; };
+  const runs = []; let cur = null;  // each stretch that leaves the fastest road gives one stop, at its farthest point
+  r.coords.forEach((p, i) => {
+    const d = off(p);
+    if (d <= RIDE_OFF_M) { cur = null; return; }
+    if (!cur) runs.push(cur = { d: 0 });
+    if (d > cur.d) Object.assign(cur, { d, i, p });
+  });
+  return runs.sort((a, b) => b.d - a.d).slice(0, RIDE_MAX_STOPS).map((x) => ({ pt: x.p, i: x.i, label: "On the SafeRoute route" }));
+}
+function rideLinks(a, b, stops, fromLabel, toLabel) {
+  const n = (x) => +x.toFixed(6);
+  const loc = (p, name) => JSON.stringify({ latitude: n(p[0]), longitude: n(p[1]), ...(name ? { addressLine1: name } : {}) });
+  const uber = new URLSearchParams({ pickup: loc(a, fromLabel) });
+  [...stops, { pt: b, label: toLabel }].forEach((s, i) => uber.append(`drop[${i}]`, loc(s.pt, s.label)));
+  const ola = new URLSearchParams({ lat: n(a[0]), lng: n(a[1]), drop_lat: n(b[0]), drop_lng: n(b[1]), landing_page: "bk" });
+  if (fromLabel) ola.set("address", fromLabel);
+  if (toLabel) ola.set("drop_address", toLabel);
+  // Uber's docs encode spaces as %20
+  return { uber: `https://m.uber.com/looking?${uber.toString().replace(/\+/g, "%20")}`, ola: `https://olawebcdn.com/assets/ola-universal-link.html?${ola}` };
+}
+function rideBox(r) {
+  const near = (pt) => r.coords.reduce((best, c, i) => (metres(c, pt) < metres(r.coords[best], pt) ? i : best), 0);
+  const steer = rideStops(r, state.routes.find((x) => x.kind === "fastest"));
+  // the user's own stops go to Uber too, in the order the route passes them
+  const stops = [...state.stops.filter((s) => s.pt).map((s) => ({ pt: s.pt, i: near(s.pt), label: s.label })), ...steer].sort((a, b) => a.i - b.i);
+  // the typed start and destination, not the route's ends, which are snapped to the nearest street
+  const l = rideLinks(state.from || r.coords[0], state.to || r.coords[r.coords.length - 1], stops, state.fromLabel, state.toLabel);
+  const how = (r.mode || "walk") !== "car" ? "Switch to Car above to get a cab route we can send to Uber as stops."
+    : steer.length ? `Uber gets ${steer.length} extra ${steer.length === 1 ? "stop" : "stops"} on this route, so the driver follows it there. The driver pulls over at each stop, and Uber may charge for the waiting time.`
+    : "This route is the same as the fastest drive, so no stops are needed.";
+  return `<details class="why" id="rideBox"><summary>Book a cab, auto or bike</summary>
+    <div class="actions" style="grid-template-columns:1fr 1fr"><a class="btn" id="uberLink" href="${esc(l.uber)}" target="_blank" rel="noopener">Uber${stops.length ? ` · ${stops.length} ${stops.length === 1 ? "stop" : "stops"}` : ""}</a>
+      <a class="btn" id="olaLink" href="${esc(l.ola)}" target="_blank" rel="noopener">Ola</a></div>
+    <p class="muted" style="margin:8px 0 12px">${esc(how)} Ola only takes the pickup and drop, so its driver picks the way. You book and pay in their app; SafeRoute doesn't see the ride.</p></details>`;
+}
+
 async function api(path, body, timeoutMs = 90000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -481,6 +525,7 @@ function renderRoutes() {
       <button class="btn btn-primary" id="startBtn">${icon(MODE[r.mode || "walk"].icon)}${MODE[r.mode || "walk"].start}</button>
       <button class="btn" id="shareRouteBtn" aria-label="Share this trip">${icon("share")}</button>
     </div>
+    ${rideBox(r)}
     ${groupChips(r)}
     <div class="strips">${state.routes.filter((x) => !x.same_as && isMain(x)).map((x) => stripRow(x, r)).join("")}
       <div class="strip-key"><span><i style="background:var(--risk)"></i>300 m or more with nothing open</span><span><i style="background:#6941c6"></i>unlit</span><span><i style="background:var(--safe);width:8px;height:8px;border-radius:50%"></i>open</span><span><i style="background:#c0c5d0;width:8px;height:8px;border-radius:50%"></i>hours unknown</span></div></div>
