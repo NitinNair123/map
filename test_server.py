@@ -58,6 +58,10 @@ class ServerTest(unittest.TestCase):
         code, out = self.call(f"/api/route?from={A[0]},{A[1]}&to={B[0]},{B[1]}&at={at}&via=28.0005,77.0015&prefer=pharmacy:3,food:0")
         self.assertEqual(code, 200)
         self.assertGreater(out["routes"][0]["length_m"], 350)  # through the stop on the lit street
+        code, out = self.call(f"/api/route?from={A[0]},{A[1]}&to={B[0]},{B[1]}&at={at}&wish=main,police")
+        self.assertEqual(code, 200)
+        code, out = self.call(f"/api/route?from={A[0]},{A[1]}&to={B[0]},{B[1]}&at={at}&wish=shortcuts")
+        self.assertEqual((code, out["error"]), (400, "bad request: wish must be main or police"))
         self.assertEqual(self.call(f"/api/route?from={A[0]},{A[1]}&to={B[0]},{B[1]}&prefer=pharmacy:lots")[0], 400)
 
     def test_heat_havens_search(self):

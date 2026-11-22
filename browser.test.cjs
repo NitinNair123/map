@@ -158,3 +158,71 @@ test("live trip switches when another way becomes clearly safer", async () => {
   assert.deepEqual(errors, []);
   await ctx.close();
 });
+
+test("voice: a typed request sets the wishes, routes on main roads and reads back what was measured", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.goto(BASE + "/app/");
+  await page.click("#voiceBtn");
+  assert.ok(await page.isVisible("#recBtn"), "the mic is offered where recording works");
+  await page.fill("#voiceText", "walk to city pharmacy at 11 pm, stay on main roads, past a chemist");
+  const req = page.waitForRequest((r) => r.url().includes("/api/route?"), { timeout: 15000 });
+  await page.click("#voiceSend");
+  const q = new URL((await req).url()).searchParams;
+  assert.equal(q.get("wish"), "main");
+  assert.match(q.get("prefer"), /pharmacy:3/);
+  assert.equal(q.get("mode"), "walk");
+  assert.match(q.get("at"), /T23:00/);
+  await page.waitForSelector("#startBtn", { timeout: 15000 });
+  assert.match(await page.textContent("#wishChip"), /Main roads · Medical stores/);
+  await page.waitForSelector("#toast:not([hidden])");
+  assert.match(await page.textContent("#toast"), /route: \d+ minutes, \d+ percent on main roads/);
+  await page.click("#wishChip");  // one tap removes the voice wishes and routes again without them
+  assert.ok(await page.isHidden("#wishChip"));
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("voice: a cry for help opens the SOS countdown and never sends by itself", async () => {
+  const { ctx, page, errors } = await phone([{ name: "Mum", phone: "+91 98765 43210" }]);
+  await page.goto(BASE + "/app/");
+  await page.click("#voiceBtn");
+  await page.fill("#voiceText", "bachao");
+  await page.click("#voiceSend");
+  await page.waitForSelector("#sosOverlay:not([hidden])");
+  assert.ok(await page.isVisible("#sosCancel"), "the countdown can be cancelled");
+  await page.click("#sosCancel");
+  assert.ok(await page.isHidden("#sosOverlay"));
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("voice: a spoken request is recorded and sent to the server as audio", async () => {
+  const mic = await chromium.launch({ args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"] });
+  const ctx = await mic.newContext({ ...devices["Pixel 7"], geolocation: A, permissions: ["geolocation", "microphone"] });
+  await ctx.addInitScript(() => localStorage.setItem("sr.onboarded", "true"));
+  await ctx.route(/^https:\/\//, (r) => r.abort());
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  let sent = null;
+  await page.route("**/api/voice", (r) => {  // Sarvam and Gemini aren't reachable from tests: answer as the server would
+    sent = { type: r.request().headers()["content-type"], bytes: r.request().postDataBuffer()?.length || 0 };
+    r.fulfill({ contentType: "application/json", body: JSON.stringify({ text: "mujhe city pharmacy jaana hai", by: "ai", form: {
+      intent: "route", destination: "city pharmacy", stops: [], mode: "", time: "", prefer: [], main_roads: false, near_police: true, asks: ["feeling"] } }) });
+  });
+  await page.goto(BASE + "/app/");
+  await page.click("#voiceBtn");
+  await page.click("#recBtn");
+  await page.waitForSelector("text=Listening…");
+  await page.waitForTimeout(800);
+  const req = page.waitForRequest((r) => r.url().includes("/api/route?"), { timeout: 15000 });
+  await page.click("#recBtn");
+  assert.equal(new URL((await req).url()).searchParams.get("wish"), "police");
+  assert.match(sent.type, /^audio\//);
+  assert.ok(sent.bytes > 0, "the clip has sound in it");
+  await page.waitForSelector("#toast:not([hidden])");
+  assert.match(await page.textContent("#toast"), /police|no police station mapped/);
+  assert.match(await page.textContent("#toast"), /can't measure .* how it feels/);
+  assert.deepEqual(errors, []);
+  await mic.close();
+});

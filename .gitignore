@@ -4,3 +4,10 @@ graphify-out/
 node_modules/
 ml/data/
 ml/out/
+# secrets: never commit API keys or tokens
+.env
+.env.*
+*_key.txt
+*_token.txt
+api_keys.txt
+*.pem

@@ -73,10 +73,17 @@ def score(saved, route, other, daylight):
     return float(margin(w, vec({"A": route, "B": other})[None, :], np.array([daylight < 0.5]))[0])
 
 
+CLAUDE_ONLY = "--claude-only" in sys.argv
+QWEN_TAUGHT = "--qwen-taught" in sys.argv
+WHO = "Claude" if CLAUDE_ONLY else "Qwen (taught Claude's method) and Claude" if QWEN_TAUGHT else "Qwen and Claude"
+
+
 def labels():
     """{pair id: (safer "A"/"B", weight, source)} plus counts of what went in and what was left out."""
     human = rank.human_labels(os.path.join(DATA, "labels_human.csv"))
-    qwen = rank.llm_labels(os.path.join(DATA, "labels_llm.csv"))
+    # --claude-only: learn from Claude's answers (and people's) alone, e.g. while Qwen is kept off for memory
+    # --qwen-taught: Qwen's answers after it was taught Claude's method (ml/label_llm.py --method claude)
+    qwen = {} if CLAUDE_ONLY else rank.llm_labels(os.path.join(DATA, "labels_qwen_taught.csv" if QWEN_TAUGHT else "labels_llm.csv"))
     claude = label_claude.load()
     out, info = {}, Counter()
     for i in set(human) | set(qwen) | set(claude):
@@ -150,10 +157,10 @@ def main():
     saved = {"features": KEYS, "caps": {k: c for k, (c, _) in PARAMS.items()}, "day": dict(zip(KEYS, w[:n].round(4).tolist())),
              "night": dict(zip(KEYS, w[n:].round(4).tolist())),
              "metrics": {**info, "held_out_areas": held, "sanity_checks": checks},
-             "note": "score > 0 means route A is safer. Learned from Qwen and Claude answers (and people's when present). Not checked against people."}
+             "note": f"score > 0 means route A is safer. Learned from {WHO} answers (and people's when present). Not checked against people."}
     os.makedirs(OUT, exist_ok=True)
     json.dump(saved, open(os.path.join(OUT, "route_ranker_v2.json"), "w"), indent=1)
-    lines = ["# Route model v2: learned from Qwen and Claude answers", "",
+    lines = [f"# Route model v2: learned from {WHO} answers", "",
              "Who answered which route is safer:", "",
              f"- People: {len(human)} pairs" + ("" if human else " (nobody yet: the A/B page is how people answer)"),
              f"- Qwen (local language model): {len(qwen)} pairs with an A or B answer",
@@ -167,7 +174,7 @@ def main():
     lines += [f"- {nm}: day {c['day']:+}, night {c['night']:+} {'ok' if c['ok'] else 'FAILED'}" for nm, c in checks.items()]
     lines += ["", "Weights (per full 0-1 range of each measure; day / night):", ""]
     lines += [f"- {kk}: {w[j]:+.2f} / {w[n + j]:+.2f}" for j, kk in sorted(enumerate(KEYS), key=lambda t: -abs(w[t[0]]) - abs(w[n + t[0]]))]
-    lines += ["", "These are Qwen's and Claude's judgments from the measured numbers, not people's, and not proof a route is safe."]
+    lines += ["", f"These are {WHO}'s judgments from the measured numbers, not people's, and not proof a route is safe."]
     text = "\n".join(l for l in lines if l is not None) + "\n"
     open(os.path.join(OUT, "route_report.md"), "w", encoding="utf-8").write(text)
     print(text, flush=True)
