@@ -160,7 +160,7 @@ Weights blend from day to night with the real sun position, so dusk counts as du
 - **Routes.** SafeRoute finds many different ways, scores every one in full and ranks them. Candidates come
   from searches over the whole network with `cost = length × (1 + λ·(1 − credit/100))` for λ = 0, 1, 3, 6,
   10 and 20, plus detours found by making the streets already used costlier and searching again. A street's
-  credit is its score scaled by confidence (full at 0.7), and zero when it is not rated. Candidates over 1.8×
+  credit is its score scaled by confidence (full at 0.7), and zero when it is not rated. Candidates over 1.3× (or 200 m on short trips)
   the shortest, or sharing 90% of their length with one already found, are dropped. A route's score is 60% the
   average of its rated streets plus 40% its weakest one, minus penalties for isolated stretches, long gaps
   with nowhere open and detours over 1.3× the fastest route. Safest is the top score, Balanced the top score
