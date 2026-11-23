@@ -838,7 +838,8 @@ function renderTrip() {
 // Android Chrome tells the page the battery level; friends see it on the live map, and at 15% we offer a last-location text
 // The factor that scored lowest, said as what is missing ("main road" alone reads as if the main road were the problem)
 const WEAK_WHY = { "Main road": "it isn't a main road", "Lighting": "it is poorly lit", "People and open places": "few people or open places are around",
-  "Buildings and surroundings": "few buildings face the street", "Police and CCTV": "there is no police or CCTV nearby", "Footpath and ways out": "the footpath and ways out are poor" };
+  "Public transport": "no bus stop or metro is near", "Shops and windows overlooking": "few shops or windows face the street",
+  "Police and CCTV": "there is no police or CCTV nearby", "Footpath": "the footpath is poor", "Openness and ways out": "it is closed in, with few ways out" };
 const LOW_BATTERY = 15;
 navigator.getBattery?.().then((b) => (state.battery = b), () => {});
 function lowBattery(level, pt) {
@@ -1304,7 +1305,7 @@ function onboarding(step = 0) {
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
 addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); state.installPrompt = e; if (!state.to) renderIdle(); });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=27").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=28").catch(() => {});
 
 // ---------- start ----------
 renderIdle();

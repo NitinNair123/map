@@ -808,6 +808,20 @@ class CarMainRoadTest(unittest.TestCase):
                 self.assertGreater(main, lane + 10, (mode, light))
 
 
+    def test_car_may_go_60_percent_longer_for_main_roads(self):
+        # Nitin, 23 Nov 2026: safety first; a car can take main roads up to 60% longer, walking stays at 30%
+        far = (28.0, 77.02)
+        north = [A, (28.0045, 77.0), (28.0045, 77.02), far]  # about 1.5x the direct lane
+        els = [way(1, [1, 2], [A, far], highway="residential"),
+               way(2, [1, 10, 11, 2], north, highway="secondary", name="Ring Road"),
+               node(50, (28.002, 77.01), amenity="police", name="Thana")]
+        els += [node(f"b{i}", (27.999 + 0.0007 * (i % 9), 77.0 + 0.001 * (i // 9)), building="yes") for i in range(9 * 21)]
+        area = Area({"elements": els})
+        car = next(r for r in area.routes(A, far, NIGHT, mode="car") if r["kind"] == "safest")
+        self.assertEqual(car["stats"]["main_pct"], 100)
+        self.assertTrue(all(r["length_m"] <= 1.3 * 1965 + 1 for r in area.routes(A, far, NIGHT)))
+
+
 class LoopTest(unittest.TestCase):
     """22 Nov 2026, Lajpat Nagar to Defence Colony: the safest route drove 1.1 km down to Ring Road and back up the other
     carriageway, because extra main-road metres lifted its average. Such out-and-backs are now dropped."""

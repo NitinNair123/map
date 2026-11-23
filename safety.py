@@ -25,7 +25,7 @@ SEARCH_LAMBDAS = (0, 1, 3, 6, 10, 20)
 DETOUR_ROUNDS = 3
 # Nitin's rule (12 Nov 2026): a route is at most 30% longer than the fastest. Short trips get DETOUR_FLOOR_M instead,
 # because one block over to the main road is more than 30% of a 300 m walk.
-MAX_DETOUR = 1.3
+MAX_DETOUR = {"walk": 1.3, "bike": 1.3, "car": 1.6}  # Nitin, 23 Nov 2026: cars may go 60% longer to stay on main roads
 DETOUR_FLOOR_M = 200
 # what the person asked for on the way ("stay on main roads", "near police"): extra cost on streets that don't give it.
 # 1.0 doubles a side street's cost, so the search strongly prefers main roads; the detour limit then applies to that cost.
@@ -631,7 +631,7 @@ class Area:
         allowed_back = self._doubled_back(ordered[0]) + LOOP_SLACK_M if ordered else 0
         for p in ordered:
             edges, lp = {ei for _, ei in p}, real(p)
-            if cost(p) > max(MAX_DETOUR * cheapest, cheapest + DETOUR_FLOOR_M) or (max_extra_m is not None and lp > fastest + max_extra_m):
+            if cost(p) > max(MAX_DETOUR[mode] * cheapest, cheapest + DETOUR_FLOOR_M) or (max_extra_m is not None and lp > fastest + max_extra_m):
                 continue
             # an out-and-back (down one carriageway to a main road and up the other) only collects good streets to lift
             # the average; a U-turn the cheapest way also needs is allowed
@@ -825,7 +825,7 @@ class Area:
             score = 0.6 * avg + 0.4 * rated[path[weak_i][1]][0]  # weakest link drags the whole route down
             score -= min(15, isolated / 50)
             score -= min(10, max(0, quiet_gap - 300) / 50) if places else 0
-            score -= max(0, length / fastest_len - 1.3) * 20
+            score -= max(0, length / fastest_len - MAX_DETOUR[mode]) * 20
             score *= rated_len / length  # streets too thinly mapped to rate earn nothing, so a mostly unknown way can't top the list
         wanted, bonus = [], 0.0
         for group, w in (prefer or {}).items():
