@@ -132,7 +132,7 @@ class Places:
         with self.lock:
             tmp = self.path + ".tmp"
             with open(tmp, "w") as f:
-                json.dump(self.hours, f)
+                json.dump(dict(self.hours), f)  # a copy: fill_hours adds keys from other route requests meanwhile
             os.replace(tmp, self.path)
 
 

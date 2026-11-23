@@ -16,7 +16,7 @@ import time
 import traceback
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, wait
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -347,6 +347,7 @@ def place_name(pt):
 
 
 HOURS_JOBS = ThreadPoolExecutor(1)
+HOURS_QUEUE = threading.BoundedSemaphore(3)  # waiting hours jobs each hold a whole area in memory, so skip when this many wait
 
 
 def ai_extras(area, stops, when):
@@ -363,7 +364,11 @@ def ai_extras(area, stops, when):
         return hit["pt"] if hit and near(hit["pt"], 3000) else None  # far away means it matched the wrong place
 
     # a new street's hours take Gemini about a minute: the trip doesn't wait (cached hours apply at once), later trips get them
-    hours = HOURS_JOBS.submit(gemini.LIVE.fill_hours, area, lambda p: near(p, 300), where)
+    if HOURS_QUEUE.acquire(blocking=False):
+        hours = HOURS_JOBS.submit(gemini.LIVE.fill_hours, area, lambda p: near(p, 300), where)
+        hours.add_done_callback(lambda _: HOURS_QUEUE.release())
+    else:
+        hours = HOURS_JOBS.submit(lambda: None)  # busy: this trip uses the hours already cached
     try:
         alerts = gemini.LIVE.find_events(a, b, when, where, locate)
         wait([hours], timeout=2)
@@ -406,8 +411,30 @@ def end_trip(t):
     t.update(points=[], dest=None, eta=0, vehicle="", ended=True, updated=time.time())
 
 
+IST = timezone(timedelta(hours=5, minutes=30), "IST")  # India has no daylight saving, so a fixed offset is exact
+
+
+def india_time(text=""):
+    """A time from a request as India time: shop hours and night are judged on the Delhi clock, whatever offset the phone
+    sends or the server's own time zone. No offset means it is already India time; empty means now."""
+    if not text:
+        return datetime.now(IST)
+    t = datetime.fromisoformat(text)
+    return t.replace(tzinfo=IST) if t.tzinfo is None else t.astimezone(IST)
+
+
+def network(address):
+    """The caller for limits and votes: an IPv6 /64 is one home or phone, and changing the rest of it is free."""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return address
+    return str(ipaddress.ip_network(f"{ip}/64", strict=False)) if ip.version == 6 else address
+
+
 def allowed(kind, client):
     """Sliding-window rate limit; drops clients whose window has emptied so the table can't grow forever."""
+    client = network(client)
     limit, window = LIMITS[kind]
     now = time.time()
     with lock:
@@ -494,7 +521,7 @@ class Handler(SimpleHTTPRequestHandler):
         return ip
 
     def when(self, q):
-        return datetime.fromisoformat(q["at"][0]) if q.get("at", [""])[0] else datetime.now()
+        return india_time(q.get("at", [""])[0])
 
     def do_GET(self):
         u = urlparse(self.path)
@@ -636,12 +663,14 @@ class Handler(SimpleHTTPRequestHandler):
         lat, lon = latlon((body["lat"], body["lon"]))
         if body["type"] not in REPORT_TYPES:
             raise ValueError("unknown report type")
-        # the walker's own clock, so "deserted at 22:00" stays 22:00 on a server in another time zone
-        seen = datetime.fromisoformat(body["at"]) if body.get("at") else datetime.now()
+        # India time, so "deserted at 22:00" stays 22:00 whatever time zone the phone or the server is set to
+        seen = india_time(body.get("at") or "")
         if abs(seen.timestamp() - time.time()) > 3600:
             raise ValueError("report time is not now")
         address = self.address()
-        r = REPORTS.add(lat, lon, body["type"], str(body.get("device") or address)[:64], seen)
+        # one reporter per network: a made-up device id must not buy extra votes on a street
+        # shortcut: phones behind one carrier IPv4 address share a vote, move to signed device keys if that hides real reports
+        r = REPORTS.add(lat, lon, body["type"], network(address), seen)
         if not r:
             return self.send_json({"error": "Thanks! You've sent a lot of reports this hour, please try again later."}, 429)
         store.add_report(r)
@@ -656,6 +685,8 @@ class Handler(SimpleHTTPRequestHandler):
         hour = int(body["hour"])
         if not 0 <= hour <= 23:
             raise ValueError("bad hour")
+        if not isinstance(body["measures"], dict):
+            raise ValueError("measures must be an object")
         m = [float(body["measures"][k]) if body["measures"].get(k) is not None else "" for k in FEEL_MEASURES]
         if any(x != "" and not 0 <= x <= 1e6 for x in m):
             raise ValueError("bad measure")
