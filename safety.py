@@ -312,6 +312,9 @@ def surroundings_kind(tags):
     return None
 
 
+# How an unnamed street is called on the route card ("an unnamed footpath", else "an unnamed service road")
+UNNAMED = {"footway": "footpath", "path": "path", "steps": "stairway", "pedestrian": "pedestrian street", "cycleway": "cycle path", "track": "track"}
+
 class Area:
     def __init__(self, osm, reports=(), incidents=(), stops=(), unloaded=None):
         self.unloaded = unloaded or {}  # factor -> (s, w, n, e) boxes whose data hasn't loaded yet: unknown there, not zero
@@ -859,7 +862,7 @@ class Area:
             wf = rating.factors(self, weak, t, self.light(t), now)
             why = max((k for k, f in wf.items() if f and w[k] > 0), key=lambda k: w[k] * (1 - wf[k]["value"]))
             weakest = {"coords": [self.nodes[weak["a"]], self.nodes[weak["b"]]], "score": round(rated[path[weak_i][1]][0]),
-                       "name": weak["name"] or weak["highway"].replace("_", " "), "why": LABELS[why]}
+                       "name": weak["name"] or "an unnamed " + UNNAMED.get(weak["highway"], weak["highway"].replace("_", " ") + " road"), "why": LABELS[why]}
         groups = defaultdict(lambda: {"found": 0, "open": 0, "no_hours": 0})
         for i in place_at:
             g = groups[self.pois[i]["group"]]

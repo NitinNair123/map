@@ -523,7 +523,7 @@ function renderRoutes() {
   if (r.confidence_level === "none") notes.push(["", "There isn't enough real data on these streets to rate this route yet. Grey dashes mark the unrated parts. Reports and the street survey fill this in."]);
   else if (r.unrated_pct >= 10) notes.push(["", `${r.unrated_pct}% of this route is too thinly mapped to rate. It's shown in grey dashes, and those streets earn no points, which pulls the score down.`]);
   if (state.rain) notes.push(["", "It's raining, so streets may be emptier than usual."]);
-  if (r.weakest && r.weakest.score < 45) notes.push(["", `Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because of ${r.weakest.why.toLowerCase()}. It's dashed on the map.`]);
+  if (r.weakest && r.weakest.score < 45) notes.push(["", `Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because ${WEAK_WHY[r.weakest.why] || "of " + r.weakest.why.toLowerCase()}. It's dashed on the map.`]);
   const unknown = (r.places || []).filter((pl) => pl.open === null).length;
   if (unknown) notes.push(["info", `Zoom in to see the places along the way: bright pins are open when you pass, faded pins are the ${unknown} places with no published hours, so we can't say if they're open. Tap "Report" and "Shops open now" to fix that for everyone.`]);
   if (r.headline) notes.unshift(["info", r.headline]);
@@ -836,6 +836,9 @@ function renderTrip() {
 }
 
 // Android Chrome tells the page the battery level; friends see it on the live map, and at 15% we offer a last-location text
+// The factor that scored lowest, said as what is missing ("main road" alone reads as if the main road were the problem)
+const WEAK_WHY = { "Main road": "it isn't a main road", "Lighting": "it is poorly lit", "People and open places": "few people or open places are around",
+  "Buildings and surroundings": "few buildings face the street", "Police and CCTV": "there is no police or CCTV nearby", "Footpath and ways out": "the footpath and ways out are poor" };
 const LOW_BATTERY = 15;
 navigator.getBattery?.().then((b) => (state.battery = b), () => {});
 function lowBattery(level, pt) {
@@ -1013,7 +1016,14 @@ $("#sosCancel").onclick = () => {
   $("#sosOverlay").hidden = true;
   $("#sosTitle").textContent = "SOS message";
   $("#sosSub").innerHTML = 'Your messages app opens in <b id="sosSecs">5</b> seconds with your location written in. Tap cancel if you\'re OK.';
+  sosBtn.focus();
 };
+// alertdialog: Escape cancels, and Tab cycles inside it instead of reaching the map behind
+$("#sosOverlay").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") return $("#sosCancel").click();
+  const f = $("#sosOverlay").querySelectorAll("a[href], button"), end = e.shiftKey ? f[0] : f[f.length - 1];
+  if (e.key === "Tab" && document.activeElement === end) { e.preventDefault(); (e.shiftKey ? f[f.length - 1] : f[0]).focus(); }
+});
 
 // ---------- sound: siren, beeps, ringtone ----------
 let audio = null, siren = null, ring = null;
@@ -1287,7 +1297,7 @@ function onboarding(step = 0) {
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
 addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); state.installPrompt = e; if (!state.to) renderIdle(); });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=24").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=25").catch(() => {});
 
 // ---------- start ----------
 renderIdle();

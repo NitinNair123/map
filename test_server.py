@@ -156,6 +156,13 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(cache("/vendor/leaflet/leaflet.js"), "public, max-age=86400")
         self.assertEqual(cache("/api/heat?bbox=0,0,0,0"), "no-store")
 
+    def test_every_weakest_reason_has_plain_wording_in_the_app(self):
+        from rating import LABELS
+        app = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "app", "app.js"), encoding="utf-8").read()
+        table = re.search(r"const WEAK_WHY = \{(.*?)\};", app, re.S).group(1)
+        for label in LABELS.values():
+            self.assertIn(f'"{label}":', table)
+
     def test_app_file_versions_match_the_service_worker_cache(self):
         root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
         read = lambda *p: open(os.path.join(root, *p), encoding="utf-8").read()

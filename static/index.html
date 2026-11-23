@@ -15,7 +15,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap">
-<link rel="stylesheet" href="/theme.css?v=24">
+<link rel="stylesheet" href="/theme.css?v=25">
 <style>
   .wrap { max-width: 1120px; margin: 0 auto; padding: 0 20px; }
   header.nav { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 85%, transparent); backdrop-filter: blur(12px); border-bottom: 1px solid var(--line); }
@@ -265,7 +265,7 @@ document.getElementById("installBtn").onclick = async () => {
   if (/iphone|ipad|ipod/i.test(navigator.userAgent)) { document.getElementById("iosTip").style.display = "block"; return; }
   location.href = "/app/";
 };
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=24").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=25").catch(() => {});
 </script>
 </body>
 </html>
