@@ -552,3 +552,60 @@ test("sharing the route first, then starting, keeps friends on the same live lin
   assert.deepEqual(errors, []);
   await ctx.close();
 });
+
+const tripView = async (id) => (await fetch(`${BASE}/api/trip/${id}`)).json();
+async function startThenKill(ctx, page) {
+  await ctx.addInitScript(() => { navigator.share = async () => {}; });
+  await routeToPharmacy(page);
+  await page.click("#startBtn");
+  await page.waitForSelector("text=Sharing live");
+  const id = await page.evaluate(() => state.trip.id);
+  await page.close();  // Android killed the tab in the background, or she swiped the app away
+  const again = await ctx.newPage();
+  await again.goto(BASE + "/app/");
+  return { id, again };
+}
+
+test("after the phone kills SafeRoute mid-trip, she can carry on sharing the same link", async () => {
+  const { ctx, page, errors } = await phone();
+  const { id, again } = await startThenKill(ctx, page);
+  again.on("pageerror", (e) => errors.push(e.message));
+  await again.click("text=Carry on sharing", { timeout: 5000 });
+  await again.waitForSelector("text=Sharing live");
+  assert.equal(await again.evaluate(() => state.trip.id), id, "friends keep the link they already have");
+  const before = (await tripView(id)).points.length;
+  await again.evaluate(() => { state.trip.lastPost = 0; onPosition({ coords: { latitude: 28.0001, longitude: 77.0003 } }, true); });
+  let view;
+  for (let i = 0; i < 20; i++) { view = await tripView(id); if (view.points.length > before) break; await new Promise((r) => setTimeout(r, 150)); }
+  assert.ok(view.points.length > before, "friends' map moves again");
+  await again.click("#safeBtn");
+  assert.equal(await again.evaluate(() => localStorage.getItem("sr.trip")), null, "an ended trip is never offered again");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("after the phone kills SafeRoute mid-trip, one tap tells friends she's safe", async () => {
+  const { ctx, page, errors } = await phone();
+  const { id, again } = await startThenKill(ctx, page);
+  again.on("pageerror", (e) => errors.push(e.message));
+  await again.click("text=I'm safe, end it", { timeout: 5000 });
+  let view;
+  for (let i = 0; i < 20 && !view?.ended; i++) { await new Promise((r) => setTimeout(r, 150)); view = await tripView(id); }
+  assert.ok(view.ended && view.arrived, "friends see she arrived");
+  await again.reload();
+  await again.waitForTimeout(500);
+  assert.ok(await again.isHidden("text=Carry on sharing"));
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("a saved trip the server no longer has is dropped without asking", async () => {
+  const { ctx, page, errors } = await phone();
+  await ctx.addInitScript(() => sessionStorage.seeded || (sessionStorage.seeded = localStorage["sr.trip"] =
+    JSON.stringify({ id: "gone", key: "k", dest: [28.0007, 77.0025], label: "City Pharmacy", eta: 5, mode: "walk", started: Date.now() })));
+  await page.goto(BASE + "/app/");
+  await page.waitForFunction(() => localStorage.getItem("sr.trip") === null, null, { timeout: 5000 });
+  assert.ok(await page.isHidden("text=Carry on sharing"));
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
