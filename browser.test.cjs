@@ -191,9 +191,15 @@ test("ride booking: Uber gets pickup, our detour as a stop, then the drop; Ola g
   const picked = await page.goto(BASE + "/app/").then(() => page.evaluate(() => {
     const fastest = { kind: "fastest", mode: "car", coords: [[28, 77], [28, 77.01], [28, 77.02]] };
     const safest = { kind: "safest", mode: "car", coords: [[28, 77], [28.004, 77.005], [28.009, 77.01], [28.004, 77.015], [28, 77.02]] };
-    return { car: rideStops(safest, fastest), walk: rideStops({ ...safest, mode: "walk" }, fastest), same: rideStops(fastest, fastest) };
+    // a 160 m blip off the fastest road near the start, then a 6 km detour far to the north
+    const blip = { kind: "safest", mode: "car", coords: [[28, 77], [28.00145, 77.002], [28, 77.004], [28, 77.01], [28.02, 77.02],
+      [28.025, 77.03], [28.025, 77.04], [28.02, 77.05], [28, 77.06]] };
+    const straight = { kind: "fastest", mode: "car", coords: [[28, 77], [28, 77.06]] };
+    return { car: rideStops(safest, fastest), walk: rideStops({ ...safest, mode: "walk" }, fastest), same: rideStops(fastest, fastest),
+      long: rideStops(blip, straight).map((x) => x.i) };
   }));
-  assert.deepEqual(picked.car.map((x) => x.pt), [[28.009, 77.01]], "one stop, at the farthest point of the detour");
+  assert.deepEqual(picked.car.map((x) => x.pt), [[28.009, 77.01]], "one stop, in the middle of the detour");
+  assert.deepEqual(picked.long, [5, 7], "the blip gets no stop; the long detour gets two, a third and two thirds along");
   assert.deepEqual(picked.walk, [], "walking routes may use footpaths, so no stops");
   assert.deepEqual(picked.same, []);
   await page.click(".modes [data-mode='car']");
