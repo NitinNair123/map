@@ -426,3 +426,123 @@ test("SOS opened again while the last alert is still on screen counts down again
   assert.deepEqual(errors, []);
   await ctx.close();
 });
+
+test("the friend's viewer rides out a dropped connection instead of saying the trip ended", async () => {
+  const post = (path, body) => fetch(BASE + path, { method: "POST", body: JSON.stringify(body) }).then((r) => r.json());
+  const t = await post("/api/trip", { dest: [28.0007, 77.0025], eta: 5, name: "Asha" });
+  await post(`/api/trip/${t.id}`, { key: t.key, lat: 28.0, lon: 77.0 });
+  const { ctx, page } = await phone();
+  await page.clock.install();
+  let down = true;
+  await page.route("**/api/trip/*", (r) => (down ? r.abort("internetdisconnected") : r.continue()));
+  await page.goto(`${BASE}/t/?id=${t.id}`);
+  await page.waitForSelector("text=Can't reach SafeRoute");
+  assert.doesNotMatch(await page.textContent(".card"), /ended/);
+  down = false;
+  await page.clock.runFor(11000);
+  await page.waitForSelector("text=Asha is walking");
+  await ctx.close();
+});
+
+test("friends see she arrived, not only that the trip ended", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.addInitScript(() => { navigator.share = async () => {}; });
+  await routeToPharmacy(page);
+  await page.click("#startBtn");
+  await page.waitForSelector("text=Sharing live");
+  const viewer = await ctx.newPage();
+  await viewer.goto(`${BASE}/t/?id=${await page.evaluate(() => state.trip.id)}`);
+  await viewer.waitForSelector("text=is walking");
+  await page.click("#safeBtn");
+  await viewer.reload();
+  await viewer.waitForSelector("text=arrived safely");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("arriving with no signal still ends the trip for friends once the phone reconnects", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.addInitScript(() => { navigator.share = async () => {}; });
+  await routeToPharmacy(page);
+  await page.click("#startBtn");
+  await page.waitForSelector("text=Sharing live");
+  const id = await page.evaluate(() => state.trip.id);
+  await page.clock.install();
+  let down = true, lost = 0;
+  await page.route("**/api/trip/*", (r) => (down ? (lost++, r.abort("internetdisconnected")) : r.continue()));
+  await page.click("#safeBtn");
+  await page.waitForSelector("text=Glad you're safe");
+  assert.ok(lost > 0, "the end of the trip was sent while offline");
+  down = false;
+  // the failed send's retry timer is set once its rejection arrives, which can be after any single clock jump, so step the clock
+  let view;
+  for (let i = 0; i < 20 && !view?.ended; i++) {
+    await page.clock.runFor(10000);
+    await new Promise((r) => setTimeout(r, 150));
+    view = await (await fetch(`${BASE}/api/trip/${id}`)).json();
+  }
+  assert.ok(view.ended, "friends no longer see her as on the way");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("a moment without GPS doesn't stop the live location for the rest of the trip", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.addInitScript(() => {
+    navigator.share = async () => {};
+    const watches = (window.watches = {});
+    let n = 0;
+    const at = (lat, lon) => ({ coords: { latitude: lat, longitude: lon, accuracy: 5 }, timestamp: Date.now() });
+    Object.defineProperty(navigator, "geolocation", { value: {
+      getCurrentPosition: (ok) => setTimeout(() => ok(at(28.0, 77.0)), 10),
+      watchPosition: (ok, err) => { watches[++n] = { ok, err }; setTimeout(() => ok(at(28.0, 77.0)), 10); return n; },
+      clearWatch: (id) => delete watches[id],
+    } });
+  });
+  await routeToPharmacy(page);
+  await page.click("#startBtn");
+  await page.waitForSelector("text=Sharing live");
+  // in an underpass the phone reports a timeout; the watch must keep going for when the signal is back
+  await page.evaluate(() => Object.values(watches).forEach((w) => w.err({ code: 3, TIMEOUT: 3, PERMISSION_DENIED: 1 })));
+  await page.evaluate(() => Object.values(watches).forEach((w) => w.ok({ coords: { latitude: 28.0002, longitude: 77.0006 } })));
+  assert.deepEqual(await page.evaluate(() => state.here), [28.0002, 77.0006]);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("coming back to SafeRoute mid-trip keeps the screen on again", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.addInitScript(() => {
+    navigator.share = async () => {};
+    window.locks = 0;
+    Object.defineProperty(navigator, "wakeLock", { value: { request: async () => { window.locks++; return { release: async () => {} }; } } });
+  });
+  await routeToPharmacy(page);
+  await page.click("#startBtn");
+  await page.waitForSelector("text=Sharing live");
+  assert.equal(await page.evaluate(() => locks), 1);
+  // the browser drops the lock whenever she switches to WhatsApp to send the link, and the phone then sleeps
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+    Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.waitForFunction(() => locks === 2);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("sharing the route first, then starting, keeps friends on the same live link", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.addInitScript(() => { window.shares = []; navigator.share = async (d) => { shares.push(d.url); }; });
+  await routeToPharmacy(page);
+  await page.click("#shareRouteBtn");
+  await page.waitForFunction(() => shares.length === 1);
+  await page.click("#startBtn");
+  await page.waitForSelector("text=Sharing live");
+  const [link] = await page.evaluate(() => shares);
+  assert.equal(link, await page.evaluate(() => tripLink(state.trip.id)), "the link already sent is the one that moves");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});

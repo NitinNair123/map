@@ -197,7 +197,8 @@ let watchId = null;
 function startWatching() {
   if (watchId !== null || !navigator.geolocation) return;
   watchId = navigator.geolocation.watchPosition(onPosition, (err) => {
-    if (err.code === err.PERMISSION_DENIED) toast("Location is off. You can still pick places on the map.");
+    if (err.code !== err.PERMISSION_DENIED) return;  // a timeout in an underpass: the watch carries on when the signal is back
+    toast("Location is off. You can still pick places on the map.");
     navigator.geolocation.clearWatch(watchId); watchId = null;
   }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
 }
@@ -655,8 +656,9 @@ const smsLink = (contacts, body) => `sms:${contacts.map((c) => c.phone.replace(/
 
 async function startTrip(opts = {}) {
   const r = state.routes.find((x) => x.kind === state.sel);
-  let t;
-  try { t = await createTrip(state.to, r.minutes, undefined, r.mode || "walk"); } catch (e) { return toast(e.message); }
+  let t = state.shared?.to === state.to ? state.shared.t : null;  // friends already have this link from Share
+  try { t ||= await createTrip(state.to, r.minutes, undefined, r.mode || "walk"); } catch (e) { return toast(e.message); }
+  state.shared = opts.shareOnly ? { t, to: state.to } : null;
   const shared = shareText(`I'm ${MODE[r.mode || "walk"].verb} to ${state.toLabel || "my destination"} with SafeRoute, about ${r.minutes} min. Follow me live:`, tripLink(t.id));
   if (opts.shareOnly) { await shared; return; }
   startWatching();
@@ -666,12 +668,22 @@ async function startTrip(opts = {}) {
   document.body.classList.add("navigating");
   $("#navBanner").hidden = false;
   drawTripRoute();
-  try { state.wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+  await keepScreenOn();
   const start = state.here && metres(state.here, r.coords[0]) < 60 ? state.here : r.coords[0];
   map.setView(start, 18);
   renderTrip();
   updateGuidance(start);
   if (!state.here || metres(state.here, r.coords[0]) > 200) toast("No GPS fix near the start. Use Simulate walk to preview the trip.", 5000);
+}
+
+async function keepScreenOn() {
+  try { state.wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+}
+// the browser drops the lock whenever the page is hidden (sharing the link in WhatsApp), and the phone would then sleep
+document.addEventListener("visibilitychange", () => { if (state.trip && document.visibilityState === "visible") keepScreenOn(); });
+// a lost "ended" leaves friends told to check on her for hours, so keep trying while the page is open
+function endShare(t, arrived = false, tries = 60) {
+  api(`/api/trip/${t.id}`, { key: t.key, ended: true, arrived }).catch(() => tries && setTimeout(() => endShare(t, arrived, tries - 1), 10000));
 }
 
 function drawTripRoute() {
@@ -890,7 +902,7 @@ async function endTrip(safe, auto) {
   document.body.classList.remove("navigating");
   $("#navBanner").hidden = true; $("#recenterBtn").hidden = true;
   if (safe) speak("You have arrived.");
-  api(`/api/trip/${t.id}`, { key: t.key, ended: true }).catch(() => {});
+  endShare(t, !!safe);
   state.wakeLock?.release?.().catch(() => {});
   vibrate(200);
   const contacts = store.get("contacts", []);
@@ -1020,7 +1032,7 @@ $("#sosAlertNow").onclick = () => alertNow(false);
 $("#sosMedical").onclick = () => alertNow(true);
 $("#sosCancel").onclick = () => {
   clearInterval(sosTimer); clearInterval(state.sosPing); stopSiren();
-  if (state.sosTrip) { api(`/api/trip/${state.sosTrip.id}`, { key: state.sosTrip.key, ended: true }).catch(() => {}); state.sosTrip = null; }
+  if (state.sosTrip) { endShare(state.sosTrip); state.sosTrip = null; }
   $("#sosOverlay").hidden = true;
   resetSOSText();
   sosBtn.focus();
@@ -1304,7 +1316,7 @@ function onboarding(step = 0) {
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
 addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); state.installPrompt = e; if (!state.to) renderIdle(); });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=27").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=28").catch(() => {});
 
 // ---------- start ----------
 renderIdle();

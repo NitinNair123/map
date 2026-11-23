@@ -188,6 +188,12 @@ class ServerTest(unittest.TestCase):
         self.assertEqual((code, view["ended"], view["points"], view["dest"]), (200, True, [], None))
         # an ended trip can't be restarted or moved again
         self.assertEqual(self.call(f"/api/trip/{t['id']}", {"key": t["key"], "lat": 28.6, "lon": 77.2})[0], 404)
+        self.assertFalse(view["arrived"], "a trip stopped with End trip doesn't claim she arrived")
+
+    def test_friends_see_she_arrived_not_just_that_the_trip_ended(self):
+        _, t = self.call("/api/trip", {"dest": [28.6, 77.2], "eta": 10})
+        self.call(f"/api/trip/{t['id']}", {"key": t["key"], "ended": True, "arrived": True})
+        self.assertTrue(self.call(f"/api/trip/{t['id']}")[1]["arrived"])
 
     def test_vehicle_number_shows_to_the_viewer_and_goes_when_the_trip_ends(self):
         _, t = self.call("/api/trip", {"dest": [28.6, 77.2], "eta": 10, "mode": "car"})
