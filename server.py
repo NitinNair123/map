@@ -199,7 +199,10 @@ threading.Thread(target=reimport_daily, daemon=True).start()
 
 
 def latlon(s):
-    lat, lon = (float(v) for v in s.split(",")) if isinstance(s, str) else (float(s[0]), float(s[1]))
+    try:
+        lat, lon = (float(v) for v in s.split(",")) if isinstance(s, str) else (float(s[0]), float(s[1]))
+    except (TypeError, ValueError, IndexError, KeyError):  # null, "", [1] or a dict: say so plainly, not with a Python error
+        raise ValueError("bad coordinates, expected [lat, lon]") from None
     if not (-85 <= lat <= 85 and math.isfinite(lon)):  # near the poles a 500 m circle spans thousands of map tiles
         raise ValueError("bad coordinates")
     return lat, lon if -180 <= lon <= 180 else (lon + 180) % 360 - 180  # a map panned round the world sends 77.4 as -642.6
