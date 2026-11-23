@@ -79,6 +79,54 @@ test("SOS: hold to open, then the text is written for the user to send", async (
   await ctx.close();
 });
 
+test("SOS works offline once the app has been opened: helplines and a text with the location", async () => {
+  const { ctx, page, errors } = await phone([{ name: "Mum", phone: "+91 98765 43210" }]);
+  await page.goto(BASE + "/app/");
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  if (!(await page.evaluate(() => navigator.serviceWorker.controller))) await page.reload();
+  await page.waitForFunction(() => navigator.serviceWorker.controller);
+  await ctx.setOffline(true);
+  await page.reload();
+  await page.focus("#sosBtn");
+  await page.keyboard.press("Enter");
+  assert.ok(await page.isVisible("#sosOverlay"));
+  assert.ok(await page.isVisible("a[href='tel:112'] >> text=Call 112"));
+  assert.ok(await page.isVisible("a[href='tel:1091'] >> text=Women helpline 1091"));
+  const sms = page.waitForRequest(/^sms:/, { timeout: 15000 });
+  await page.click("#sosAlertNow");
+  assert.match((await sms).url(), /^sms:\+919876543210\?&body=SOS%20from%20me.*maps\.google\.com%2F%3Fq%3D28\.000000%2C77\.000000/);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("SOS by keyboard: focus starts inside, Tab stays inside, Escape cancels", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.goto(BASE + "/app/");
+  await page.focus("#sosBtn");
+  await page.keyboard.press("Enter");
+  assert.equal(await page.evaluate(() => document.activeElement.id), "sosCancel");
+  for (let i = 0; i < 12; i++) {
+    await page.keyboard.press(i % 3 ? "Tab" : "Shift+Tab");
+    assert.ok(await page.evaluate(() => !!document.activeElement.closest("#sosOverlay")), "focus left the SOS dialog");
+  }
+  await page.keyboard.press("Escape");
+  assert.ok(await page.isHidden("#sosOverlay"));
+  assert.equal(await page.evaluate(() => document.activeElement.id), "sosBtn");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("large system text (130%): every route option fits the panel and small chips tap as 44 px", async () => {
+  const { ctx, page } = await phone();
+  await page.setViewportSize({ width: 317, height: 645 });  // Chrome on Android zooms the page by the system font size
+  await routeToPharmacy(page);
+  assert.equal(await page.evaluate(() => { const s = document.querySelector("#sheet"); return s.scrollWidth - s.clientWidth; }), 0, "no sideways scrolling in the panel");
+  for (const tab of await page.locator(".tab").all()) assert.ok((await tab.boundingBox()).x + (await tab.boundingBox()).width <= 317, "a route option is off screen");
+  const hit = await page.evaluate(() => { const r = document.querySelector("#voiceBtn").getBoundingClientRect(); return document.elementFromPoint(r.left + r.width / 2, r.bottom + 2)?.id; });
+  assert.equal(hit, "voiceBtn", "a tap just below the round chip still reaches it");
+  await ctx.close();
+});
+
 test("SOS ambulance alert carries the medical info from settings", async () => {
   const { ctx, page, errors } = await phone();
   await ctx.addInitScript(() => {
@@ -347,6 +395,20 @@ test("tapping an open place near you routes there", async () => {
   await page.click("[data-haven='0']");
   await page.waitForSelector("#startBtn", { timeout: 15000 });
   assert.notEqual(await page.inputValue("#toInput"), "");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("a message shown while search results are open sits below them, not over them", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.goto(BASE + "/app/");
+  await page.evaluate(() => toast("Location is off. You can still pick places on the map.", 10000));  // shown first, as when location is refused
+  await page.fill("#toInput", "city");
+  await page.waitForSelector("#results li");
+  const list = await page.locator("#results").boundingBox(), msg = await page.locator("#toast").boundingBox();
+  assert.ok(msg.y >= list.y + list.height, "the message covers the search results");
+  // the list grows to half the screen with more results, so the message waits at the bottom
+  assert.ok(msg.y > (await page.evaluate(() => innerHeight)) * 0.6, "the message sits where a longer list would cover it");
   assert.deepEqual(errors, []);
   await ctx.close();
 });
