@@ -226,3 +226,72 @@ test("voice: a spoken request is recorded and sent to the server as audio", asyn
   assert.deepEqual(errors, []);
   await mic.close();
 });
+
+test("save home once, then one tap routes there; it can be forgotten in settings", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.goto(BASE + "/app/");
+  await page.click("[data-go=home]");
+  await page.fill("#toInput", "city");
+  await page.click("#results li >> text=City Pharmacy");
+  await page.waitForSelector("#startBtn", { timeout: 15000 });
+  assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("sr.saved")).home.label), "City Pharmacy");
+  await page.reload();
+  await page.click("[data-go=home]");
+  await page.waitForSelector("#startBtn", { timeout: 15000 });
+  assert.equal(await page.inputValue("#toInput"), "Home");
+  await page.fill("#toInput", "ho");
+  await page.waitForSelector("#results li >> text=Home");
+  await page.reload();
+  await page.click("#settingsBtn");
+  await page.click("[data-unsave=home]");
+  assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("sr.saved")).home), undefined);
+  await page.click("#drawer [data-close]");
+  assert.ok(await page.isVisible("text=Set home"), "the start screen offers to set it again");
+  assert.equal(await page.getAttribute("a[href='tel:1091']", "href"), "tel:1091", "SOS offers the women helpline");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("in a cab, the vehicle number reaches the friend's live viewer", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.addInitScript(() => { navigator.share = async (d) => { window.shared = d.text; }; });
+  await page.goto(BASE + "/app/");
+  await page.click("[data-mode=car]");
+  await page.fill("#toInput", "city");
+  await page.click("#results li >> text=City Pharmacy");
+  await page.waitForSelector("#startBtn", { timeout: 15000 });
+  const minutes = await page.evaluate(() => state.routes.find((x) => x.kind === state.sel).minutes);
+  await page.click("#startBtn");
+  await page.waitForSelector("text=Sharing live");
+  const left = +(await page.textContent(".nav-head h3")).match(/(\d+) min/)[1];
+  assert.ok(left <= minutes + 1, `a drive is timed at driving pace: ${left} min left on a ${minutes} min route`);
+  await page.fill("#vehicleForm input", "dl 1r ab 1234");
+  await page.click("#vehicleForm button");
+  await page.waitForSelector("text=Your live link now shows DL 1R AB 1234");
+  const id = await page.evaluate(() => state.trip.id);
+  const viewer = await ctx.newPage();
+  await viewer.goto(`${BASE}/t/?id=${id}`);
+  await viewer.waitForSelector("text=In vehicle DL 1R AB 1234");
+  assert.match(await viewer.textContent("#title"), /is on the way/);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("at low battery the walker is offered a last-location text and friends see the level", async () => {
+  const { ctx, page, errors } = await phone([{ name: "Asha", phone: "+91 98100 00000" }]);
+  await page.addInitScript(() => {
+    navigator.share = async () => {};
+    navigator.getBattery = async () => ({ level: 0.12, charging: false });
+  });
+  await routeToPharmacy(page);
+  await page.click("#startBtn");
+  await page.waitForSelector("text=Sharing live");
+  await page.evaluate(() => onTripPosition([28.0001, 77.0001]));
+  await page.waitForSelector("text=Battery at 12%");
+  assert.match(await page.getAttribute("#batterySms", "href"), /^sms:\+919810000000\?&body=My%20phone%20is%20at%2012%25.*maps\.google\.com.*%2Ft%2F%3Fid%3D/);
+  const viewer = await ctx.newPage();
+  await viewer.goto(`${BASE}/t/?id=${await page.evaluate(() => state.trip.id)}`);
+  await viewer.waitForSelector("text=Phone battery 12%");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});

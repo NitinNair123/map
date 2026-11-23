@@ -151,10 +151,10 @@ Reply with only a JSON array like [{{"place":"Janpath and Tolstoy Marg crossing,
 
     def signal(self, pt, when):
         """safety.SIGNALS hook: a local alert within two hours of when costs points; a wide one only warns."""
-        from safety import dist
+        from safety import aware, dist  # aware: naive times are the server's local time, so naive and offset times compare
         for alerts, _ in list(self.events.values()):
             for h in alerts:
-                if dist(pt, h["pt"]) <= h["r"] and abs((datetime.fromisoformat(h["when"]) - when).total_seconds()) <= 7200:
+                if dist(pt, h["pt"]) <= h["r"] and abs((aware(datetime.fromisoformat(h["when"])) - aware(when)).total_seconds()) <= 7200:
                     return {"delta": -PENALTY if h["local"] else 0, "warning": f"{h['what']} near {h['place']} (Gemini, check before you go)"}
         return None
 

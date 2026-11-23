@@ -152,6 +152,53 @@ class ServerTest(unittest.TestCase):
         # an ended trip can't be restarted or moved again
         self.assertEqual(self.call(f"/api/trip/{t['id']}", {"key": t["key"], "lat": 28.6, "lon": 77.2})[0], 404)
 
+    def test_vehicle_number_shows_to_the_viewer_and_goes_when_the_trip_ends(self):
+        _, t = self.call("/api/trip", {"dest": [28.6, 77.2], "eta": 10, "mode": "car"})
+        self.assertEqual(self.call(f"/api/trip/{t['id']}", {"key": "wrong", "vehicle": "DL1RA0000"})[0], 404)
+        self.assertEqual(self.call(f"/api/trip/{t['id']}", {"key": t["key"], "vehicle": "  DL 1R AB 1234 " + "x" * 40})[0], 200)
+        view = self.call(f"/api/trip/{t['id']}")[1]
+        self.assertEqual((view["mode"], view["vehicle"]), ("car", "DL 1R AB 1234 xxxxxx"))
+        self.assertEqual(self.call("/api/trip", {"dest": [28.6, 77.2], "mode": "plane"})[0], 400)
+        self.call(f"/api/trip/{t['id']}", {"key": t["key"], "ended": True})
+        self.assertEqual(self.call(f"/api/trip/{t['id']}")[1]["vehicle"], "")
+
+    def test_one_ipv6_network_shares_one_limit(self):
+        limit = server.LIMITS["trip"][0]
+        codes = [self.call("/api/trip", {"dest": [28.6, 77.2]}, {"X-Forwarded-For": f"2001:db8::{i:x}"})[0] for i in range(limit + 1)]
+        self.assertEqual(codes[-1], 429, "a /64 is one household or phone, not 2^64 callers")
+        self.assertEqual(self.call("/api/trip", {"dest": [28.6, 77.2]}, {"X-Forwarded-For": "2001:db8:0:1::1"})[0], 200)
+
+    def test_made_up_device_ids_do_not_add_votes(self):
+        for i in range(3):
+            self.assertEqual(self.call("/api/report", {"lat": 28.0, "lon": 77.0015, "type": "felt_safe", "device": f"fake{i}"},
+                                       {"X-Forwarded-For": "203.0.113.9"})[0], 200)
+        by = {r["by"] for r in server.REPORTS.all() if r["lat"] == 28.0 and r["lon"] == 77.0015}
+        self.assertEqual(len(by), 1, "reports from one network count as one reporter")
+
+    def test_times_are_india_time_whatever_offset_is_sent(self):
+        utc = server.india_time("2026-10-25T06:30:00Z")
+        self.assertEqual((utc.hour, utc.minute), (12, 0))
+        self.assertEqual(server.india_time("2026-10-25T22:00").hour, 22)  # no offset: already India time
+        self.assertEqual(server.india_time("2026-10-25T22:00").utcoffset().total_seconds(), 5.5 * 3600)
+        self.assertEqual(server.india_time("").utcoffset().total_seconds(), 5.5 * 3600)
+        # a naive time must not break the Gemini alert check against its aware events
+        g = server.gemini.Gemini()
+        g.events = {"k": ([{"pt": [28.0, 77.0], "r": 300, "what": "Protest", "place": "X", "when": "2026-10-25T22:00+05:30", "local": True}], 0)}
+        naive = datetime.fromisoformat("2026-10-25T22:30+05:30").astimezone().replace(tzinfo=None)  # the server's own clock
+        self.assertIsNotNone(g.signal((28.0, 77.0), naive))
+
+    def test_route_feel_with_bad_measures_is_a_bad_request(self):
+        for m in ([1, 2], None, "x"):
+            self.assertEqual(self.call("/api/route-feel", {"feel": "safe", "mid": [28, 77], "hour": 3, "measures": m})[0], 400, m)
+
+    def test_low_battery_reaches_the_viewer(self):
+        _, t = self.call("/api/trip", {"dest": [28.6, 77.2], "eta": 10})
+        self.assertEqual(self.call(f"/api/trip/{t['id']}", {"key": t["key"], "lat": 28.61, "lon": 77.21, "battery": 12})[0], 200)
+        self.assertEqual(self.call(f"/api/trip/{t['id']}")[1]["battery"], 12)
+        self.assertEqual(self.call(f"/api/trip/{t['id']}", {"key": t["key"], "lat": 28.61, "lon": 77.21, "battery": 140})[0], 400)
+        self.call(f"/api/trip/{t['id']}", {"key": t["key"], "lat": 28.61, "lon": 77.21})  # browsers without the battery API
+        self.assertEqual(self.call(f"/api/trip/{t['id']}")[1]["battery"], 12, "an update without a level keeps the last one")
+
     def test_trips_expire(self):
         _, t = self.call("/api/trip", {"dest": [28.6, 77.2]})
         server.trips[t["id"]]["started"] -= server.TRIP_TTL + 1

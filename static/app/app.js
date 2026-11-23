@@ -205,6 +205,9 @@ async function showResults(q) {
   const seq = ++searchSeq;
   const extra = [];
   if (activeField === "from") extra.push({ name: "Your location", kind: "Use GPS", here: true });
+  const typed = q.trim().toLowerCase(), saved = store.get("saved", {});
+  const mine = Object.entries(SAVED).filter(([k, l]) => saved[k] && l.toLowerCase().startsWith(typed))
+    .map(([k, l]) => ({ name: l, kind: saved[k].label, pt: saved[k].pt, saved: k }));
   extra.push({ name: "Choose on map", kind: "Tap anywhere on the map", pick: true });
   let found = [];
   if (q.trim().length >= 2) {
@@ -216,11 +219,11 @@ async function showResults(q) {
   if (seq !== searchSeq) return;
   const list = $("#results");
   list.innerHTML = "";
-  [...found, ...extra].forEach((r, i) => {
+  [...mine, ...found, ...extra].forEach((r, i) => {
     const li = document.createElement("li");
     li.setAttribute("role", "option");
-    li.setAttribute("aria-selected", i === 0 && found.length ? "true" : "false");
-    li.innerHTML = `<span class="ico">${icon(r.here ? "locate" : r.pick ? "flag" : r.kind === "street" ? "walk" : "store")}</span><span><b>${esc(r.name)}</b><small>${r.km != null ? `${r.km} km · ` : ""}${esc(cap(String(r.kind).replace(/_/g, " ")))}</small></span>`;
+    li.setAttribute("aria-selected", i === 0 && (found.length || mine.length) ? "true" : "false");
+    li.innerHTML = `<span class="ico">${icon(r.here ? "locate" : r.saved ? "check" : r.pick ? "flag" : r.kind === "street" ? "walk" : "store")}</span><span><b>${esc(r.name)}</b><small>${r.km != null ? `${r.km} km · ` : ""}${esc(cap(String(r.kind).replace(/_/g, " ")))}</small></span>`;
     li.onclick = () => choose(r);
     list.appendChild(li);
   });
@@ -240,6 +243,7 @@ async function choose(r) {
 function setPlace(which, pt, label) {
   if (which.startsWith("stop")) { state.stops[+which.slice(4)] = { pt, label }; return renderStops(); }
   state[which] = pt; state[which + "Label"] = label;
+  if (which === "to" && savingAs) { savePlace(savingAs, pt, label); savingAs = null; }
   $(which === "from" ? "#fromInput" : "#toInput").value = label;
   setMarker(which, pt);
 }
@@ -252,6 +256,21 @@ $("#swapBtn").onclick = () => {
   else if (state.here) setPlace("to", state.here, "Your location");
   maybeRoute();
 };
+
+// ---------- saved places: Home and Work, one tap away, kept on this phone only ----------
+const SAVED = { home: "Home", work: "Work" };
+let savingAs = null;  // "home" or "work" while the user picks the place to save
+function savePlace(k, pt, label) {
+  store.set("saved", { ...store.get("saved", {}), [k]: { pt, label } });
+  toast(`Saved as ${SAVED[k]}. Change it in Settings.`);
+}
+function goSaved(k) {
+  const p = store.get("saved", {})[k];
+  if (p) { setPlace("to", p.pt, SAVED[k]); return maybeRoute(); }
+  savingAs = k; activeField = "to";
+  $("#toInput").focus();
+  toast(`Search for your ${SAVED[k].toLowerCase()} or tap it on the map`);
+}
 
 // ---------- stops ----------
 const stopLayer = L.layerGroup().addTo(map);
@@ -544,10 +563,13 @@ async function renderIdle() {
     : isIOS() && !standalone() ? `<p class="muted">Install: tap <b>Share</b> then <b>Add to Home Screen</b>.</p>` : "";
   renderSheet(`
     <div class="sheet-head"><div><h3>${greet}</h3><p class="muted" style="margin:0">Search a place or tap the map to see the recommended way there.</p></div></div>
+    <div class="actions saved-places" style="grid-template-columns:1fr 1fr">${Object.entries(SAVED).map(([k, l]) =>
+      `<button class="btn" data-go="${k}">${icon(k === "home" ? "shield" : "store")}${store.get("saved", {})[k] ? l : `Set ${l.toLowerCase()}`}</button>`).join("")}</div>
     ${contacts.length ? "" : `<button class="btn btn-block" id="addContactsBtn">${icon("user")}Add a trusted contact for SOS</button>`}
     <div id="nearby"></div>
     ${install}`);
   $("#addContactsBtn")?.addEventListener("click", openSettings);
+  document.querySelectorAll("[data-go]").forEach((b) => (b.onclick = () => goSaved(b.dataset.go)));
   $("#installBtn")?.addEventListener("click", async () => { state.installPrompt.prompt(); state.installPrompt = null; renderIdle(); });
   if (state.here) {
     const list = await api(`/api/havens?near=${state.here.join(",")}&at=${encodeURIComponent(whenParam())}`).catch(() => []);
@@ -560,8 +582,8 @@ async function renderIdle() {
 
 // ---------- live trip ----------
 const tripLink = (id) => `${location.origin}/t/?id=${id}`;
-async function createTrip(dest, eta, timeoutMs) {
-  const t = await api("/api/trip", { dest, eta, name: store.get("myName", "") }, timeoutMs);
+async function createTrip(dest, eta, timeoutMs, mode = "walk") {
+  const t = await api("/api/trip", { dest, eta, mode, name: store.get("myName", "") }, timeoutMs);
   if (state.here) api(`/api/trip/${t.id}`, { key: t.key, lat: state.here[0], lon: state.here[1] }).catch(() => {});
   return t;
 }
@@ -578,7 +600,7 @@ const smsLink = (contacts, body) => `sms:${contacts.map((c) => c.phone.replace(/
 async function startTrip(opts = {}) {
   const r = state.routes.find((x) => x.kind === state.sel);
   let t;
-  try { t = await createTrip(state.to, r.minutes); } catch (e) { return toast(e.message); }
+  try { t = await createTrip(state.to, r.minutes, undefined, r.mode || "walk"); } catch (e) { return toast(e.message); }
   const shared = shareText(`I'm ${MODE[r.mode || "walk"].verb} to ${state.toLabel || "my destination"} with SafeRoute, about ${r.minutes} min. Follow me live:`, tripLink(t.id));
   if (opts.shareOnly) { await shared; return; }
   startWatching();
@@ -722,13 +744,16 @@ function renderTrip() {
   const t = state.trip, r = t.route;
   const p = state.here ? routeProgress(state.here, r.coords) : { left: r.length_m, idx: 0 };
   const done = Math.max(0, Math.min(100, 100 * (1 - p.left / Math.max(r.length_m, 1))));
+  const speed = r.length_m / Math.max(60, r.minutes * 60);  // this route's own pace, so a drive isn't timed at walking speed
   const ahead = state.here ? r.havens.map((h) => ({ ...h, d: metres(state.here, h.pt) })).sort((a, b) => a.d - b.d)[0] : r.havens[0];
   renderSheet(`
-    <div class="nav-head"><div style="flex:1"><h3>${Math.max(1, Math.round(p.left / 1.3 / 60))} min · ${fmtDist(p.left)} left</h3>
+    <div class="nav-head"><div style="flex:1"><h3>${Math.max(1, Math.round(p.left / speed / 60))} min · ${fmtDist(p.left)} left</h3>
       <p class="muted" style="margin:0">to ${esc(state.toLabel || "destination")}</p></div><span class="live">Sharing live</span></div>
     <div class="progress"><div style="width:${done}%"></div></div>
     <p class="muted" style="margin:0">Keep SafeRoute open with the screen on. If the phone locks, your friends' map stops updating and check-ins pause.</p>
     ${ahead ? `<div class="haven"><span class="ico">${icon("store")}</span><div><b>${esc(ahead.name)}</b><div class="muted">Open now${ahead.d ? ` · ${fmtDist(ahead.d)}` : ""}. Step in if anything feels off.</div></div></div>` : ""}
+    ${r.mode && r.mode !== "walk" ? `<form class="form vehicle" id="vehicleForm"><input name="v" maxlength="20" autocomplete="off" placeholder="Cab, auto or bike-taxi number" aria-label="Vehicle number" value="${esc(t.vehicle || "")}">
+      <button class="btn" type="submit">${t.vehicle ? "Update" : "Share"}</button></form>` : ""}
     <p class="muted" style="margin:0">How is it here right now? One tap, anonymous.</p>
     <div class="report-grid quick">${REPORTS.filter(([k]) => QUICK.includes(k)).map(([k, e, l]) => `<button data-quick="${k}"><span>${e}</span>${l}</button>`).join("")}</div>
     <div class="actions"><button class="btn btn-primary" id="safeBtn">${icon("check")}I've arrived safely</button>
@@ -743,9 +768,32 @@ function renderTrip() {
   $("#simBtn").onclick = simulateWalk;
   $("#safeBtn").onclick = () => endTrip(true);
   $("#endTrip").onclick = () => endTrip(false);
-  $("#tripShare").onclick = () => shareText("Follow my walk live on SafeRoute:", tripLink(t.id));
+  $("#tripShare").onclick = () => shareText(`Follow my ${MODE[r.mode || "walk"].noun} live on SafeRoute:${t.vehicle ? ` I'm in vehicle ${t.vehicle}.` : ""}`, tripLink(t.id));
+  $("#vehicleForm")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const v = e.target.v.value.trim().toUpperCase();
+    try { await api(`/api/trip/${t.id}`, { key: t.key, vehicle: v }); } catch (err) { return toast(err.message); }
+    t.vehicle = v;
+    toast(v ? `Your live link now shows ${v}` : "Vehicle number removed");
+    renderTrip();
+  });
 }
 
+// Android Chrome tells the page the battery level; friends see it on the live map, and at 15% we offer a last-location text
+const LOW_BATTERY = 15;
+navigator.getBattery?.().then((b) => (state.battery = b), () => {});
+function lowBattery(level, pt) {
+  const t = state.trip, contacts = store.get("contacts", []);
+  const text = `My phone is at ${level}% battery. I'm on my way to ${state.toLabel || "my destination"}. Last location: https://maps.google.com/?q=${pt[0].toFixed(6)},${pt[1].toFixed(6)} Live:`;
+  vibrate([200, 100, 200]);
+  openDrawer(`<h2 id="drawerTitle">Battery at ${level}%</h2>
+    <p>If your phone dies, your friends' map stops. Send them where you are now, while you can.</p>
+    ${contacts.length ? `<a class="btn btn-primary btn-block" id="batterySms" href="${esc(smsLink(contacts, `${text} ${tripLink(t.id)}`))}">${icon("share")}Text my contacts</a>`
+      : `<button class="btn btn-primary btn-block" id="batteryShare">${icon("share")}Share my location</button>`}
+    <button class="btn btn-block" data-close>Not now</button>`);
+  $("#batteryShare")?.addEventListener("click", () => { closeDrawer(); shareText(text, tripLink(t.id)); });
+  $("#batterySms")?.addEventListener("click", closeDrawer);
+}
 function onTripPosition(pt) {
   const t = state.trip, r = t.route;
   const p = updateGuidance(pt);
@@ -753,7 +801,9 @@ function onTripPosition(pt) {
   if (metres(pt, t.lastMovePt || pt) > 15) { t.lastMovePt = pt; t.lastMoveAt = Date.now(); }
   if (Date.now() - t.lastPost > 10000) {
     t.lastPost = Date.now();
-    api(`/api/trip/${t.id}`, { key: t.key, lat: pt[0], lon: pt[1] }).catch(() => {});
+    const battery = state.battery ? Math.round(state.battery.level * 100) : null;
+    api(`/api/trip/${t.id}`, { key: t.key, lat: pt[0], lon: pt[1], battery }).catch(() => {});
+    if (battery !== null && battery <= LOW_BATTERY && !state.battery.charging && !t.batteryWarned) { t.batteryWarned = true; lowBattery(battery, pt); }
   }
   if (metres(pt, r.coords[r.coords.length - 1]) < 40) return endTrip(true, true);
   const stop = state.stops.filter((s) => s.pt)[t.nextStop];
@@ -882,7 +932,7 @@ async function alertContacts(medical = false) {
   const facts = MEDICAL.filter(([k]) => med[k]).map(([k, l]) => `${l}: ${med[k]}.`).join(" ");
   const body = medical
     ? await reword(`Medical emergency: ${who === "me" ? "I need" : who + " needs"} an ambulance. ${facts} ${where}`.replace(/\s+/g, " ").trim())
-    : `SOS from ${who}: I need help. ${where}`.trim();
+    : `SOS from ${who}: I need help.${state.trip?.vehicle ? ` I'm in vehicle ${state.trip.vehicle}.` : ""} ${where}`.trim();
   // a web page can't send a text or call by itself: it opens the messages app or share sheet, and the user presses Send
   $("#sosTitle").textContent = contacts.length ? "Press Send in your messages app" : "Choose who to send it to";
   $("#sosSub").textContent = `${contacts.length ? "Your text is written, but it only goes out when you press Send." : "Send it from the share menu, or paste it into a chat if it was copied."} ${
@@ -1084,12 +1134,20 @@ function bindContacts(rerender) {
     rerender();
   }));
 }
+function savedHtml() {
+  const s = store.get("saved", {}), set = Object.keys(SAVED).filter((k) => s[k]);
+  return set.length ? set.map((k) => `<div class="contact"><span class="avatar-s">${SAVED[k][0]}</span><div><b>${SAVED[k]}</b><small>${esc(s[k].label)}</small></div>
+    <button class="icon-btn" data-unsave="${k}" aria-label="Forget ${SAVED[k]}" style="box-shadow:none">${icon("trash")}</button></div>`).join("")
+    : `<p class="muted">Tap "Set home" or "Set work" on the start screen. They stay on this phone.</p>`;
+}
 function openSettings() {
   const sel = (id, val, opts) => `<select id="${id}" class="input">${opts.map(([v, l]) => `<option value="${v}" ${String(v) === String(val) ? "selected" : ""}>${l}</option>`).join("")}</select>`;
   openDrawer(`
     <h2 id="drawerTitle">Settings</h2>
     <h3 style="font-size:16px;margin-top:6px">Trusted contacts</h3>
     <div id="contactsBox" style="display:grid;gap:8px">${contactsHtml()}</div>
+    <h3 style="font-size:16px;margin-top:6px">Saved places</h3>
+    <div id="savedBox" style="display:grid;gap:8px">${savedHtml()}</div>
     <div class="row"><label for="myName">Your name in alerts</label><input id="myName" class="input" style="width:50%" maxlength="40" value="${esc(store.get("myName", ""))}"></div>
     <h3 style="font-size:16px;margin-top:6px">Medical info for ambulance alerts</h3>
     ${MEDICAL.map(([k, l]) => `<div class="row"><label for="med_${k}">${l}</label><input id="med_${k}" class="input" style="width:50%" maxlength="120" value="${esc(store.get("medical", {})[k] || "")}"></div>`).join("")}
@@ -1106,6 +1164,14 @@ function openSettings() {
     <p class="muted">Your contacts and settings stay on this phone. Trip locations are deleted from the server when a trip ends, and 12 hours after it started at the latest. We never sell location data.</p>`);
   const rerender = () => { $("#contactsBox").innerHTML = contactsHtml(); bindContacts(rerender); };
   bindContacts(rerender);
+  const bindSaved = () => document.querySelectorAll("[data-unsave]").forEach((b) => (b.onclick = () => {
+    const s = store.get("saved", {});
+    delete s[b.dataset.unsave];
+    store.set("saved", s);
+    $("#savedBox").innerHTML = savedHtml(); bindSaved();
+    if (!state.to && !state.trip) renderIdle();
+  }));
+  bindSaved();
   $("#myName").onchange = (e) => store.set("myName", e.target.value.trim());
   $("#caller").onchange = (e) => store.set("caller", e.target.value.trim() || "Mom");
   $("#buffer").onchange = (e) => store.set("buffer", +e.target.value);
