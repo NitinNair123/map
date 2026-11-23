@@ -312,3 +312,13 @@ test("zoomed out, only open places are pinned so the route line stays visible", 
   assert.deepEqual(errors, []);
   await ctx.close();
 });
+
+test("tapping an open place near you routes there", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.goto(BASE + "/app/");
+  await page.click("[data-haven='0']");
+  await page.waitForSelector("#startBtn", { timeout: 15000 });
+  assert.notEqual(await page.inputValue("#toInput"), "");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});

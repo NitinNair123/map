@@ -584,8 +584,9 @@ async function renderIdle() {
   if (state.here) {
     const list = await api(`/api/havens?near=${state.here.join(",")}&at=${encodeURIComponent(whenParam())}`).catch(() => []);
     if (list.length && $("#nearby")) {
-      $("#nearby").innerHTML = `<p class="muted" style="margin:12px 0 4px">Open near you right now</p>` + list.slice(0, 3).map((h) =>
-        `<div class="haven"><span class="ico">${icon(h.kind === "police" ? "shield" : "store")}</span><div><b>${esc(h.name)}</b><div class="muted">${fmtDist(h.distance_m)} away</div></div></div>`).join("");
+      $("#nearby").innerHTML = `<p class="muted" style="margin:12px 0 4px">Open near you right now · tap for the way there</p>` + list.slice(0, 3).map((h, i) =>
+        `<button class="haven" data-haven="${i}"><span class="ico">${icon(h.kind === "police" ? "shield" : "store")}</span><div><b>${esc(h.name)}</b><div class="muted">${fmtDist(h.distance_m)} away</div></div></button>`).join("");
+      document.querySelectorAll("[data-haven]").forEach((b) => (b.onclick = () => { const h = list[+b.dataset.haven]; setPlace("to", h.pt, h.name); maybeRoute(); }));
     }
   }
 }
@@ -1241,7 +1242,7 @@ function onboarding(step = 0) {
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
 addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); state.installPrompt = e; if (!state.to) renderIdle(); });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=23").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=24").catch(() => {});
 
 // ---------- start ----------
 renderIdle();
