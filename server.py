@@ -326,6 +326,8 @@ def rank(q, near, found, limit=8):
             r["km"] = round(dist(near, r["pt"]) / 1000, 1)
         if not any(r["name"].lower() == o["name"].lower() and dist(r["pt"], o["pt"]) < 200 for o in out):
             out.append(r)
+    if near and any(r["km"] < 100 for r in out):  # "Green Park Market" near Delhi shouldn't list shops in Cork and Toronto
+        out = [r for r in out if r["km"] < 1000 or r.get("big")]
     match = lambda r: 0 if r.get("cat") or r["name"].lower().startswith(q) else 1 if any(w.startswith(q.split()[0]) for w in r["name"].lower().split()) else 2
     # each 10x further away costs as much as a worse name match, so a "Hospital" town 5000 km off loses to Sharda Hospital 3 km away
     out.sort(key=lambda r: match(r) + math.log10(r.get("km", 0) + 1))
@@ -466,6 +468,10 @@ class Handler(SimpleHTTPRequestHandler):
     def end_headers(self):
         if self.path.startswith("/api/"):
             self.send_header("Cache-Control", "no-store")
+        elif self.path.startswith(("/vendor/", "/icons/")):  # libraries and icons change only with their file names
+            self.send_header("Cache-Control", "public, max-age=86400")
+        else:  # the app's own pages and code: a CDN in front (Cloudflare) would otherwise serve the old app for hours
+            self.send_header("Cache-Control", "no-cache")
         # other sites only ever see "localhost:8001", never a page address with a trip id; OpenStreetMap's tile
         # servers refuse map pictures that come with no referrer at all
         self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")

@@ -57,6 +57,8 @@ let toastTimer;
 function toast(msg, ms = 3200) {
   const t = $("#toast");
   t.textContent = msg; t.hidden = false;
+  const bar = $(".topbar");  // below the search card, so it never covers the fields being typed in
+  if (bar && !state.trip) t.style.top = `${Math.round(bar.getBoundingClientRect().bottom + 8)}px`; else t.style.top = "";
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => (t.hidden = true), ms);
 }
@@ -213,7 +215,9 @@ async function showResults(q) {
   if (q.trim().length >= 2) {
     await new Promise((r) => setTimeout(r, 250)); // wait for typing to pause before searching
     if (seq !== searchSeq) return;
-    const c = map.getCenter().wrap(), near = state.here || [c.lat, c.lng]; // suggest places around the user, like Google Maps
+    // suggest places around the other end of the trip if one is set, else the user, else where the map looks
+    const c = map.getCenter().wrap(), other = activeField === "from" ? state.to : state.from;
+    const near = other || state.here || [c.lat, c.lng];
     found = await api(`/api/search?q=${encodeURIComponent(q)}&near=${near.join(",")}`).catch(() => []);
   }
   if (seq !== searchSeq) return;

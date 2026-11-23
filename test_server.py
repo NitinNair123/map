@@ -142,6 +142,19 @@ class ServerTest(unittest.TestCase):
             self.assertEqual(self.call(path)[0], 200, path)
         self.assertEqual(self.call("/../server.py")[0], 404)
 
+    def test_app_files_are_revalidated_so_a_deploy_reaches_phones(self):
+        def cache(path):
+            c = HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=5)
+            c.request("GET", path)
+            r = c.getresponse()
+            r.read()
+            c.close()
+            return r.getheader("Cache-Control")
+        for path in ["/", "/app/", "/app/app.js", "/app/app.css", "/sw.js", "/t/?id=x", "/theme.css"]:
+            self.assertEqual(cache(path), "no-cache", path)  # a CDN in front (Cloudflare) would otherwise keep old code for hours
+        self.assertEqual(cache("/vendor/leaflet/leaflet.js"), "public, max-age=86400")
+        self.assertEqual(cache("/api/heat?bbox=0,0,0,0"), "no-store")
+
     def test_ending_a_trip_deletes_its_locations(self):
         _, t = self.call("/api/trip", {"dest": [28.6, 77.2], "eta": 10})
         self.assertEqual(self.call(f"/api/trip/{t['id']}", {"key": t["key"], "lat": 28.61, "lon": 77.21})[0], 200)
