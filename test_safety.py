@@ -230,6 +230,8 @@ class TileTest(unittest.TestCase):
         names = {r["weakest"]["name"] for r in self.store.for_trip(A, B).routes(A, B, NIGHT) if r["weakest"]}
         self.assertIn("an unnamed footpath", names)
         self.assertFalse({n for n in names if n in ("footway", "service")}, "a bare road type reads like a place name")
+        from safety import UNNAMED
+        self.assertEqual("an unnamed " + UNNAMED.get("road", "road road"), "an unnamed road")
 
     def test_too_far(self):
         with self.assertRaises(TooFar):

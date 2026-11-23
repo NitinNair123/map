@@ -949,14 +949,22 @@ sosBtn.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === "
 sosBtn.addEventListener("contextmenu", (e) => e.preventDefault());
 
 let sosTimer = null;
+// an alert replaces the countdown text, so reopening SOS while it is still up (a missed check-in) must put it back,
+// or the countdown stops at 5, never alerts, and Escape can't close it
+function resetSOSText() {
+  $("#sosTitle").textContent = "SOS message";
+  $("#sosSub").innerHTML = 'Your messages app opens in <b id="sosSecs">5</b> seconds with your location written in. Tap cancel if you\'re OK.';
+}
 async function openSOS(now = false) {
+  resetSOSText();
   $("#sosOverlay").hidden = false;
   vibrate([500, 200, 500]);
   let left = now ? 0 : 5;
   const tick = () => {
     $("#sosCount").textContent = left > 0 ? left : "SOS";
     $("#sosCount").classList.toggle("done", left <= 0);
-    $("#sosSecs").textContent = left;
+    const secs = $("#sosSecs");  // gone if the previous alert, still finding a location, rewrote the text after a reopen
+    if (secs) secs.textContent = left;
     if (left <= 0) { clearInterval(sosTimer); alertContacts(); }
     left -= 1;
   };
@@ -1014,8 +1022,7 @@ $("#sosCancel").onclick = () => {
   clearInterval(sosTimer); clearInterval(state.sosPing); stopSiren();
   if (state.sosTrip) { api(`/api/trip/${state.sosTrip.id}`, { key: state.sosTrip.key, ended: true }).catch(() => {}); state.sosTrip = null; }
   $("#sosOverlay").hidden = true;
-  $("#sosTitle").textContent = "SOS message";
-  $("#sosSub").innerHTML = 'Your messages app opens in <b id="sosSecs">5</b> seconds with your location written in. Tap cancel if you\'re OK.';
+  resetSOSText();
   sosBtn.focus();
 };
 // alertdialog: Escape cancels, and Tab cycles inside it instead of reaching the map behind
@@ -1297,7 +1304,7 @@ function onboarding(step = 0) {
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
 addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); state.installPrompt = e; if (!state.to) renderIdle(); });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=25").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=26").catch(() => {});
 
 // ---------- start ----------
 renderIdle();

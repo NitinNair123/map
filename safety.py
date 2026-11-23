@@ -313,7 +313,7 @@ def surroundings_kind(tags):
 
 
 # How an unnamed street is called on the route card ("an unnamed footpath", else "an unnamed service road")
-UNNAMED = {"footway": "footpath", "path": "path", "steps": "stairway", "pedestrian": "pedestrian street", "cycleway": "cycle path", "track": "track"}
+UNNAMED = {"road": "road", "footway": "footpath", "path": "path", "steps": "stairway", "pedestrian": "pedestrian street", "cycleway": "cycle path", "track": "track"}
 
 class Area:
     def __init__(self, osm, reports=(), incidents=(), stops=(), unloaded=None):
