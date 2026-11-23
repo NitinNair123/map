@@ -191,6 +191,14 @@ class ServerTest(unittest.TestCase):
         for m in ([1, 2], None, "x"):
             self.assertEqual(self.call("/api/route-feel", {"feel": "safe", "mid": [28, 77], "hour": 3, "measures": m})[0], 400, m)
 
+    def test_low_battery_reaches_the_viewer(self):
+        _, t = self.call("/api/trip", {"dest": [28.6, 77.2], "eta": 10})
+        self.assertEqual(self.call(f"/api/trip/{t['id']}", {"key": t["key"], "lat": 28.61, "lon": 77.21, "battery": 12})[0], 200)
+        self.assertEqual(self.call(f"/api/trip/{t['id']}")[1]["battery"], 12)
+        self.assertEqual(self.call(f"/api/trip/{t['id']}", {"key": t["key"], "lat": 28.61, "lon": 77.21, "battery": 140})[0], 400)
+        self.call(f"/api/trip/{t['id']}", {"key": t["key"], "lat": 28.61, "lon": 77.21})  # browsers without the battery API
+        self.assertEqual(self.call(f"/api/trip/{t['id']}")[1]["battery"], 12, "an update without a level keeps the last one")
+
     def test_trips_expire(self):
         _, t = self.call("/api/trip", {"dest": [28.6, 77.2]})
         server.trips[t["id"]]["started"] -= server.TRIP_TTL + 1

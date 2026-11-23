@@ -583,7 +583,7 @@ class Handler(SimpleHTTPRequestHandler):
                 t = trips.get(u.path.rsplit("/", 1)[1])
                 if not t:
                     return self.send_json({"error": "This trip has ended or the link is wrong."}, 404)
-                return self.send_json({k: t[k] for k in ("name", "dest", "eta", "mode", "vehicle", "points", "started", "updated", "ended")})
+                return self.send_json({k: t[k] for k in ("name", "dest", "eta", "mode", "vehicle", "battery", "points", "started", "updated", "ended")})
         except TooFar as e:
             return self.send_json({"error": str(e)}, 400)
         except ConnectionError as e:
@@ -715,7 +715,7 @@ class Handler(SimpleHTTPRequestHandler):
             tid, key = secrets.token_urlsafe(9), secrets.token_urlsafe(18)
             now = time.time()
             trips[tid] = {"key": key, "name": str(body.get("name", ""))[:40], "dest": dest,
-                          "eta": eta, "mode": mode, "vehicle": "",
+                          "eta": eta, "mode": mode, "vehicle": "", "battery": None,
                           "points": [], "started": now, "updated": now, "ended": False}
         self.send_json({"id": tid, "key": key})
 
@@ -730,6 +730,11 @@ class Handler(SimpleHTTPRequestHandler):
             elif "vehicle" in body:  # the cab, auto or bike-taxi number, so friends know which vehicle to look for
                 t["vehicle"] = " ".join(str(body["vehicle"]).split())[:20]
             elif "lat" in body:
+                if body.get("battery") is not None:  # so friends know a silent phone may simply be flat
+                    level = int(body["battery"])
+                    if not 0 <= level <= 100:
+                        raise ValueError("battery must be 0-100")
+                    t["battery"] = level
                 t["points"] = (t["points"] + [latlon((body["lat"], body["lon"])) + (time.time(),)])[-300:]
                 t["updated"] = time.time()
         self.send_json({"ok": True})

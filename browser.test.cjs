@@ -276,3 +276,22 @@ test("in a cab, the vehicle number reaches the friend's live viewer", async () =
   assert.deepEqual(errors, []);
   await ctx.close();
 });
+
+test("at low battery the walker is offered a last-location text and friends see the level", async () => {
+  const { ctx, page, errors } = await phone([{ name: "Asha", phone: "+91 98100 00000" }]);
+  await page.addInitScript(() => {
+    navigator.share = async () => {};
+    navigator.getBattery = async () => ({ level: 0.12, charging: false });
+  });
+  await routeToPharmacy(page);
+  await page.click("#startBtn");
+  await page.waitForSelector("text=Sharing live");
+  await page.evaluate(() => onTripPosition([28.0001, 77.0001]));
+  await page.waitForSelector("text=Battery at 12%");
+  assert.match(await page.getAttribute("#batterySms", "href"), /^sms:\+919810000000\?&body=My%20phone%20is%20at%2012%25.*maps\.google\.com.*%2Ft%2F%3Fid%3D/);
+  const viewer = await ctx.newPage();
+  await viewer.goto(`${BASE}/t/?id=${await page.evaluate(() => state.trip.id)}`);
+  await viewer.waitForSelector("text=Phone battery 12%");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});

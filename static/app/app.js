@@ -779,6 +779,21 @@ function renderTrip() {
   });
 }
 
+// Android Chrome tells the page the battery level; friends see it on the live map, and at 15% we offer a last-location text
+const LOW_BATTERY = 15;
+navigator.getBattery?.().then((b) => (state.battery = b), () => {});
+function lowBattery(level, pt) {
+  const t = state.trip, contacts = store.get("contacts", []);
+  const text = `My phone is at ${level}% battery. I'm on my way to ${state.toLabel || "my destination"}. Last location: https://maps.google.com/?q=${pt[0].toFixed(6)},${pt[1].toFixed(6)} Live:`;
+  vibrate([200, 100, 200]);
+  openDrawer(`<h2 id="drawerTitle">Battery at ${level}%</h2>
+    <p>If your phone dies, your friends' map stops. Send them where you are now, while you can.</p>
+    ${contacts.length ? `<a class="btn btn-primary btn-block" id="batterySms" href="${esc(smsLink(contacts, `${text} ${tripLink(t.id)}`))}">${icon("share")}Text my contacts</a>`
+      : `<button class="btn btn-primary btn-block" id="batteryShare">${icon("share")}Share my location</button>`}
+    <button class="btn btn-block" data-close>Not now</button>`);
+  $("#batteryShare")?.addEventListener("click", () => { closeDrawer(); shareText(text, tripLink(t.id)); });
+  $("#batterySms")?.addEventListener("click", closeDrawer);
+}
 function onTripPosition(pt) {
   const t = state.trip, r = t.route;
   const p = updateGuidance(pt);
@@ -786,7 +801,9 @@ function onTripPosition(pt) {
   if (metres(pt, t.lastMovePt || pt) > 15) { t.lastMovePt = pt; t.lastMoveAt = Date.now(); }
   if (Date.now() - t.lastPost > 10000) {
     t.lastPost = Date.now();
-    api(`/api/trip/${t.id}`, { key: t.key, lat: pt[0], lon: pt[1] }).catch(() => {});
+    const battery = state.battery ? Math.round(state.battery.level * 100) : null;
+    api(`/api/trip/${t.id}`, { key: t.key, lat: pt[0], lon: pt[1], battery }).catch(() => {});
+    if (battery !== null && battery <= LOW_BATTERY && !state.battery.charging && !t.batteryWarned) { t.batteryWarned = true; lowBattery(battery, pt); }
   }
   if (metres(pt, r.coords[r.coords.length - 1]) < 40) return endTrip(true, true);
   const stop = state.stops.filter((s) => s.pt)[t.nextStop];

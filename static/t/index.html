@@ -80,12 +80,12 @@ async function poll() {
   if (since > 300) {
     s.className = "status stale"; s.textContent = `No update for ${Math.round(since / 60)} min`;
     $("#title").textContent = `Check on ${who}`;
-    $("#detail").textContent = `${t.vehicle ? `Last known vehicle: ${t.vehicle}. ` : ""}Their phone may have lost signal or battery. Try calling them.`;
+    $("#detail").textContent = `${t.vehicle ? `Last known vehicle: ${t.vehicle}. ` : ""}${t.battery !== null && t.battery !== undefined ? `Battery was ${t.battery}%. ` : ""}Their phone may have lost signal or battery. Try calling them.`;
   } else {
     s.className = "status live"; s.textContent = "Live";
     $("#title").textContent = `${who} is ${({ bike: "riding", car: "on the way" })[t.mode] || "walking"}`;
     const mins = t.eta ? Math.max(0, Math.round(t.eta - (Date.now() / 1000 - t.started) / 60)) : null;
-    $("#detail").textContent = `${t.vehicle ? `In vehicle ${t.vehicle}. ` : ""}Updated ${ago(since)}${mins !== null ? ` · about ${mins} min to go` : ""}.`;
+    $("#detail").textContent = `${t.vehicle ? `In vehicle ${t.vehicle}. ` : ""}${t.battery <= 20 && t.battery !== null && t.battery !== undefined ? `Phone battery ${t.battery}%. ` : ""}Updated ${ago(since)}${mins !== null ? ` · about ${mins} min to go` : ""}.`;
   }
   setTimeout(poll, 10000);
 }
