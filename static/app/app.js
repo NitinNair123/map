@@ -43,19 +43,24 @@ function segDist(p, a, b) {
 // ---------- ride apps ----------
 // Uber's free deep link takes several drop points ("multi-stop", developer.uber.com deep-links docs), so a cab can be
 // steered onto our route; Ola's takes pickup and drop only. Every stop makes the driver pull over (and may cost waiting
-// time), so we add at most 2, where our route leaves the fastest drive.
-const RIDE_OFF_M = 150, RIDE_MAX_STOPS = 2;
+// time), so we add at most 2, spread along the longest stretches where our route leaves the fastest drive.
+// A stretch under 300 m is a corner or a parallel lane, not worth a stop: one such blip near the start sent a
+// Gurugram test ride out to a corner and back (Nov 2026).
+const RIDE_OFF_M = 150, RIDE_MAX_STOPS = 2, RIDE_MIN_RUN_M = 300, RIDE_TWO_STOPS_M = 3000;
 function rideStops(r, fastest) {
   if (!fastest || fastest === r || r.same_as === "fastest" || (r.mode || "walk") !== "car") return [];
   const f = fastest.coords, off = (p) => { let d = Infinity; for (let i = 0; i < f.length - 1; i++) d = Math.min(d, segDist(p, f[i], f[i + 1])); return d; };
-  const runs = []; let cur = null;  // each stretch that leaves the fastest road gives one stop, at its farthest point
+  const runs = []; let cur = null;  // each stretch of our route that is off the fastest road, with distance along it
   r.coords.forEach((p, i) => {
-    const d = off(p);
-    if (d <= RIDE_OFF_M) { cur = null; return; }
-    if (!cur) runs.push(cur = { d: 0 });
-    if (d > cur.d) Object.assign(cur, { d, i, p });
+    if (off(p) <= RIDE_OFF_M) { cur = null; return; }
+    if (!cur) runs.push(cur = { pts: [], len: 0 });
+    if (cur.pts.length) cur.len += metres(cur.pts[cur.pts.length - 1].p, p);
+    cur.pts.push({ i, p, at: cur.len });
   });
-  return runs.sort((a, b) => b.d - a.d).slice(0, RIDE_MAX_STOPS).map((x) => ({ pt: x.p, i: x.i, label: "On the SafeRoute route" }));
+  const long = runs.filter((x) => x.len >= RIDE_MIN_RUN_M).sort((a, b) => b.len - a.len).slice(0, RIDE_MAX_STOPS);
+  const at = (run, k) => run.pts.find((x) => x.at >= k * run.len);
+  const picks = long.length === 1 && long[0].len >= RIDE_TWO_STOPS_M ? [at(long[0], 1 / 3), at(long[0], 2 / 3)] : long.map((x) => at(x, 1 / 2));
+  return picks.map((x) => ({ pt: x.p, i: x.i, label: "On the SafeRoute route" }));
 }
 function rideLinks(a, b, stops, fromLabel, toLabel) {
   const n = (x) => +x.toFixed(6);
@@ -1304,7 +1309,7 @@ function onboarding(step = 0) {
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
 addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); state.installPrompt = e; if (!state.to) renderIdle(); });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=27").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=28").catch(() => {});
 
 // ---------- start ----------
 renderIdle();

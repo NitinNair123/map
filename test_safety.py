@@ -443,6 +443,29 @@ class OpenDataTest(unittest.TestCase):
             tiles._overture = real
         self.assertEqual(nodes, ["c0", "c1", "c2", "c3"])  # the 4th junction gets its own point instead of replacing one
 
+    def test_overture_one_way_streets_stay_one_way(self):
+        import struct
+        import tiles
+        pts = [(77.0, 28.0), (77.001, 28.0)]
+        wkb = struct.pack("<BII", 1, 2, len(pts)) + b"".join(struct.pack("<dd", *p) for p in pts)
+        rule = lambda heading, mode=None, between=None: {"access_type": "denied", "between": between,
+                                                        "when": {"heading": heading, "mode": mode}}
+        cases = {"back": [rule("backward")], "fwd": [rule("forward")], "cars": [rule("backward", ["motor_vehicle"])],
+                 "part": [rule("backward", None, [0.2, 0.4])], "foot": [rule(None, ["foot"])], "none": None}
+        rows = [{"id": k, "geometry": wkb, "class": "residential", "subclass": None, "names": None, "road_flags": None,
+                 "sources": None, "connectors": [], "access_restrictions": v} for k, v in cases.items()]
+        real = tiles._overture
+        tiles._overture = lambda *a, **k: rows
+        try:
+            tags = {el["id"][3:]: el["tags"] for el in tiles.overture_roads(0, 0, 1, 1)["elements"]}
+        finally:
+            tiles._overture = real
+        self.assertEqual(tags["back"].get("oneway"), "yes")
+        self.assertEqual(tags["fwd"].get("oneway"), "-1")
+        self.assertEqual((tags["cars"].get("oneway"), tags["cars"].get("oneway:bicycle")), ("yes", "no"))
+        for k in ("part", "foot", "none"):  # part of a segment, walking rules or no rules: not a one-way street
+            self.assertNotIn("oneway", tags[k])
+
     def test_buildings_overlook_street(self):
         els = fixture()["elements"] + [node(f"b{k}", (28.0004, 77.0005 + k * 0.0001), building="yes") for k in range(20)]
         area = Area({"elements": els})
