@@ -25,6 +25,16 @@ class Search(unittest.TestCase):
         shops = [{"name": f"Mumbai Dhaba {i}", "pt": [28.47 + i / 1000, 77.49], "kind": "restaurant"} for i in range(9)]
         self.assertEqual(server.rank("mumbai", HOME, city + shops)[-1]["name"], "Mumbai")  # the city isn't buried
 
+    def test_far_away_namesakes_are_dropped_when_near_matches_exist(self):
+        found = [{"name": "Green Park Market", "pt": [28.556, 77.202], "kind": "Delhi"},
+                 {"name": "Market Green Retail Park", "pt": [51.9, -8.17], "kind": "Midleton"},
+                 {"name": "Green Thumb Fruit Market", "pt": [43.65, -79.47], "kind": "Toronto"},
+                 {"name": "Green Park", "pt": [51.5, -0.14], "kind": "London", "big": True}]
+        out = [r["name"] for r in server.rank("green park market", (28.545, 77.207), found)]
+        self.assertEqual(out, ["Green Park Market", "Green Park"])  # a big place (city, area) Photon found stays
+        alone = server.rank("market green", (28.545, 77.207), found[1:3])
+        self.assertEqual(len(alone), 2)  # with nothing near, far results are all there is, so they stay
+
     def test_metro_finds_stations_near_the_user(self):
         old = server.photon_get
         calls = []
