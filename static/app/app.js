@@ -1321,7 +1321,7 @@ function onboarding(step = 0) {
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
 addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); state.installPrompt = e; if (!state.to) renderIdle(); });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=28").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=29").catch(() => {});
 
 // ---------- start ----------
 renderIdle();
