@@ -2,6 +2,7 @@
 import json
 from datetime import datetime
 import os
+import re
 import tempfile
 import threading
 import unittest
@@ -154,6 +155,15 @@ class ServerTest(unittest.TestCase):
             self.assertEqual(cache(path), "no-cache", path)  # a CDN in front (Cloudflare) would otherwise keep old code for hours
         self.assertEqual(cache("/vendor/leaflet/leaflet.js"), "public, max-age=86400")
         self.assertEqual(cache("/api/heat?bbox=0,0,0,0"), "no-store")
+
+    def test_app_file_versions_match_the_service_worker_cache(self):
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+        read = lambda *p: open(os.path.join(root, *p), encoding="utf-8").read()
+        cache = re.search(r'CACHE = "saferoute-v(\d+)"', read("sw.js")).group(1)
+        for f in [("index.html",), ("app", "index.html"), ("t", "index.html"), ("app", "app.js"), ("sw.js",)]:
+            found = re.findall(r'\.(?:js|css)\?v=(\d+)', read(*f))
+            self.assertTrue(found, f)
+            self.assertEqual(set(found), {cache}, f)  # one old number and some phones keep running old code behind the CDN
 
     def test_ending_a_trip_deletes_its_locations(self):
         _, t = self.call("/api/trip", {"dest": [28.6, 77.2], "eta": 10})

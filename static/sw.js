@@ -1,6 +1,8 @@
 // App shell cache so SafeRoute opens instantly, and the SOS screen still works with a weak signal.
-const CACHE = "saferoute-v22";
-const SHELL = ["/", "/app/", "/app/app.js", "/app/voice.js", "/app/app.css", "/theme.css", "/manifest.webmanifest", "/icons/icon.svg", "/icons/icon-192.png",
+// Bump this with every release, and the ?v= on the app's files to the same number (test_server checks they match):
+// a CDN in front caches by full URL, so a new number makes every phone fetch the new code at once.
+const CACHE = "saferoute-v23";
+const SHELL = ["/", "/app/", "/app/app.js?v=23", "/app/voice.js?v=23", "/app/app.css?v=23", "/theme.css?v=23", "/manifest.webmanifest", "/icons/icon.svg", "/icons/icon-192.png",
   "/vendor/leaflet/leaflet.css", "/vendor/leaflet/leaflet.js",
   "/vendor/maplibre/maplibre-gl.css", "/vendor/maplibre/maplibre-gl.js", "/vendor/maplibre/leaflet-maplibre-gl.js"];
 
