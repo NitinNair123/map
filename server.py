@@ -403,7 +403,7 @@ def reword_sos(text):
 
 def end_trip(t):
     """Delete every location of a trip as soon as it ends; only the name and "ended" stay for the viewer."""
-    t.update(points=[], dest=None, eta=0, ended=True, updated=time.time())
+    t.update(points=[], dest=None, eta=0, vehicle="", ended=True, updated=time.time())
 
 
 def allowed(kind, client):
@@ -556,7 +556,7 @@ class Handler(SimpleHTTPRequestHandler):
                 t = trips.get(u.path.rsplit("/", 1)[1])
                 if not t:
                     return self.send_json({"error": "This trip has ended or the link is wrong."}, 404)
-                return self.send_json({k: t[k] for k in ("name", "dest", "eta", "points", "started", "updated", "ended")})
+                return self.send_json({k: t[k] for k in ("name", "dest", "eta", "mode", "vehicle", "points", "started", "updated", "ended")})
         except TooFar as e:
             return self.send_json({"error": str(e)}, 400)
         except ConnectionError as e:
@@ -674,6 +674,9 @@ class Handler(SimpleHTTPRequestHandler):
         eta = float(body.get("eta", 0))
         if not 0 <= eta <= 24 * 60:
             raise ValueError("bad eta")
+        mode = body.get("mode", "walk")
+        if mode not in MODES:
+            raise ValueError("mode must be walk, bike or car")
         with lock:
             expire_trips()
             if len(trips) >= MAX_TRIPS:
@@ -681,7 +684,8 @@ class Handler(SimpleHTTPRequestHandler):
             tid, key = secrets.token_urlsafe(9), secrets.token_urlsafe(18)
             now = time.time()
             trips[tid] = {"key": key, "name": str(body.get("name", ""))[:40], "dest": dest,
-                          "eta": eta, "points": [], "started": now, "updated": now, "ended": False}
+                          "eta": eta, "mode": mode, "vehicle": "",
+                          "points": [], "started": now, "updated": now, "ended": False}
         self.send_json({"id": tid, "key": key})
 
     def update_trip(self, tid, body):
@@ -692,6 +696,8 @@ class Handler(SimpleHTTPRequestHandler):
         with lock:
             if body.get("ended"):
                 end_trip(t)
+            elif "vehicle" in body:  # the cab, auto or bike-taxi number, so friends know which vehicle to look for
+                t["vehicle"] = " ".join(str(body["vehicle"]).split())[:20]
             elif "lat" in body:
                 t["points"] = (t["points"] + [latlon((body["lat"], body["lon"])) + (time.time(),)])[-300:]
                 t["updated"] = time.time()

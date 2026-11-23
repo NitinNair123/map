@@ -152,6 +152,16 @@ class ServerTest(unittest.TestCase):
         # an ended trip can't be restarted or moved again
         self.assertEqual(self.call(f"/api/trip/{t['id']}", {"key": t["key"], "lat": 28.6, "lon": 77.2})[0], 404)
 
+    def test_vehicle_number_shows_to_the_viewer_and_goes_when_the_trip_ends(self):
+        _, t = self.call("/api/trip", {"dest": [28.6, 77.2], "eta": 10, "mode": "car"})
+        self.assertEqual(self.call(f"/api/trip/{t['id']}", {"key": "wrong", "vehicle": "DL1RA0000"})[0], 404)
+        self.assertEqual(self.call(f"/api/trip/{t['id']}", {"key": t["key"], "vehicle": "  DL 1R AB 1234 " + "x" * 40})[0], 200)
+        view = self.call(f"/api/trip/{t['id']}")[1]
+        self.assertEqual((view["mode"], view["vehicle"]), ("car", "DL 1R AB 1234 xxxxxx"))
+        self.assertEqual(self.call("/api/trip", {"dest": [28.6, 77.2], "mode": "plane"})[0], 400)
+        self.call(f"/api/trip/{t['id']}", {"key": t["key"], "ended": True})
+        self.assertEqual(self.call(f"/api/trip/{t['id']}")[1]["vehicle"], "")
+
     def test_trips_expire(self):
         _, t = self.call("/api/trip", {"dest": [28.6, 77.2]})
         server.trips[t["id"]]["started"] -= server.TRIP_TTL + 1

@@ -582,8 +582,8 @@ async function renderIdle() {
 
 // ---------- live trip ----------
 const tripLink = (id) => `${location.origin}/t/?id=${id}`;
-async function createTrip(dest, eta, timeoutMs) {
-  const t = await api("/api/trip", { dest, eta, name: store.get("myName", "") }, timeoutMs);
+async function createTrip(dest, eta, timeoutMs, mode = "walk") {
+  const t = await api("/api/trip", { dest, eta, mode, name: store.get("myName", "") }, timeoutMs);
   if (state.here) api(`/api/trip/${t.id}`, { key: t.key, lat: state.here[0], lon: state.here[1] }).catch(() => {});
   return t;
 }
@@ -600,7 +600,7 @@ const smsLink = (contacts, body) => `sms:${contacts.map((c) => c.phone.replace(/
 async function startTrip(opts = {}) {
   const r = state.routes.find((x) => x.kind === state.sel);
   let t;
-  try { t = await createTrip(state.to, r.minutes); } catch (e) { return toast(e.message); }
+  try { t = await createTrip(state.to, r.minutes, undefined, r.mode || "walk"); } catch (e) { return toast(e.message); }
   const shared = shareText(`I'm ${MODE[r.mode || "walk"].verb} to ${state.toLabel || "my destination"} with SafeRoute, about ${r.minutes} min. Follow me live:`, tripLink(t.id));
   if (opts.shareOnly) { await shared; return; }
   startWatching();
@@ -744,13 +744,16 @@ function renderTrip() {
   const t = state.trip, r = t.route;
   const p = state.here ? routeProgress(state.here, r.coords) : { left: r.length_m, idx: 0 };
   const done = Math.max(0, Math.min(100, 100 * (1 - p.left / Math.max(r.length_m, 1))));
+  const speed = r.length_m / Math.max(60, r.minutes * 60);  // this route's own pace, so a drive isn't timed at walking speed
   const ahead = state.here ? r.havens.map((h) => ({ ...h, d: metres(state.here, h.pt) })).sort((a, b) => a.d - b.d)[0] : r.havens[0];
   renderSheet(`
-    <div class="nav-head"><div style="flex:1"><h3>${Math.max(1, Math.round(p.left / 1.3 / 60))} min · ${fmtDist(p.left)} left</h3>
+    <div class="nav-head"><div style="flex:1"><h3>${Math.max(1, Math.round(p.left / speed / 60))} min · ${fmtDist(p.left)} left</h3>
       <p class="muted" style="margin:0">to ${esc(state.toLabel || "destination")}</p></div><span class="live">Sharing live</span></div>
     <div class="progress"><div style="width:${done}%"></div></div>
     <p class="muted" style="margin:0">Keep SafeRoute open with the screen on. If the phone locks, your friends' map stops updating and check-ins pause.</p>
     ${ahead ? `<div class="haven"><span class="ico">${icon("store")}</span><div><b>${esc(ahead.name)}</b><div class="muted">Open now${ahead.d ? ` · ${fmtDist(ahead.d)}` : ""}. Step in if anything feels off.</div></div></div>` : ""}
+    ${r.mode && r.mode !== "walk" ? `<form class="form vehicle" id="vehicleForm"><input name="v" maxlength="20" autocomplete="off" placeholder="Cab, auto or bike-taxi number" aria-label="Vehicle number" value="${esc(t.vehicle || "")}">
+      <button class="btn" type="submit">${t.vehicle ? "Update" : "Share"}</button></form>` : ""}
     <p class="muted" style="margin:0">How is it here right now? One tap, anonymous.</p>
     <div class="report-grid quick">${REPORTS.filter(([k]) => QUICK.includes(k)).map(([k, e, l]) => `<button data-quick="${k}"><span>${e}</span>${l}</button>`).join("")}</div>
     <div class="actions"><button class="btn btn-primary" id="safeBtn">${icon("check")}I've arrived safely</button>
@@ -765,7 +768,15 @@ function renderTrip() {
   $("#simBtn").onclick = simulateWalk;
   $("#safeBtn").onclick = () => endTrip(true);
   $("#endTrip").onclick = () => endTrip(false);
-  $("#tripShare").onclick = () => shareText("Follow my walk live on SafeRoute:", tripLink(t.id));
+  $("#tripShare").onclick = () => shareText(`Follow my ${MODE[r.mode || "walk"].noun} live on SafeRoute:${t.vehicle ? ` I'm in vehicle ${t.vehicle}.` : ""}`, tripLink(t.id));
+  $("#vehicleForm")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const v = e.target.v.value.trim().toUpperCase();
+    try { await api(`/api/trip/${t.id}`, { key: t.key, vehicle: v }); } catch (err) { return toast(err.message); }
+    t.vehicle = v;
+    toast(v ? `Your live link now shows ${v}` : "Vehicle number removed");
+    renderTrip();
+  });
 }
 
 function onTripPosition(pt) {
@@ -904,7 +915,7 @@ async function alertContacts(medical = false) {
   const facts = MEDICAL.filter(([k]) => med[k]).map(([k, l]) => `${l}: ${med[k]}.`).join(" ");
   const body = medical
     ? await reword(`Medical emergency: ${who === "me" ? "I need" : who + " needs"} an ambulance. ${facts} ${where}`.replace(/\s+/g, " ").trim())
-    : `SOS from ${who}: I need help. ${where}`.trim();
+    : `SOS from ${who}: I need help.${state.trip?.vehicle ? ` I'm in vehicle ${state.trip.vehicle}.` : ""} ${where}`.trim();
   // a web page can't send a text or call by itself: it opens the messages app or share sheet, and the user presses Send
   $("#sosTitle").textContent = contacts.length ? "Press Send in your messages app" : "Choose who to send it to";
   $("#sosSub").textContent = `${contacts.length ? "Your text is written, but it only goes out when you press Send." : "Send it from the share menu, or paste it into a chat if it was copied."} ${

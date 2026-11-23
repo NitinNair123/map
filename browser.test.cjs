@@ -251,3 +251,28 @@ test("save home once, then one tap routes there; it can be forgotten in settings
   assert.deepEqual(errors, []);
   await ctx.close();
 });
+
+test("in a cab, the vehicle number reaches the friend's live viewer", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.addInitScript(() => { navigator.share = async (d) => { window.shared = d.text; }; });
+  await page.goto(BASE + "/app/");
+  await page.click("[data-mode=car]");
+  await page.fill("#toInput", "city");
+  await page.click("#results li >> text=City Pharmacy");
+  await page.waitForSelector("#startBtn", { timeout: 15000 });
+  const minutes = await page.evaluate(() => state.routes.find((x) => x.kind === state.sel).minutes);
+  await page.click("#startBtn");
+  await page.waitForSelector("text=Sharing live");
+  const left = +(await page.textContent(".nav-head h3")).match(/(\d+) min/)[1];
+  assert.ok(left <= minutes + 1, `a drive is timed at driving pace: ${left} min left on a ${minutes} min route`);
+  await page.fill("#vehicleForm input", "dl 1r ab 1234");
+  await page.click("#vehicleForm button");
+  await page.waitForSelector("text=Your live link now shows DL 1R AB 1234");
+  const id = await page.evaluate(() => state.trip.id);
+  const viewer = await ctx.newPage();
+  await viewer.goto(`${BASE}/t/?id=${id}`);
+  await viewer.waitForSelector("text=In vehicle DL 1R AB 1234");
+  assert.match(await viewer.textContent("#title"), /is on the way/);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
