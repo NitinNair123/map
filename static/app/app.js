@@ -346,7 +346,7 @@ async function maybeRoute() {
     if (!from) { renderSheet(`<div class="empty"><div class="badge">${icon("locate")}</div><div><h3>Where are you starting?</h3><p class="muted">Turn on location, or type a start point above.</p></div></div>`); $("#fromInput").focus(); return; }
   }
   if (metres(from, state.to) < 30) {
-    routeLayer.clearLayers(); havenLayer.clearLayers();
+    routeLayer.clearLayers(); havenLayer.clearLayers(); state.placesFor = null;
     return renderSheet(`<div class="empty"><div class="badge">${icon("check")}</div><div><h3>You're already there</h3><p class="muted">Pick a destination further away.</p></div></div>`);
   }
   const seq = ++routeSeq;
@@ -394,10 +394,16 @@ function drawRoutes(fit) {
   }
 }
 
+// Hundreds of pins hid the route line, so zoomed out only places open when you pass show; zoom in to see the rest
+const PINS_ALL_ZOOM = 16, PINS_OPEN_ZOOM = 15;
+map.on("zoomend", () => { if (state.placesFor) { havenLayer.clearLayers(); drawPlaces(state.placesFor); } });
 function drawPlaces(r) {
+  state.placesFor = r;
+  const z = map.getZoom();
   for (const pl of r.places || []) {
     const g = groupOf(pl.group);
     if (!state.groups.has(g)) continue;
+    if (z < PINS_ALL_ZOOM && (z < PINS_OPEN_ZOOM || pl.open !== true)) continue;
     const [letter, color, name] = GROUP[g];
     const status = g === "cctv" ? "" : pl.open === true ? "open when you pass" : pl.open === false ? "closed when you pass" : "hours not published";
     L.marker(pl.pt, { icon: L.divIcon({ className: "", html: `<div class="gpin ${g === "cctv" ? "" : pl.open === true ? "open" : pl.open === false ? "closed" : "unknown"}" style="background:${color}">${letter}</div>`, iconSize: [22, 22], iconAnchor: [11, 11] }), keyboard: false })
@@ -471,7 +477,7 @@ function renderRoutes() {
   if (state.rain) notes.push(["", "It's raining, so streets may be emptier than usual."]);
   if (r.weakest && r.weakest.score < 45) notes.push(["", `Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because of ${r.weakest.why.toLowerCase()}. It's dashed on the map.`]);
   const unknown = (r.places || []).filter((pl) => pl.open === null).length;
-  if (unknown) notes.push(["info", `Faded pins on the map are ${unknown} places with no published hours, so we can't say if they're open. Bright pins are open when you pass. Tap "Report" and "Shops open now" to fix that for everyone.`]);
+  if (unknown) notes.push(["info", `Zoom in to see the places along the way: bright pins are open when you pass, faded pins are the ${unknown} places with no published hours, so we can't say if they're open. Tap "Report" and "Shops open now" to fix that for everyone.`]);
   if (r.headline) notes.unshift(["info", r.headline]);
   if (r.checked > 1) notes.push(["info", `We scored ${r.checked} different ways there${r.max_extra_min ? `, up to ${r.max_extra_min} min longer than the fastest` : ""}. This one ranks #${r.rank}.`]);
   else if (r.checked === 1) notes.push(["info", "This is the only sensible way there on the map, so all three options are the same."]);
@@ -554,7 +560,7 @@ function setSheet(size) {
 // keep the SOS button floating just above the sheet whatever its height
 new ResizeObserver(([e]) => document.documentElement.style.setProperty("--sheet-h", e.target.offsetHeight + "px")).observe($("#sheet"));
 async function renderIdle() {
-  routeLayer.clearLayers(); havenLayer.clearLayers();
+  routeLayer.clearLayers(); havenLayer.clearLayers(); state.placesFor = null;
   const hour = new Date().getHours();
   const greet = hour < 5 ? "Out late?" : hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
   const contacts = store.get("contacts", []);

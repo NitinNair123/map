@@ -295,3 +295,20 @@ test("at low battery the walker is offered a last-location text and friends see 
   assert.deepEqual(errors, []);
   await ctx.close();
 });
+
+test("zoomed out, only open places are pinned so the route line stays visible", async () => {
+  const { ctx, page, errors } = await phone();
+  await routeToPharmacy(page);
+  await page.evaluate(() => { state.routes.find((r) => r.kind === state.sel).places[0].open = null; drawRoutes(); });  // one place without hours
+  const pins = async (z) => {
+    await page.evaluate((z) => new Promise((r) => { map.once("zoomend", r); map.setZoom(z, { animate: false }); }), z);
+    return page.evaluate(() => ({ all: document.querySelectorAll(".gpin").length, notOpen: document.querySelectorAll(".gpin.closed, .gpin.unknown").length }));
+  };
+  const near = await pins(17), mid = await pins(15), far = await pins(13);
+  assert.ok(near.notOpen > 0, "zoomed in, closed and unknown places show too");
+  assert.equal(mid.notOpen, 0);
+  assert.ok(mid.all > 0 && mid.all < near.all, JSON.stringify({ near, mid }));
+  assert.equal(far.all, 0);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
