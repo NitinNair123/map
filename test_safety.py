@@ -226,6 +226,13 @@ class TileTest(unittest.TestCase):
         r = {x["kind"]: x for x in self.store.for_trip(A, B).routes(A, B, NIGHT)}
         self.assertGreater(r["safest"]["score"], r["fastest"]["score"])
 
+    def test_weakest_stretch_names_an_unnamed_street_by_kind(self):
+        names = {r["weakest"]["name"] for r in self.store.for_trip(A, B).routes(A, B, NIGHT) if r["weakest"]}
+        self.assertIn("an unnamed footpath", names)
+        self.assertFalse({n for n in names if n in ("footway", "service")}, "a bare road type reads like a place name")
+        from safety import UNNAMED
+        self.assertEqual("an unnamed " + UNNAMED.get("road", "road road"), "an unnamed road")
+
     def test_too_far(self):
         with self.assertRaises(TooFar):
             self.store.for_trip(A, (28.5, 77.5))

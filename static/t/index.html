@@ -8,15 +8,15 @@
 <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap">
 <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
-<link rel="stylesheet" href="/theme.css">
+<link rel="stylesheet" href="/theme.css?v=27">
 <style>
   html, body { height: 100%; overflow: hidden; }
   #map { position: fixed; inset: 0; }
   .card { position: fixed; z-index: 500; left: 12px; right: 12px; bottom: calc(env(safe-area-inset-bottom) + 12px); max-width: 420px; margin: 0 auto; background: var(--surface); border-radius: 22px; box-shadow: var(--shadow-lg); padding: 18px; display: grid; gap: 8px; }
   .status { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; font-size: 13px; padding: 5px 12px; border-radius: 99px; width: max-content; }
-  .status.live { background: var(--safe-soft); color: var(--safe); }
+  .status.live { background: var(--safe-soft); color: var(--safe-ink); }
   .status.live::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--safe); animation: p 1.6s infinite; }
-  .status.stale { background: var(--caution-soft); color: var(--caution); }
+  .status.stale { background: var(--caution-soft); color: var(--caution-ink); }
   .status.done { background: var(--brand-soft); color: var(--brand); }
   @keyframes p { 50% { opacity: .3; } }
   .card h1 { font-size: 22px; }
@@ -62,11 +62,11 @@ async function poll() {
   const who = t.name || "Your friend";
   const last = t.points[t.points.length - 1];
   const since = Date.now() / 1000 - (last ? last[2] : t.updated);
-  if (!dest && t.dest) dest = L.marker(t.dest, { icon: icon("dest") }).addTo(map).bindTooltip("Destination");
+  if (!dest && t.dest) dest = L.marker(t.dest, { icon: icon("dest"), keyboard: false }).addTo(map).bindTooltip("Destination");
   if (last) {
     const pts = t.points.map((p) => [p[0], p[1]]);
     trail ? trail.setLatLngs(pts) : (trail = L.polyline(pts, { color: "#6d4aff", weight: 5, opacity: .7 }).addTo(map));
-    me ? me.setLatLng(pts[pts.length - 1]) : (me = L.marker(pts[pts.length - 1], { icon: icon("me") }).addTo(map));
+    me ? me.setLatLng(pts[pts.length - 1]) : (me = L.marker(pts[pts.length - 1], { icon: icon("me"), keyboard: false }).addTo(map));
     $("#mapsLink").href = `https://maps.google.com/?q=${last[0]},${last[1]}`;
     if (first) { map.fitBounds(L.latLngBounds([pts[pts.length - 1], t.dest]).pad(0.4)); first = false; }
   }
@@ -80,12 +80,12 @@ async function poll() {
   if (since > 300) {
     s.className = "status stale"; s.textContent = `No update for ${Math.round(since / 60)} min`;
     $("#title").textContent = `Check on ${who}`;
-    $("#detail").textContent = "Their phone may have lost signal or battery. Try calling them.";
+    $("#detail").textContent = `${t.vehicle ? `Last known vehicle: ${t.vehicle}. ` : ""}${t.battery !== null && t.battery !== undefined ? `Battery was ${t.battery}%. ` : ""}Their phone may have lost signal or battery. Try calling them.`;
   } else {
     s.className = "status live"; s.textContent = "Live";
-    $("#title").textContent = `${who} is walking`;
+    $("#title").textContent = `${who} is ${({ bike: "riding", car: "on the way" })[t.mode] || "walking"}`;
     const mins = t.eta ? Math.max(0, Math.round(t.eta - (Date.now() / 1000 - t.started) / 60)) : null;
-    $("#detail").textContent = `Updated ${ago(since)}${mins !== null ? ` · about ${mins} min to go` : ""}.`;
+    $("#detail").textContent = `${t.vehicle ? `In vehicle ${t.vehicle}. ` : ""}${t.battery <= 20 && t.battery !== null && t.battery !== undefined ? `Phone battery ${t.battery}%. ` : ""}Updated ${ago(since)}${mins !== null ? ` · about ${mins} min to go` : ""}.`;
   }
   setTimeout(poll, 10000);
 }

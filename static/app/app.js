@@ -40,6 +40,50 @@ function segDist(p, a, b) {
   const t = Math.max(0, Math.min(1, (px * bx + py * by) / (bx * bx + by * by || 1)));
   return Math.hypot(px - t * bx, py - t * by);
 }
+// ---------- ride apps ----------
+// Uber's free deep link takes several drop points ("multi-stop", developer.uber.com deep-links docs), so a cab can be
+// steered onto our route; Ola's takes pickup and drop only. Every stop makes the driver pull over (and may cost waiting
+// time), so we add at most 2, where our route leaves the fastest drive.
+const RIDE_OFF_M = 150, RIDE_MAX_STOPS = 2;
+function rideStops(r, fastest) {
+  if (!fastest || fastest === r || r.same_as === "fastest" || (r.mode || "walk") !== "car") return [];
+  const f = fastest.coords, off = (p) => { let d = Infinity; for (let i = 0; i < f.length - 1; i++) d = Math.min(d, segDist(p, f[i], f[i + 1])); return d; };
+  const runs = []; let cur = null;  // each stretch that leaves the fastest road gives one stop, at its farthest point
+  r.coords.forEach((p, i) => {
+    const d = off(p);
+    if (d <= RIDE_OFF_M) { cur = null; return; }
+    if (!cur) runs.push(cur = { d: 0 });
+    if (d > cur.d) Object.assign(cur, { d, i, p });
+  });
+  return runs.sort((a, b) => b.d - a.d).slice(0, RIDE_MAX_STOPS).map((x) => ({ pt: x.p, i: x.i, label: "On the SafeRoute route" }));
+}
+function rideLinks(a, b, stops, fromLabel, toLabel) {
+  const n = (x) => +x.toFixed(6);
+  const loc = (p, name) => JSON.stringify({ latitude: n(p[0]), longitude: n(p[1]), ...(name ? { addressLine1: name } : {}) });
+  const uber = new URLSearchParams({ pickup: loc(a, fromLabel) });
+  [...stops, { pt: b, label: toLabel }].forEach((s, i) => uber.append(`drop[${i}]`, loc(s.pt, s.label)));
+  const ola = new URLSearchParams({ lat: n(a[0]), lng: n(a[1]), drop_lat: n(b[0]), drop_lng: n(b[1]), landing_page: "bk" });
+  if (fromLabel) ola.set("address", fromLabel);
+  if (toLabel) ola.set("drop_address", toLabel);
+  // Uber's docs encode spaces as %20
+  return { uber: `https://m.uber.com/looking?${uber.toString().replace(/\+/g, "%20")}`, ola: `https://olawebcdn.com/assets/ola-universal-link.html?${ola}` };
+}
+function rideBox(r) {
+  const near = (pt) => r.coords.reduce((best, c, i) => (metres(c, pt) < metres(r.coords[best], pt) ? i : best), 0);
+  const steer = rideStops(r, state.routes.find((x) => x.kind === "fastest"));
+  // the user's own stops go to Uber too, in the order the route passes them
+  const stops = [...state.stops.filter((s) => s.pt).map((s) => ({ pt: s.pt, i: near(s.pt), label: s.label })), ...steer].sort((a, b) => a.i - b.i);
+  // the typed start and destination, not the route's ends, which are snapped to the nearest street
+  const l = rideLinks(state.from || r.coords[0], state.to || r.coords[r.coords.length - 1], stops, state.fromLabel, state.toLabel);
+  const how = (r.mode || "walk") !== "car" ? "Switch to Car above to get a cab route we can send to Uber as stops."
+    : steer.length ? `Uber gets ${steer.length} extra ${steer.length === 1 ? "stop" : "stops"} on this route, so the driver follows it there. The driver pulls over at each stop, and Uber may charge for the waiting time.`
+    : "This route is the same as the fastest drive, so no stops are needed.";
+  return `<details class="why" id="rideBox"><summary>Book a cab, auto or bike</summary>
+    <div class="actions" style="grid-template-columns:1fr 1fr"><a class="btn" id="uberLink" href="${esc(l.uber)}" target="_blank" rel="noopener">Uber${stops.length ? ` · ${stops.length} ${stops.length === 1 ? "stop" : "stops"}` : ""}</a>
+      <a class="btn" id="olaLink" href="${esc(l.ola)}" target="_blank" rel="noopener">Ola</a></div>
+    <p class="muted" style="margin:8px 0 12px">${esc(how)} Ola only takes the pickup and drop, so its driver picks the way. You book and pay in their app; SafeRoute doesn't see the ride.</p></details>`;
+}
+
 async function api(path, body, timeoutMs = 90000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -57,6 +101,8 @@ let toastTimer;
 function toast(msg, ms = 3200) {
   const t = $("#toast");
   t.textContent = msg; t.hidden = false;
+  const bar = $(".topbar");  // below the search card, so it never covers the fields being typed in
+  if (bar && !state.trip) t.style.top = `${Math.round(bar.getBoundingClientRect().bottom + 8)}px`; else t.style.top = "";
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => (t.hidden = true), ms);
 }
@@ -205,22 +251,27 @@ async function showResults(q) {
   const seq = ++searchSeq;
   const extra = [];
   if (activeField === "from") extra.push({ name: "Your location", kind: "Use GPS", here: true });
+  const typed = q.trim().toLowerCase(), saved = store.get("saved", {});
+  const mine = Object.entries(SAVED).filter(([k, l]) => saved[k] && l.toLowerCase().startsWith(typed))
+    .map(([k, l]) => ({ name: l, kind: saved[k].label, pt: saved[k].pt, saved: k }));
   extra.push({ name: "Choose on map", kind: "Tap anywhere on the map", pick: true });
   let found = [];
   if (q.trim().length >= 2) {
     await new Promise((r) => setTimeout(r, 250)); // wait for typing to pause before searching
     if (seq !== searchSeq) return;
-    const c = map.getCenter().wrap(), near = state.here || [c.lat, c.lng]; // suggest places around the user, like Google Maps
+    // suggest places around the other end of the trip if one is set, else the user, else where the map looks
+    const c = map.getCenter().wrap(), other = activeField === "from" ? state.to : state.from;
+    const near = other || state.here || [c.lat, c.lng];
     found = await api(`/api/search?q=${encodeURIComponent(q)}&near=${near.join(",")}`).catch(() => []);
   }
   if (seq !== searchSeq) return;
   const list = $("#results");
   list.innerHTML = "";
-  [...found, ...extra].forEach((r, i) => {
+  [...mine, ...found, ...extra].forEach((r, i) => {
     const li = document.createElement("li");
     li.setAttribute("role", "option");
-    li.setAttribute("aria-selected", i === 0 && found.length ? "true" : "false");
-    li.innerHTML = `<span class="ico">${icon(r.here ? "locate" : r.pick ? "flag" : r.kind === "street" ? "walk" : "store")}</span><span><b>${esc(r.name)}</b><small>${r.km != null ? `${r.km} km · ` : ""}${esc(cap(String(r.kind).replace(/_/g, " ")))}</small></span>`;
+    li.setAttribute("aria-selected", i === 0 && (found.length || mine.length) ? "true" : "false");
+    li.innerHTML = `<span class="ico">${icon(r.here ? "locate" : r.saved ? "check" : r.pick ? "flag" : r.kind === "street" ? "walk" : "store")}</span><span><b>${esc(r.name)}</b><small>${r.km != null ? `${r.km} km · ` : ""}${esc(cap(String(r.kind).replace(/_/g, " ")))}</small></span>`;
     li.onclick = () => choose(r);
     list.appendChild(li);
   });
@@ -240,6 +291,7 @@ async function choose(r) {
 function setPlace(which, pt, label) {
   if (which.startsWith("stop")) { state.stops[+which.slice(4)] = { pt, label }; return renderStops(); }
   state[which] = pt; state[which + "Label"] = label;
+  if (which === "to" && savingAs) { savePlace(savingAs, pt, label); savingAs = null; }
   $(which === "from" ? "#fromInput" : "#toInput").value = label;
   setMarker(which, pt);
 }
@@ -252,6 +304,21 @@ $("#swapBtn").onclick = () => {
   else if (state.here) setPlace("to", state.here, "Your location");
   maybeRoute();
 };
+
+// ---------- saved places: Home and Work, one tap away, kept on this phone only ----------
+const SAVED = { home: "Home", work: "Work" };
+let savingAs = null;  // "home" or "work" while the user picks the place to save
+function savePlace(k, pt, label) {
+  store.set("saved", { ...store.get("saved", {}), [k]: { pt, label } });
+  toast(`Saved as ${SAVED[k]}. Change it in Settings.`);
+}
+function goSaved(k) {
+  const p = store.get("saved", {})[k];
+  if (p) { setPlace("to", p.pt, SAVED[k]); return maybeRoute(); }
+  savingAs = k; activeField = "to";
+  $("#toInput").focus();
+  toast(`Search for your ${SAVED[k].toLowerCase()} or tap it on the map`);
+}
 
 // ---------- stops ----------
 const stopLayer = L.layerGroup().addTo(map);
@@ -327,7 +394,7 @@ async function maybeRoute() {
     if (!from) { renderSheet(`<div class="empty"><div class="badge">${icon("locate")}</div><div><h3>Where are you starting?</h3><p class="muted">Turn on location, or type a start point above.</p></div></div>`); $("#fromInput").focus(); return; }
   }
   if (metres(from, state.to) < 30) {
-    routeLayer.clearLayers(); havenLayer.clearLayers();
+    routeLayer.clearLayers(); havenLayer.clearLayers(); state.placesFor = null;
     return renderSheet(`<div class="empty"><div class="badge">${icon("check")}</div><div><h3>You're already there</h3><p class="muted">Pick a destination further away.</p></div></div>`);
   }
   const seq = ++routeSeq;
@@ -375,10 +442,16 @@ function drawRoutes(fit) {
   }
 }
 
+// Hundreds of pins hid the route line, so zoomed out only places open when you pass show; zoom in to see the rest
+const PINS_ALL_ZOOM = 16, PINS_OPEN_ZOOM = 15;
+map.on("zoomend", () => { if (state.placesFor) { havenLayer.clearLayers(); drawPlaces(state.placesFor); } });
 function drawPlaces(r) {
+  state.placesFor = r;
+  const z = map.getZoom();
   for (const pl of r.places || []) {
     const g = groupOf(pl.group);
     if (!state.groups.has(g)) continue;
+    if (z < PINS_ALL_ZOOM && (z < PINS_OPEN_ZOOM || pl.open !== true)) continue;
     const [letter, color, name] = GROUP[g];
     const status = g === "cctv" ? "" : pl.open === true ? "open when you pass" : pl.open === false ? "closed when you pass" : "hours not published";
     L.marker(pl.pt, { icon: L.divIcon({ className: "", html: `<div class="gpin ${g === "cctv" ? "" : pl.open === true ? "open" : pl.open === false ? "closed" : "unknown"}" style="background:${color}">${letter}</div>`, iconSize: [22, 22], iconAnchor: [11, 11] }), keyboard: false })
@@ -450,9 +523,9 @@ function renderRoutes() {
   if (r.confidence_level === "none") notes.push(["", "There isn't enough real data on these streets to rate this route yet. Grey dashes mark the unrated parts. Reports and the street survey fill this in."]);
   else if (r.unrated_pct >= 10) notes.push(["", `${r.unrated_pct}% of this route is too thinly mapped to rate. It's shown in grey dashes, and those streets earn no points, which pulls the score down.`]);
   if (state.rain) notes.push(["", "It's raining, so streets may be emptier than usual."]);
-  if (r.weakest && r.weakest.score < 45) notes.push(["", `Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because of ${r.weakest.why.toLowerCase()}. It's dashed on the map.`]);
+  if (r.weakest && r.weakest.score < 45) notes.push(["", `Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because ${WEAK_WHY[r.weakest.why] || "of " + r.weakest.why.toLowerCase()}. It's dashed on the map.`]);
   const unknown = (r.places || []).filter((pl) => pl.open === null).length;
-  if (unknown) notes.push(["info", `Faded pins on the map are ${unknown} places with no published hours, so we can't say if they're open. Bright pins are open when you pass. Tap "Report" and "Shops open now" to fix that for everyone.`]);
+  if (unknown) notes.push(["info", `Zoom in to see the places along the way: bright pins are open when you pass, faded pins are the ${unknown} places with no published hours, so we can't say if they're open. Tap "Report" and "Shops open now" to fix that for everyone.`]);
   if (r.headline) notes.unshift(["info", r.headline]);
   if (r.checked > 1) notes.push(["info", `We scored ${r.checked} different ways there${r.max_extra_min ? `, up to ${r.max_extra_min} min longer than the fastest` : ""}. This one ranks #${r.rank}.`]);
   else if (r.checked === 1) notes.push(["info", "This is the only sensible way there on the map, so all three options are the same."]);
@@ -481,6 +554,7 @@ function renderRoutes() {
       <button class="btn btn-primary" id="startBtn">${icon(MODE[r.mode || "walk"].icon)}${MODE[r.mode || "walk"].start}</button>
       <button class="btn" id="shareRouteBtn" aria-label="Share this trip">${icon("share")}</button>
     </div>
+    ${rideBox(r)}
     ${groupChips(r)}
     <div class="strips">${state.routes.filter((x) => !x.same_as && isMain(x)).map((x) => stripRow(x, r)).join("")}
       <div class="strip-key"><span><i style="background:var(--risk)"></i>300 m or more with nothing open</span><span><i style="background:#6941c6"></i>unlit</span><span><i style="background:var(--safe);width:8px;height:8px;border-radius:50%"></i>open</span><span><i style="background:#c0c5d0;width:8px;height:8px;border-radius:50%"></i>hours unknown</span></div></div>
@@ -535,7 +609,7 @@ function setSheet(size) {
 // keep the SOS button floating just above the sheet whatever its height
 new ResizeObserver(([e]) => document.documentElement.style.setProperty("--sheet-h", e.target.offsetHeight + "px")).observe($("#sheet"));
 async function renderIdle() {
-  routeLayer.clearLayers(); havenLayer.clearLayers();
+  routeLayer.clearLayers(); havenLayer.clearLayers(); state.placesFor = null;
   const hour = new Date().getHours();
   const greet = hour < 5 ? "Out late?" : hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
   const contacts = store.get("contacts", []);
@@ -544,24 +618,28 @@ async function renderIdle() {
     : isIOS() && !standalone() ? `<p class="muted">Install: tap <b>Share</b> then <b>Add to Home Screen</b>.</p>` : "";
   renderSheet(`
     <div class="sheet-head"><div><h3>${greet}</h3><p class="muted" style="margin:0">Search a place or tap the map to see the recommended way there.</p></div></div>
+    <div class="actions saved-places" style="grid-template-columns:1fr 1fr">${Object.entries(SAVED).map(([k, l]) =>
+      `<button class="btn" data-go="${k}">${icon(k === "home" ? "shield" : "store")}${store.get("saved", {})[k] ? l : `Set ${l.toLowerCase()}`}</button>`).join("")}</div>
     ${contacts.length ? "" : `<button class="btn btn-block" id="addContactsBtn">${icon("user")}Add a trusted contact for SOS</button>`}
     <div id="nearby"></div>
     ${install}`);
   $("#addContactsBtn")?.addEventListener("click", openSettings);
+  document.querySelectorAll("[data-go]").forEach((b) => (b.onclick = () => goSaved(b.dataset.go)));
   $("#installBtn")?.addEventListener("click", async () => { state.installPrompt.prompt(); state.installPrompt = null; renderIdle(); });
   if (state.here) {
     const list = await api(`/api/havens?near=${state.here.join(",")}&at=${encodeURIComponent(whenParam())}`).catch(() => []);
     if (list.length && $("#nearby")) {
-      $("#nearby").innerHTML = `<p class="muted" style="margin:12px 0 4px">Open near you right now</p>` + list.slice(0, 3).map((h) =>
-        `<div class="haven"><span class="ico">${icon(h.kind === "police" ? "shield" : "store")}</span><div><b>${esc(h.name)}</b><div class="muted">${fmtDist(h.distance_m)} away</div></div></div>`).join("");
+      $("#nearby").innerHTML = `<p class="muted" style="margin:12px 0 4px">Open near you right now · tap for the way there</p>` + list.slice(0, 3).map((h, i) =>
+        `<button class="haven" data-haven="${i}"><span class="ico">${icon(h.kind === "police" ? "shield" : "store")}</span><div><b>${esc(h.name)}</b><div class="muted">${fmtDist(h.distance_m)} away</div></div></button>`).join("");
+      document.querySelectorAll("[data-haven]").forEach((b) => (b.onclick = () => { const h = list[+b.dataset.haven]; setPlace("to", h.pt, h.name); maybeRoute(); }));
     }
   }
 }
 
 // ---------- live trip ----------
 const tripLink = (id) => `${location.origin}/t/?id=${id}`;
-async function createTrip(dest, eta, timeoutMs) {
-  const t = await api("/api/trip", { dest, eta, name: store.get("myName", "") }, timeoutMs);
+async function createTrip(dest, eta, timeoutMs, mode = "walk") {
+  const t = await api("/api/trip", { dest, eta, mode, name: store.get("myName", "") }, timeoutMs);
   if (state.here) api(`/api/trip/${t.id}`, { key: t.key, lat: state.here[0], lon: state.here[1] }).catch(() => {});
   return t;
 }
@@ -578,7 +656,7 @@ const smsLink = (contacts, body) => `sms:${contacts.map((c) => c.phone.replace(/
 async function startTrip(opts = {}) {
   const r = state.routes.find((x) => x.kind === state.sel);
   let t;
-  try { t = await createTrip(state.to, r.minutes); } catch (e) { return toast(e.message); }
+  try { t = await createTrip(state.to, r.minutes, undefined, r.mode || "walk"); } catch (e) { return toast(e.message); }
   const shared = shareText(`I'm ${MODE[r.mode || "walk"].verb} to ${state.toLabel || "my destination"} with SafeRoute, about ${r.minutes} min. Follow me live:`, tripLink(t.id));
   if (opts.shareOnly) { await shared; return; }
   startWatching();
@@ -722,13 +800,16 @@ function renderTrip() {
   const t = state.trip, r = t.route;
   const p = state.here ? routeProgress(state.here, r.coords) : { left: r.length_m, idx: 0 };
   const done = Math.max(0, Math.min(100, 100 * (1 - p.left / Math.max(r.length_m, 1))));
+  const speed = r.length_m / Math.max(60, r.minutes * 60);  // this route's own pace, so a drive isn't timed at walking speed
   const ahead = state.here ? r.havens.map((h) => ({ ...h, d: metres(state.here, h.pt) })).sort((a, b) => a.d - b.d)[0] : r.havens[0];
   renderSheet(`
-    <div class="nav-head"><div style="flex:1"><h3>${Math.max(1, Math.round(p.left / 1.3 / 60))} min · ${fmtDist(p.left)} left</h3>
+    <div class="nav-head"><div style="flex:1"><h3>${Math.max(1, Math.round(p.left / speed / 60))} min · ${fmtDist(p.left)} left</h3>
       <p class="muted" style="margin:0">to ${esc(state.toLabel || "destination")}</p></div><span class="live">Sharing live</span></div>
     <div class="progress"><div style="width:${done}%"></div></div>
     <p class="muted" style="margin:0">Keep SafeRoute open with the screen on. If the phone locks, your friends' map stops updating and check-ins pause.</p>
     ${ahead ? `<div class="haven"><span class="ico">${icon("store")}</span><div><b>${esc(ahead.name)}</b><div class="muted">Open now${ahead.d ? ` · ${fmtDist(ahead.d)}` : ""}. Step in if anything feels off.</div></div></div>` : ""}
+    ${r.mode && r.mode !== "walk" ? `<form class="form vehicle" id="vehicleForm"><input name="v" maxlength="20" autocomplete="off" placeholder="Cab, auto or bike-taxi number" aria-label="Vehicle number" value="${esc(t.vehicle || "")}">
+      <button class="btn" type="submit">${t.vehicle ? "Update" : "Share"}</button></form>` : ""}
     <p class="muted" style="margin:0">How is it here right now? One tap, anonymous.</p>
     <div class="report-grid quick">${REPORTS.filter(([k]) => QUICK.includes(k)).map(([k, e, l]) => `<button data-quick="${k}"><span>${e}</span>${l}</button>`).join("")}</div>
     <div class="actions"><button class="btn btn-primary" id="safeBtn">${icon("check")}I've arrived safely</button>
@@ -743,9 +824,35 @@ function renderTrip() {
   $("#simBtn").onclick = simulateWalk;
   $("#safeBtn").onclick = () => endTrip(true);
   $("#endTrip").onclick = () => endTrip(false);
-  $("#tripShare").onclick = () => shareText("Follow my walk live on SafeRoute:", tripLink(t.id));
+  $("#tripShare").onclick = () => shareText(`Follow my ${MODE[r.mode || "walk"].noun} live on SafeRoute:${t.vehicle ? ` I'm in vehicle ${t.vehicle}.` : ""}`, tripLink(t.id));
+  $("#vehicleForm")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const v = e.target.v.value.trim().toUpperCase();
+    try { await api(`/api/trip/${t.id}`, { key: t.key, vehicle: v }); } catch (err) { return toast(err.message); }
+    t.vehicle = v;
+    toast(v ? `Your live link now shows ${v}` : "Vehicle number removed");
+    renderTrip();
+  });
 }
 
+// Android Chrome tells the page the battery level; friends see it on the live map, and at 15% we offer a last-location text
+// The factor that scored lowest, said as what is missing ("main road" alone reads as if the main road were the problem)
+const WEAK_WHY = { "Main road": "it isn't a main road", "Lighting": "it is poorly lit", "People and open places": "few people or open places are around",
+  "Buildings and surroundings": "few buildings face the street", "Police and CCTV": "there is no police or CCTV nearby", "Footpath and ways out": "the footpath and ways out are poor" };
+const LOW_BATTERY = 15;
+navigator.getBattery?.().then((b) => (state.battery = b), () => {});
+function lowBattery(level, pt) {
+  const t = state.trip, contacts = store.get("contacts", []);
+  const text = `My phone is at ${level}% battery. I'm on my way to ${state.toLabel || "my destination"}. Last location: https://maps.google.com/?q=${pt[0].toFixed(6)},${pt[1].toFixed(6)} Live:`;
+  vibrate([200, 100, 200]);
+  openDrawer(`<h2 id="drawerTitle">Battery at ${level}%</h2>
+    <p>If your phone dies, your friends' map stops. Send them where you are now, while you can.</p>
+    ${contacts.length ? `<a class="btn btn-primary btn-block" id="batterySms" href="${esc(smsLink(contacts, `${text} ${tripLink(t.id)}`))}">${icon("share")}Text my contacts</a>`
+      : `<button class="btn btn-primary btn-block" id="batteryShare">${icon("share")}Share my location</button>`}
+    <button class="btn btn-block" data-close>Not now</button>`);
+  $("#batteryShare")?.addEventListener("click", () => { closeDrawer(); shareText(text, tripLink(t.id)); });
+  $("#batterySms")?.addEventListener("click", closeDrawer);
+}
 function onTripPosition(pt) {
   const t = state.trip, r = t.route;
   const p = updateGuidance(pt);
@@ -753,7 +860,9 @@ function onTripPosition(pt) {
   if (metres(pt, t.lastMovePt || pt) > 15) { t.lastMovePt = pt; t.lastMoveAt = Date.now(); }
   if (Date.now() - t.lastPost > 10000) {
     t.lastPost = Date.now();
-    api(`/api/trip/${t.id}`, { key: t.key, lat: pt[0], lon: pt[1] }).catch(() => {});
+    const battery = state.battery ? Math.round(state.battery.level * 100) : null;
+    api(`/api/trip/${t.id}`, { key: t.key, lat: pt[0], lon: pt[1], battery }).catch(() => {});
+    if (battery !== null && battery <= LOW_BATTERY && !state.battery.charging && !t.batteryWarned) { t.batteryWarned = true; lowBattery(battery, pt); }
   }
   if (metres(pt, r.coords[r.coords.length - 1]) < 40) return endTrip(true, true);
   const stop = state.stops.filter((s) => s.pt)[t.nextStop];
@@ -840,14 +949,22 @@ sosBtn.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === "
 sosBtn.addEventListener("contextmenu", (e) => e.preventDefault());
 
 let sosTimer = null;
+// an alert replaces the countdown text, so reopening SOS while it is still up (a missed check-in) must put it back,
+// or the countdown stops at 5, never alerts, and Escape can't close it
+function resetSOSText() {
+  $("#sosTitle").textContent = "SOS message";
+  $("#sosSub").innerHTML = 'Your messages app opens in <b id="sosSecs">5</b> seconds with your location written in. Tap cancel if you\'re OK.';
+}
 async function openSOS(now = false) {
+  resetSOSText();
   $("#sosOverlay").hidden = false;
   vibrate([500, 200, 500]);
   let left = now ? 0 : 5;
   const tick = () => {
     $("#sosCount").textContent = left > 0 ? left : "SOS";
     $("#sosCount").classList.toggle("done", left <= 0);
-    $("#sosSecs").textContent = left;
+    const secs = $("#sosSecs");  // gone if the previous alert, still finding a location, rewrote the text after a reopen
+    if (secs) secs.textContent = left;
     if (left <= 0) { clearInterval(sosTimer); alertContacts(); }
     left -= 1;
   };
@@ -873,7 +990,7 @@ async function alertContacts(medical = false) {
   let link = "";
   try {
     // short timeout: on a weak signal the text must not wait for the live link
-    if (!state.trip) { const t = await createTrip(pt || state.to, 0, 4000); state.sosTrip = t; link = tripLink(t.id); }
+    if (!state.trip && (pt || state.to)) { const t = await createTrip(pt || state.to, 0, 4000); state.sosTrip = t; link = tripLink(t.id); }
     else link = tripLink(state.trip.id);
   } catch {}
   const maps = pt ? `https://maps.google.com/?q=${pt[0].toFixed(6)},${pt[1].toFixed(6)}` : "";
@@ -882,7 +999,7 @@ async function alertContacts(medical = false) {
   const facts = MEDICAL.filter(([k]) => med[k]).map(([k, l]) => `${l}: ${med[k]}.`).join(" ");
   const body = medical
     ? await reword(`Medical emergency: ${who === "me" ? "I need" : who + " needs"} an ambulance. ${facts} ${where}`.replace(/\s+/g, " ").trim())
-    : `SOS from ${who}: I need help. ${where}`.trim();
+    : `SOS from ${who}: I need help.${state.trip?.vehicle ? ` I'm in vehicle ${state.trip.vehicle}.` : ""} ${where}`.trim();
   // a web page can't send a text or call by itself: it opens the messages app or share sheet, and the user presses Send
   $("#sosTitle").textContent = contacts.length ? "Press Send in your messages app" : "Choose who to send it to";
   $("#sosSub").textContent = `${contacts.length ? "Your text is written, but it only goes out when you press Send." : "Send it from the share menu, or paste it into a chat if it was copied."} ${
@@ -905,9 +1022,15 @@ $("#sosCancel").onclick = () => {
   clearInterval(sosTimer); clearInterval(state.sosPing); stopSiren();
   if (state.sosTrip) { api(`/api/trip/${state.sosTrip.id}`, { key: state.sosTrip.key, ended: true }).catch(() => {}); state.sosTrip = null; }
   $("#sosOverlay").hidden = true;
-  $("#sosTitle").textContent = "SOS message";
-  $("#sosSub").innerHTML = 'Your messages app opens in <b id="sosSecs">5</b> seconds with your location written in. Tap cancel if you\'re OK.';
+  resetSOSText();
+  sosBtn.focus();
 };
+// alertdialog: Escape cancels, and Tab cycles inside it instead of reaching the map behind
+$("#sosOverlay").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") return $("#sosCancel").click();
+  const f = $("#sosOverlay").querySelectorAll("a[href], button"), end = e.shiftKey ? f[0] : f[f.length - 1];
+  if (e.key === "Tab" && document.activeElement === end) { e.preventDefault(); (e.shiftKey ? f[f.length - 1] : f[0]).focus(); }
+});
 
 // ---------- sound: siren, beeps, ringtone ----------
 let audio = null, siren = null, ring = null;
@@ -1084,12 +1207,20 @@ function bindContacts(rerender) {
     rerender();
   }));
 }
+function savedHtml() {
+  const s = store.get("saved", {}), set = Object.keys(SAVED).filter((k) => s[k]);
+  return set.length ? set.map((k) => `<div class="contact"><span class="avatar-s">${SAVED[k][0]}</span><div><b>${SAVED[k]}</b><small>${esc(s[k].label)}</small></div>
+    <button class="icon-btn" data-unsave="${k}" aria-label="Forget ${SAVED[k]}" style="box-shadow:none">${icon("trash")}</button></div>`).join("")
+    : `<p class="muted">Tap "Set home" or "Set work" on the start screen. They stay on this phone.</p>`;
+}
 function openSettings() {
   const sel = (id, val, opts) => `<select id="${id}" class="input">${opts.map(([v, l]) => `<option value="${v}" ${String(v) === String(val) ? "selected" : ""}>${l}</option>`).join("")}</select>`;
   openDrawer(`
     <h2 id="drawerTitle">Settings</h2>
     <h3 style="font-size:16px;margin-top:6px">Trusted contacts</h3>
     <div id="contactsBox" style="display:grid;gap:8px">${contactsHtml()}</div>
+    <h3 style="font-size:16px;margin-top:6px">Saved places</h3>
+    <div id="savedBox" style="display:grid;gap:8px">${savedHtml()}</div>
     <div class="row"><label for="myName">Your name in alerts</label><input id="myName" class="input" style="width:50%" maxlength="40" value="${esc(store.get("myName", ""))}"></div>
     <h3 style="font-size:16px;margin-top:6px">Medical info for ambulance alerts</h3>
     ${MEDICAL.map(([k, l]) => `<div class="row"><label for="med_${k}">${l}</label><input id="med_${k}" class="input" style="width:50%" maxlength="120" value="${esc(store.get("medical", {})[k] || "")}"></div>`).join("")}
@@ -1106,6 +1237,14 @@ function openSettings() {
     <p class="muted">Your contacts and settings stay on this phone. Trip locations are deleted from the server when a trip ends, and 12 hours after it started at the latest. We never sell location data.</p>`);
   const rerender = () => { $("#contactsBox").innerHTML = contactsHtml(); bindContacts(rerender); };
   bindContacts(rerender);
+  const bindSaved = () => document.querySelectorAll("[data-unsave]").forEach((b) => (b.onclick = () => {
+    const s = store.get("saved", {});
+    delete s[b.dataset.unsave];
+    store.set("saved", s);
+    $("#savedBox").innerHTML = savedHtml(); bindSaved();
+    if (!state.to && !state.trip) renderIdle();
+  }));
+  bindSaved();
   $("#myName").onchange = (e) => store.set("myName", e.target.value.trim());
   $("#caller").onchange = (e) => store.set("caller", e.target.value.trim() || "Mom");
   $("#buffer").onchange = (e) => store.set("buffer", +e.target.value);
@@ -1165,7 +1304,7 @@ function onboarding(step = 0) {
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
 addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); state.installPrompt = e; if (!state.to) renderIdle(); });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=27").catch(() => {});
 
 // ---------- start ----------
 renderIdle();

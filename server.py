@@ -16,7 +16,7 @@ import time
 import traceback
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, wait
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -199,7 +199,10 @@ threading.Thread(target=reimport_daily, daemon=True).start()
 
 
 def latlon(s):
-    lat, lon = (float(v) for v in s.split(",")) if isinstance(s, str) else (float(s[0]), float(s[1]))
+    try:
+        lat, lon = (float(v) for v in s.split(",")) if isinstance(s, str) else (float(s[0]), float(s[1]))
+    except (TypeError, ValueError, IndexError, KeyError):  # null, "", [1] or a dict: say so plainly, not with a Python error
+        raise ValueError("bad coordinates, expected [lat, lon]") from None
     if not (-85 <= lat <= 85 and math.isfinite(lon)):  # near the poles a 500 m circle spans thousands of map tiles
         raise ValueError("bad coordinates")
     return lat, lon if -180 <= lon <= 180 else (lon + 180) % 360 - 180  # a map panned round the world sends 77.4 as -642.6
@@ -326,6 +329,8 @@ def rank(q, near, found, limit=8):
             r["km"] = round(dist(near, r["pt"]) / 1000, 1)
         if not any(r["name"].lower() == o["name"].lower() and dist(r["pt"], o["pt"]) < 200 for o in out):
             out.append(r)
+    if near and any(r["km"] < 100 for r in out):  # "Green Park Market" near Delhi shouldn't list shops in Cork and Toronto
+        out = [r for r in out if r["km"] < 1000 or r.get("big")]
     match = lambda r: 0 if r.get("cat") or r["name"].lower().startswith(q) else 1 if any(w.startswith(q.split()[0]) for w in r["name"].lower().split()) else 2
     # each 10x further away costs as much as a worse name match, so a "Hospital" town 5000 km off loses to Sharda Hospital 3 km away
     out.sort(key=lambda r: match(r) + math.log10(r.get("km", 0) + 1))
@@ -347,6 +352,7 @@ def place_name(pt):
 
 
 HOURS_JOBS = ThreadPoolExecutor(1)
+HOURS_QUEUE = threading.BoundedSemaphore(3)  # waiting hours jobs each hold a whole area in memory, so skip when this many wait
 
 
 def ai_extras(area, stops, when):
@@ -363,7 +369,11 @@ def ai_extras(area, stops, when):
         return hit["pt"] if hit and near(hit["pt"], 3000) else None  # far away means it matched the wrong place
 
     # a new street's hours take Gemini about a minute: the trip doesn't wait (cached hours apply at once), later trips get them
-    hours = HOURS_JOBS.submit(gemini.LIVE.fill_hours, area, lambda p: near(p, 300), where)
+    if HOURS_QUEUE.acquire(blocking=False):
+        hours = HOURS_JOBS.submit(gemini.LIVE.fill_hours, area, lambda p: near(p, 300), where)
+        hours.add_done_callback(lambda _: HOURS_QUEUE.release())
+    else:
+        hours = HOURS_JOBS.submit(lambda: None)  # busy: this trip uses the hours already cached
     try:
         alerts = gemini.LIVE.find_events(a, b, when, where, locate)
         wait([hours], timeout=2)
@@ -403,11 +413,33 @@ def reword_sos(text):
 
 def end_trip(t):
     """Delete every location of a trip as soon as it ends; only the name and "ended" stay for the viewer."""
-    t.update(points=[], dest=None, eta=0, ended=True, updated=time.time())
+    t.update(points=[], dest=None, eta=0, vehicle="", ended=True, updated=time.time())
+
+
+IST = timezone(timedelta(hours=5, minutes=30), "IST")  # India has no daylight saving, so a fixed offset is exact
+
+
+def india_time(text=""):
+    """A time from a request as India time: shop hours and night are judged on the Delhi clock, whatever offset the phone
+    sends or the server's own time zone. No offset means it is already India time; empty means now."""
+    if not text:
+        return datetime.now(IST)
+    t = datetime.fromisoformat(text)
+    return t.replace(tzinfo=IST) if t.tzinfo is None else t.astimezone(IST)
+
+
+def network(address):
+    """The caller for limits and votes: an IPv6 /64 is one home or phone, and changing the rest of it is free."""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return address
+    return str(ipaddress.ip_network(f"{ip}/64", strict=False)) if ip.version == 6 else address
 
 
 def allowed(kind, client):
     """Sliding-window rate limit; drops clients whose window has emptied so the table can't grow forever."""
+    client = network(client)
     limit, window = LIMITS[kind]
     now = time.time()
     with lock:
@@ -439,6 +471,10 @@ class Handler(SimpleHTTPRequestHandler):
     def end_headers(self):
         if self.path.startswith("/api/"):
             self.send_header("Cache-Control", "no-store")
+        elif self.path.startswith(("/vendor/", "/icons/")):  # libraries and icons change only with their file names
+            self.send_header("Cache-Control", "public, max-age=86400")
+        else:  # the app's own pages and code: a CDN in front (Cloudflare) would otherwise serve the old app for hours
+            self.send_header("Cache-Control", "no-cache")
         # other sites only ever see "localhost:8001", never a page address with a trip id; OpenStreetMap's tile
         # servers refuse map pictures that come with no referrer at all
         self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
@@ -494,7 +530,7 @@ class Handler(SimpleHTTPRequestHandler):
         return ip
 
     def when(self, q):
-        return datetime.fromisoformat(q["at"][0]) if q.get("at", [""])[0] else datetime.now()
+        return india_time(q.get("at", [""])[0])
 
     def do_GET(self):
         u = urlparse(self.path)
@@ -556,7 +592,7 @@ class Handler(SimpleHTTPRequestHandler):
                 t = trips.get(u.path.rsplit("/", 1)[1])
                 if not t:
                     return self.send_json({"error": "This trip has ended or the link is wrong."}, 404)
-                return self.send_json({k: t[k] for k in ("name", "dest", "eta", "points", "started", "updated", "ended")})
+                return self.send_json({k: t[k] for k in ("name", "dest", "eta", "mode", "vehicle", "battery", "points", "started", "updated", "ended")})
         except TooFar as e:
             return self.send_json({"error": str(e)}, 400)
         except ConnectionError as e:
@@ -636,12 +672,14 @@ class Handler(SimpleHTTPRequestHandler):
         lat, lon = latlon((body["lat"], body["lon"]))
         if body["type"] not in REPORT_TYPES:
             raise ValueError("unknown report type")
-        # the walker's own clock, so "deserted at 22:00" stays 22:00 on a server in another time zone
-        seen = datetime.fromisoformat(body["at"]) if body.get("at") else datetime.now()
+        # India time, so "deserted at 22:00" stays 22:00 whatever time zone the phone or the server is set to
+        seen = india_time(body.get("at") or "")
         if abs(seen.timestamp() - time.time()) > 3600:
             raise ValueError("report time is not now")
         address = self.address()
-        r = REPORTS.add(lat, lon, body["type"], str(body.get("device") or address)[:64], seen)
+        # one reporter per network: a made-up device id must not buy extra votes on a street
+        # shortcut: phones behind one carrier IPv4 address share a vote, move to signed device keys if that hides real reports
+        r = REPORTS.add(lat, lon, body["type"], network(address), seen)
         if not r:
             return self.send_json({"error": "Thanks! You've sent a lot of reports this hour, please try again later."}, 429)
         store.add_report(r)
@@ -656,6 +694,8 @@ class Handler(SimpleHTTPRequestHandler):
         hour = int(body["hour"])
         if not 0 <= hour <= 23:
             raise ValueError("bad hour")
+        if not isinstance(body["measures"], dict):
+            raise ValueError("measures must be an object")
         m = [float(body["measures"][k]) if body["measures"].get(k) is not None else "" for k in FEEL_MEASURES]
         if any(x != "" and not 0 <= x <= 1e6 for x in m):
             raise ValueError("bad measure")
@@ -674,6 +714,9 @@ class Handler(SimpleHTTPRequestHandler):
         eta = float(body.get("eta", 0))
         if not 0 <= eta <= 24 * 60:
             raise ValueError("bad eta")
+        mode = body.get("mode", "walk")
+        if mode not in MODES:
+            raise ValueError("mode must be walk, bike or car")
         with lock:
             expire_trips()
             if len(trips) >= MAX_TRIPS:
@@ -681,7 +724,8 @@ class Handler(SimpleHTTPRequestHandler):
             tid, key = secrets.token_urlsafe(9), secrets.token_urlsafe(18)
             now = time.time()
             trips[tid] = {"key": key, "name": str(body.get("name", ""))[:40], "dest": dest,
-                          "eta": eta, "points": [], "started": now, "updated": now, "ended": False}
+                          "eta": eta, "mode": mode, "vehicle": "", "battery": None,
+                          "points": [], "started": now, "updated": now, "ended": False}
         self.send_json({"id": tid, "key": key})
 
     def update_trip(self, tid, body):
@@ -692,7 +736,14 @@ class Handler(SimpleHTTPRequestHandler):
         with lock:
             if body.get("ended"):
                 end_trip(t)
+            elif "vehicle" in body:  # the cab, auto or bike-taxi number, so friends know which vehicle to look for
+                t["vehicle"] = " ".join(str(body["vehicle"]).split())[:20]
             elif "lat" in body:
+                if body.get("battery") is not None:  # so friends know a silent phone may simply be flat
+                    level = int(body["battery"])
+                    if not 0 <= level <= 100:
+                        raise ValueError("battery must be 0-100")
+                    t["battery"] = level
                 t["points"] = (t["points"] + [latlon((body["lat"], body["lon"])) + (time.time(),)])[-300:]
                 t["updated"] = time.time()
         self.send_json({"ok": True})

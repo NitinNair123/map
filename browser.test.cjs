@@ -79,6 +79,54 @@ test("SOS: hold to open, then the text is written for the user to send", async (
   await ctx.close();
 });
 
+test("SOS works offline once the app has been opened: helplines and a text with the location", async () => {
+  const { ctx, page, errors } = await phone([{ name: "Mum", phone: "+91 98765 43210" }]);
+  await page.goto(BASE + "/app/");
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  if (!(await page.evaluate(() => navigator.serviceWorker.controller))) await page.reload();
+  await page.waitForFunction(() => navigator.serviceWorker.controller);
+  await ctx.setOffline(true);
+  await page.reload();
+  await page.focus("#sosBtn");
+  await page.keyboard.press("Enter");
+  assert.ok(await page.isVisible("#sosOverlay"));
+  assert.ok(await page.isVisible("a[href='tel:112'] >> text=Call 112"));
+  assert.ok(await page.isVisible("a[href='tel:1091'] >> text=Women helpline 1091"));
+  const sms = page.waitForRequest(/^sms:/, { timeout: 15000 });
+  await page.click("#sosAlertNow");
+  assert.match((await sms).url(), /^sms:\+919876543210\?&body=SOS%20from%20me.*maps\.google\.com%2F%3Fq%3D28\.000000%2C77\.000000/);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("SOS by keyboard: focus starts inside, Tab stays inside, Escape cancels", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.goto(BASE + "/app/");
+  await page.focus("#sosBtn");
+  await page.keyboard.press("Enter");
+  assert.equal(await page.evaluate(() => document.activeElement.id), "sosCancel");
+  for (let i = 0; i < 12; i++) {
+    await page.keyboard.press(i % 3 ? "Tab" : "Shift+Tab");
+    assert.ok(await page.evaluate(() => !!document.activeElement.closest("#sosOverlay")), "focus left the SOS dialog");
+  }
+  await page.keyboard.press("Escape");
+  assert.ok(await page.isHidden("#sosOverlay"));
+  assert.equal(await page.evaluate(() => document.activeElement.id), "sosBtn");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("large system text (130%): every route option fits the panel and small chips tap as 44 px", async () => {
+  const { ctx, page } = await phone();
+  await page.setViewportSize({ width: 317, height: 645 });  // Chrome on Android zooms the page by the system font size
+  await routeToPharmacy(page);
+  assert.equal(await page.evaluate(() => { const s = document.querySelector("#sheet"); return s.scrollWidth - s.clientWidth; }), 0, "no sideways scrolling in the panel");
+  for (const tab of await page.locator(".tab").all()) assert.ok((await tab.boundingBox()).x + (await tab.boundingBox()).width <= 317, "a route option is off screen");
+  const hit = await page.evaluate(() => { const r = document.querySelector("#voiceBtn").getBoundingClientRect(); return document.elementFromPoint(r.left + r.width / 2, r.bottom + 2)?.id; });
+  assert.equal(hit, "voiceBtn", "a tap just below the round chip still reaches it");
+  await ctx.close();
+});
+
 test("SOS ambulance alert carries the medical info from settings", async () => {
   const { ctx, page, errors } = await phone();
   await ctx.addInitScript(() => {
@@ -133,6 +181,34 @@ test("stops and priorities go with the route request", async () => {
   await page.waitForSelector("#startBtn", { timeout: 15000 });
   await page.click("[data-del-stop='0']");
   assert.equal(await page.locator("[data-stop]").count(), 0);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("ride booking: Uber gets pickup, our detour as a stop, then the drop; Ola gets pickup and drop", async () => {
+  const { ctx, page, errors } = await phone();
+  // pure check of the stop picker on made-up routes: a 1 km bulge north of a straight fastest road
+  const picked = await page.goto(BASE + "/app/").then(() => page.evaluate(() => {
+    const fastest = { kind: "fastest", mode: "car", coords: [[28, 77], [28, 77.01], [28, 77.02]] };
+    const safest = { kind: "safest", mode: "car", coords: [[28, 77], [28.004, 77.005], [28.009, 77.01], [28.004, 77.015], [28, 77.02]] };
+    return { car: rideStops(safest, fastest), walk: rideStops({ ...safest, mode: "walk" }, fastest), same: rideStops(fastest, fastest) };
+  }));
+  assert.deepEqual(picked.car.map((x) => x.pt), [[28.009, 77.01]], "one stop, at the farthest point of the detour");
+  assert.deepEqual(picked.walk, [], "walking routes may use footpaths, so no stops");
+  assert.deepEqual(picked.same, []);
+  await page.click(".modes [data-mode='car']");
+  await routeToPharmacy(page);
+  await page.click("#rideBox summary");
+  const uber = new URL(await page.getAttribute("#uberLink", "href"));
+  assert.equal(uber.origin + uber.pathname, "https://m.uber.com/looking");
+  const drops = [...uber.searchParams.keys()].filter((k) => k.startsWith("drop["));
+  const last = JSON.parse(uber.searchParams.get(drops.at(-1)));
+  assert.deepEqual([last.latitude, last.longitude, last.addressLine1], [28.0007, 77.0025, "City Pharmacy"]);
+  assert.ok(JSON.parse(uber.searchParams.get("pickup")).latitude, "pickup has coordinates");
+  const ola = new URL(await page.getAttribute("#olaLink", "href"));
+  assert.equal(ola.searchParams.get("drop_lat"), "28.0007");
+  assert.equal(ola.searchParams.get("landing_page"), "bk");
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling");
   assert.deepEqual(errors, []);
   await ctx.close();
 });
@@ -225,4 +301,128 @@ test("voice: a spoken request is recorded and sent to the server as audio", asyn
   assert.match(await page.textContent("#toast"), /can't measure .* how it feels/);
   assert.deepEqual(errors, []);
   await mic.close();
+});
+
+test("save home once, then one tap routes there; it can be forgotten in settings", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.goto(BASE + "/app/");
+  await page.click("[data-go=home]");
+  await page.fill("#toInput", "city");
+  await page.click("#results li >> text=City Pharmacy");
+  await page.waitForSelector("#startBtn", { timeout: 15000 });
+  assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("sr.saved")).home.label), "City Pharmacy");
+  await page.reload();
+  await page.click("[data-go=home]");
+  await page.waitForSelector("#startBtn", { timeout: 15000 });
+  assert.equal(await page.inputValue("#toInput"), "Home");
+  await page.fill("#toInput", "ho");
+  await page.waitForSelector("#results li >> text=Home");
+  await page.reload();
+  await page.click("#settingsBtn");
+  await page.click("[data-unsave=home]");
+  assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("sr.saved")).home), undefined);
+  await page.click("#drawer [data-close]");
+  assert.ok(await page.isVisible("text=Set home"), "the start screen offers to set it again");
+  assert.equal(await page.getAttribute("a[href='tel:1091']", "href"), "tel:1091", "SOS offers the women helpline");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("in a cab, the vehicle number reaches the friend's live viewer", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.addInitScript(() => { navigator.share = async (d) => { window.shared = d.text; }; });
+  await page.goto(BASE + "/app/");
+  await page.click("[data-mode=car]");
+  await page.fill("#toInput", "city");
+  await page.click("#results li >> text=City Pharmacy");
+  await page.waitForSelector("#startBtn", { timeout: 15000 });
+  const minutes = await page.evaluate(() => state.routes.find((x) => x.kind === state.sel).minutes);
+  await page.click("#startBtn");
+  await page.waitForSelector("text=Sharing live");
+  const left = +(await page.textContent(".nav-head h3")).match(/(\d+) min/)[1];
+  assert.ok(left <= minutes + 1, `a drive is timed at driving pace: ${left} min left on a ${minutes} min route`);
+  await page.fill("#vehicleForm input", "dl 1r ab 1234");
+  await page.click("#vehicleForm button");
+  await page.waitForSelector("text=Your live link now shows DL 1R AB 1234");
+  const id = await page.evaluate(() => state.trip.id);
+  const viewer = await ctx.newPage();
+  await viewer.goto(`${BASE}/t/?id=${id}`);
+  await viewer.waitForSelector("text=In vehicle DL 1R AB 1234");
+  assert.match(await viewer.textContent("#title"), /is on the way/);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("at low battery the walker is offered a last-location text and friends see the level", async () => {
+  const { ctx, page, errors } = await phone([{ name: "Asha", phone: "+91 98100 00000" }]);
+  await page.addInitScript(() => {
+    navigator.share = async () => {};
+    navigator.getBattery = async () => ({ level: 0.12, charging: false });
+  });
+  await routeToPharmacy(page);
+  await page.click("#startBtn");
+  await page.waitForSelector("text=Sharing live");
+  await page.evaluate(() => onTripPosition([28.0001, 77.0001]));
+  await page.waitForSelector("text=Battery at 12%");
+  assert.match(await page.getAttribute("#batterySms", "href"), /^sms:\+919810000000\?&body=My%20phone%20is%20at%2012%25.*maps\.google\.com.*%2Ft%2F%3Fid%3D/);
+  const viewer = await ctx.newPage();
+  await viewer.goto(`${BASE}/t/?id=${await page.evaluate(() => state.trip.id)}`);
+  await viewer.waitForSelector("text=Phone battery 12%");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("zoomed out, only open places are pinned so the route line stays visible", async () => {
+  const { ctx, page, errors } = await phone();
+  await routeToPharmacy(page);
+  await page.evaluate(() => { state.routes.find((r) => r.kind === state.sel).places[0].open = null; drawRoutes(); });  // one place without hours
+  const pins = async (z) => {
+    await page.evaluate((z) => new Promise((r) => { map.once("zoomend", r); map.setZoom(z, { animate: false }); }), z);
+    return page.evaluate(() => ({ all: document.querySelectorAll(".gpin").length, notOpen: document.querySelectorAll(".gpin.closed, .gpin.unknown").length }));
+  };
+  const near = await pins(17), mid = await pins(15), far = await pins(13);
+  assert.ok(near.notOpen > 0, "zoomed in, closed and unknown places show too");
+  assert.equal(mid.notOpen, 0);
+  assert.ok(mid.all > 0 && mid.all < near.all, JSON.stringify({ near, mid }));
+  assert.equal(far.all, 0);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("tapping an open place near you routes there", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.goto(BASE + "/app/");
+  await page.click("[data-haven='0']");
+  await page.waitForSelector("#startBtn", { timeout: 15000 });
+  assert.notEqual(await page.inputValue("#toInput"), "");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("a message shown while search results are open sits below them, not over them", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.goto(BASE + "/app/");
+  await page.evaluate(() => toast("Location is off. You can still pick places on the map.", 10000));  // shown first, as when location is refused
+  await page.fill("#toInput", "city");
+  await page.waitForSelector("#results li");
+  const list = await page.locator("#results").boundingBox(), msg = await page.locator("#toast").boundingBox();
+  assert.ok(msg.y >= list.y + list.height, "the message covers the search results");
+  // the list grows to half the screen with more results, so the message waits at the bottom
+  assert.ok(msg.y > (await page.evaluate(() => innerHeight)) * 0.6, "the message sits where a longer list would cover it");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("SOS opened again while the last alert is still on screen counts down again", async () => {
+  const { ctx, page, errors } = await phone([{ name: "Mum", phone: "+91 98765 43210" }]);
+  await page.goto(BASE + "/app/");
+  await page.focus("#sosBtn");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => !document.querySelector("#sosSecs"), null, { timeout: 10000 });  // the alert replaced the countdown
+  await page.evaluate(() => openSOS());  // as a missed check-in does
+  await page.waitForFunction(() => document.querySelector("#sosCount").textContent === "4", null, { timeout: 3000 });
+  await page.keyboard.press("Escape");
+  assert.ok(await page.isHidden("#sosOverlay"));
+  assert.deepEqual(errors, []);
+  await ctx.close();
 });

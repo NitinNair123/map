@@ -151,7 +151,15 @@ class EndpointTest(unittest.TestCase):
             self.assertEqual(self.post(b"clip", "audio/webm")[0], 503)
 
     def test_rejects_bad_requests(self):
-        self.assertEqual(self.post(b"x" * (voice.MAX_AUDIO + 1), "audio/webm")[0], 400)
+        # the server refuses on Content-Length and closes without reading the body, so a client still sending a real
+        # oversize body can hit a broken pipe before it reads the 400 (seen on CI and Windows): send the headers only
+        c = HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=5)
+        c.putrequest("POST", "/api/voice")
+        c.putheader("Content-Type", "audio/webm")
+        c.putheader("Content-Length", str(voice.MAX_AUDIO + 1))
+        c.endheaders()
+        self.assertEqual(c.getresponse().status, 400)
+        c.close()
         self.assertEqual(self.post(b"[]", "application/json")[0], 400)
         self.assertEqual(self.post(json.dumps({"nope": 1}), "application/json")[0], 400)
 
