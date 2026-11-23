@@ -79,6 +79,26 @@ test("SOS: hold to open, then the text is written for the user to send", async (
   await ctx.close();
 });
 
+test("SOS works offline once the app has been opened: helplines and a text with the location", async () => {
+  const { ctx, page, errors } = await phone([{ name: "Mum", phone: "+91 98765 43210" }]);
+  await page.goto(BASE + "/app/");
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  if (!(await page.evaluate(() => navigator.serviceWorker.controller))) await page.reload();
+  await page.waitForFunction(() => navigator.serviceWorker.controller);
+  await ctx.setOffline(true);
+  await page.reload();
+  await page.focus("#sosBtn");
+  await page.keyboard.press("Enter");
+  assert.ok(await page.isVisible("#sosOverlay"));
+  assert.ok(await page.isVisible("a[href='tel:112'] >> text=Call 112"));
+  assert.ok(await page.isVisible("a[href='tel:1091'] >> text=Women helpline 1091"));
+  const sms = page.waitForRequest(/^sms:/, { timeout: 15000 });
+  await page.click("#sosAlertNow");
+  assert.match((await sms).url(), /^sms:\+919876543210\?&body=SOS%20from%20me.*maps\.google\.com%2F%3Fq%3D28\.000000%2C77\.000000/);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
 test("SOS ambulance alert carries the medical info from settings", async () => {
   const { ctx, page, errors } = await phone();
   await ctx.addInitScript(() => {
