@@ -4,10 +4,12 @@
   --brand-ink: #4b2fd6;
   --brand-soft: #efeaff;
   --safe: #12b76a;
+  --safe-ink: #067647;  /* green and orange as text: the bright map colours are under 4.5:1 on white */
   --safe-soft: #e3f8ee;
   --caution: #f79009;
+  --caution-ink: #b54708;
   --caution-soft: #fff3e0;
-  --risk: #f04438;
+  --risk: #d92d20;
   --risk-soft: #fee4e2;
   --bg: #ffffff;
   --bg-2: #f6f5fa;
@@ -15,7 +17,7 @@
   --line: #e7e5ef;
   --ink: #16131f;
   --ink-2: #4a4659;
-  --ink-3: #7c788a;
+  --ink-3: #6b6779;
   --shadow: 0 1px 2px rgba(22, 19, 31, .06), 0 8px 24px rgba(22, 19, 31, .10);
   --shadow-lg: 0 24px 60px rgba(22, 19, 31, .18);
   --radius: 18px;
@@ -25,7 +27,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --brand: #8b70ff; --brand-ink: #a993ff; --brand-soft: #2a2350;
-    --safe-soft: #0f3324; --caution-soft: #3a2a0c; --risk-soft: #3d1715;
+    --safe-soft: #0f3324; --caution-soft: #3a2a0c; --safe-ink: #12b76a; --caution-ink: #f79009; --risk-soft: #3d1715;
     --bg: #0f0d16; --bg-2: #17141f; --surface: #1d1a27; --line: #2c2838;
     --ink: #f3f1f9; --ink-2: #c4c0d2; --ink-3: #8f8aa0;
     --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .45);
@@ -35,7 +37,7 @@
 }
 :root[data-theme="dark"] {
   --brand: #8b70ff; --brand-ink: #a993ff; --brand-soft: #2a2350;
-  --safe-soft: #0f3324; --caution-soft: #3a2a0c; --risk-soft: #3d1715;
+  --safe-soft: #0f3324; --caution-soft: #3a2a0c; --safe-ink: #12b76a; --caution-ink: #f79009; --risk-soft: #3d1715;
   --bg: #0f0d16; --bg-2: #17141f; --surface: #1d1a27; --line: #2c2838;
   --ink: #f3f1f9; --ink-2: #c4c0d2; --ink-3: #8f8aa0;
   --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .45);
@@ -57,16 +59,16 @@ a { color: var(--brand); }
   text-decoration: none; transition: transform .12s, background .2s, box-shadow .2s;
 }
 .btn:active { transform: scale(.97); }
-.btn-primary { background: var(--brand); border-color: transparent; color: #fff; box-shadow: 0 6px 18px rgba(109, 74, 255, .35); }
-.btn-primary:hover { background: var(--brand-ink); }
+.btn-primary { background: #6d4aff; border-color: transparent; color: #fff; box-shadow: 0 6px 18px rgba(109, 74, 255, .35); }
+.btn-primary:hover { background: #4b2fd6; }  /* fixed purples: white text needs them in dark mode too */
 .btn-danger { background: var(--risk); border-color: transparent; color: #fff; }
 .btn-ghost { background: transparent; border-color: transparent; }
 .btn-block { width: 100%; }
 .btn svg { width: 20px; height: 20px; flex: none; }
 
 .score-pill { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; padding: 4px 10px; border-radius: 99px; font-size: 13px; }
-.score-pill.good { background: var(--safe-soft); color: var(--safe); }
-.score-pill.ok { background: var(--caution-soft); color: var(--caution); }
+.score-pill.good { background: var(--safe-soft); color: var(--safe-ink); }
+.score-pill.ok { background: var(--caution-soft); color: var(--caution-ink); }
 .score-pill.bad { background: var(--risk-soft); color: var(--risk); }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }

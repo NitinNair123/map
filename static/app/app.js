@@ -1013,7 +1013,14 @@ $("#sosCancel").onclick = () => {
   $("#sosOverlay").hidden = true;
   $("#sosTitle").textContent = "SOS message";
   $("#sosSub").innerHTML = 'Your messages app opens in <b id="sosSecs">5</b> seconds with your location written in. Tap cancel if you\'re OK.';
+  sosBtn.focus();
 };
+// alertdialog: Escape cancels, and Tab cycles inside it instead of reaching the map behind
+$("#sosOverlay").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") return $("#sosCancel").click();
+  const f = $("#sosOverlay").querySelectorAll("a[href], button"), end = e.shiftKey ? f[0] : f[f.length - 1];
+  if (e.key === "Tab" && document.activeElement === end) { e.preventDefault(); (e.shiftKey ? f[f.length - 1] : f[0]).focus(); }
+});
 
 // ---------- sound: siren, beeps, ringtone ----------
 let audio = null, siren = null, ring = null;
@@ -1287,7 +1294,7 @@ function onboarding(step = 0) {
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
 addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); state.installPrompt = e; if (!state.to) renderIdle(); });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=24").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=25").catch(() => {});
 
 // ---------- start ----------
 renderIdle();
