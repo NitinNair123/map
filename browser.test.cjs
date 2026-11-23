@@ -137,6 +137,34 @@ test("stops and priorities go with the route request", async () => {
   await ctx.close();
 });
 
+test("ride booking: Uber gets pickup, our detour as a stop, then the drop; Ola gets pickup and drop", async () => {
+  const { ctx, page, errors } = await phone();
+  // pure check of the stop picker on made-up routes: a 1 km bulge north of a straight fastest road
+  const picked = await page.goto(BASE + "/app/").then(() => page.evaluate(() => {
+    const fastest = { kind: "fastest", mode: "car", coords: [[28, 77], [28, 77.01], [28, 77.02]] };
+    const safest = { kind: "safest", mode: "car", coords: [[28, 77], [28.004, 77.005], [28.009, 77.01], [28.004, 77.015], [28, 77.02]] };
+    return { car: rideStops(safest, fastest), walk: rideStops({ ...safest, mode: "walk" }, fastest), same: rideStops(fastest, fastest) };
+  }));
+  assert.deepEqual(picked.car.map((x) => x.pt), [[28.009, 77.01]], "one stop, at the farthest point of the detour");
+  assert.deepEqual(picked.walk, [], "walking routes may use footpaths, so no stops");
+  assert.deepEqual(picked.same, []);
+  await page.click(".modes [data-mode='car']");
+  await routeToPharmacy(page);
+  await page.click("#rideBox summary");
+  const uber = new URL(await page.getAttribute("#uberLink", "href"));
+  assert.equal(uber.origin + uber.pathname, "https://m.uber.com/looking");
+  const drops = [...uber.searchParams.keys()].filter((k) => k.startsWith("drop["));
+  const last = JSON.parse(uber.searchParams.get(drops.at(-1)));
+  assert.deepEqual([last.latitude, last.longitude, last.addressLine1], [28.0007, 77.0025, "City Pharmacy"]);
+  assert.ok(JSON.parse(uber.searchParams.get("pickup")).latitude, "pickup has coordinates");
+  const ola = new URL(await page.getAttribute("#olaLink", "href"));
+  assert.equal(ola.searchParams.get("drop_lat"), "28.0007");
+  assert.equal(ola.searchParams.get("landing_page"), "bk");
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
 test("live trip switches when another way becomes clearly safer", async () => {
   const { ctx, page, errors } = await phone();
   await routeToPharmacy(page);
@@ -309,6 +337,16 @@ test("zoomed out, only open places are pinned so the route line stays visible", 
   assert.equal(mid.notOpen, 0);
   assert.ok(mid.all > 0 && mid.all < near.all, JSON.stringify({ near, mid }));
   assert.equal(far.all, 0);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("tapping an open place near you routes there", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.goto(BASE + "/app/");
+  await page.click("[data-haven='0']");
+  await page.waitForSelector("#startBtn", { timeout: 15000 });
+  assert.notEqual(await page.inputValue("#toInput"), "");
   assert.deepEqual(errors, []);
   await ctx.close();
 });

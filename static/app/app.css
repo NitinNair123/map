@@ -117,6 +117,7 @@ details.why[open] summary::after { content: "−"; }
 @keyframes pulse { 50% { opacity: .3; } }
 .progress { height: 8px; background: var(--bg-2); border-radius: 4px; overflow: hidden; margin: 12px 0; }
 .progress div { height: 100%; background: var(--brand); border-radius: 4px; transition: width .5s; }
+button.haven { width: 100%; border: 0; font: inherit; color: inherit; text-align: left; cursor: pointer; }
 .haven { display: flex; gap: 12px; align-items: center; padding: 12px; border-radius: 14px; background: var(--bg-2); margin: 10px 0; }
 .haven .ico { width: 40px; height: 40px; border-radius: 12px; background: var(--safe-soft); color: var(--safe); display: grid; place-items: center; flex: none; }
 
