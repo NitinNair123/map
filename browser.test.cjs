@@ -474,9 +474,13 @@ test("arriving with no signal still ends the trip for friends once the phone rec
   await page.waitForSelector("text=Glad you're safe");
   assert.ok(lost > 0, "the end of the trip was sent while offline");
   down = false;
-  await page.clock.runFor(31000);
+  // the failed send's retry timer is set once its rejection arrives, which can be after any single clock jump, so step the clock
   let view;
-  for (let i = 0; i < 20 && !view?.ended; i++) { await new Promise((r) => setTimeout(r, 150)); view = await (await fetch(`${BASE}/api/trip/${id}`)).json(); }
+  for (let i = 0; i < 20 && !view?.ended; i++) {
+    await page.clock.runFor(10000);
+    await new Promise((r) => setTimeout(r, 150));
+    view = await (await fetch(`${BASE}/api/trip/${id}`)).json();
+  }
   assert.ok(view.ended, "friends no longer see her as on the way");
   assert.deepEqual(errors, []);
   await ctx.close();
