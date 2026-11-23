@@ -412,3 +412,17 @@ test("a message shown while search results are open sits below them, not over th
   assert.deepEqual(errors, []);
   await ctx.close();
 });
+
+test("SOS opened again while the last alert is still on screen counts down again", async () => {
+  const { ctx, page, errors } = await phone([{ name: "Mum", phone: "+91 98765 43210" }]);
+  await page.goto(BASE + "/app/");
+  await page.focus("#sosBtn");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => !document.querySelector("#sosSecs"), null, { timeout: 10000 });  // the alert replaced the countdown
+  await page.evaluate(() => openSOS());  // as a missed check-in does
+  await page.waitForFunction(() => document.querySelector("#sosCount").textContent === "4", null, { timeout: 3000 });
+  await page.keyboard.press("Escape");
+  assert.ok(await page.isHidden("#sosOverlay"));
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
