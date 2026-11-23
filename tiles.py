@@ -461,7 +461,7 @@ def warm_overture():
 
 def overture_roads(s, w, n, e):
     """The street network from Overture Maps (OSM plus TomTom), as OSM-style ways. Much faster than Overpass."""
-    rows = _overture("transportation", s, w, n, e, ["names", "class", "subclass", "connectors", "road_flags", "sources", "geometry"],
+    rows = _overture("transportation", s, w, n, e, ["names", "class", "subclass", "connectors", "road_flags", "sources", "geometry", "access_restrictions"],
                      kind="segment", where={"subtype": "road"})
     out = []
     for r in rows:
@@ -495,6 +495,13 @@ def overture_roads(s, w, n, e):
             tags["tunnel"] = "yes"
         if "is_bridge" in flags:
             tags["bridge"] = "yes"
+        # one-way: a whole-segment rule denying travel against (backward) or along (forward) the line's direction
+        for rule in r.get("access_restrictions") or []:
+            when, modes = rule.get("when") or {}, set((rule.get("when") or {}).get("mode") or [])
+            if rule.get("access_type") == "denied" and not rule.get("between") and when.get("heading") and (not modes or modes & {"vehicle", "motor_vehicle"}):
+                tags["oneway"] = "yes" if when["heading"] == "backward" else "-1"
+                if modes and not modes & {"vehicle", "bicycle"}:
+                    tags["oneway:bicycle"] = "no"
         if (r["names"] or {}).get("primary"):
             tags["name"] = r["names"]["primary"]
         osm = next((x["record_id"] for x in r["sources"] or [] if x["dataset"] == "OpenStreetMap" and (x["record_id"] or "").startswith("w")), None)

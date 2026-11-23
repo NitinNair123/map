@@ -7,6 +7,7 @@ const pad = (n) => String(n).padStart(2, "0");
 const store = {
   get(k, d) { try { const v = localStorage.getItem("sr." + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem("sr." + k, JSON.stringify(v)); } catch {} },
+  del(k) { try { localStorage.removeItem("sr." + k); } catch {} },
 };
 const icon = (id) => `<svg aria-hidden="true"><use href="#i-${id}"/></svg>`;
 const scoreClass = (s) => (s >= 65 ? "good" : s >= 40 ? "ok" : "bad");
@@ -43,19 +44,24 @@ function segDist(p, a, b) {
 // ---------- ride apps ----------
 // Uber's free deep link takes several drop points ("multi-stop", developer.uber.com deep-links docs), so a cab can be
 // steered onto our route; Ola's takes pickup and drop only. Every stop makes the driver pull over (and may cost waiting
-// time), so we add at most 2, where our route leaves the fastest drive.
-const RIDE_OFF_M = 150, RIDE_MAX_STOPS = 2;
+// time), so we add at most 2, spread along the longest stretches where our route leaves the fastest drive.
+// A stretch under 300 m is a corner or a parallel lane, not worth a stop: one such blip near the start sent a
+// Gurugram test ride out to a corner and back (Nov 2026).
+const RIDE_OFF_M = 150, RIDE_MAX_STOPS = 2, RIDE_MIN_RUN_M = 300, RIDE_TWO_STOPS_M = 3000;
 function rideStops(r, fastest) {
   if (!fastest || fastest === r || r.same_as === "fastest" || (r.mode || "walk") !== "car") return [];
   const f = fastest.coords, off = (p) => { let d = Infinity; for (let i = 0; i < f.length - 1; i++) d = Math.min(d, segDist(p, f[i], f[i + 1])); return d; };
-  const runs = []; let cur = null;  // each stretch that leaves the fastest road gives one stop, at its farthest point
+  const runs = []; let cur = null;  // each stretch of our route that is off the fastest road, with distance along it
   r.coords.forEach((p, i) => {
-    const d = off(p);
-    if (d <= RIDE_OFF_M) { cur = null; return; }
-    if (!cur) runs.push(cur = { d: 0 });
-    if (d > cur.d) Object.assign(cur, { d, i, p });
+    if (off(p) <= RIDE_OFF_M) { cur = null; return; }
+    if (!cur) runs.push(cur = { pts: [], len: 0 });
+    if (cur.pts.length) cur.len += metres(cur.pts[cur.pts.length - 1].p, p);
+    cur.pts.push({ i, p, at: cur.len });
   });
-  return runs.sort((a, b) => b.d - a.d).slice(0, RIDE_MAX_STOPS).map((x) => ({ pt: x.p, i: x.i, label: "On the SafeRoute route" }));
+  const long = runs.filter((x) => x.len >= RIDE_MIN_RUN_M).sort((a, b) => b.len - a.len).slice(0, RIDE_MAX_STOPS);
+  const at = (run, k) => run.pts.find((x) => x.at >= k * run.len);
+  const picks = long.length === 1 && long[0].len >= RIDE_TWO_STOPS_M ? [at(long[0], 1 / 3), at(long[0], 2 / 3)] : long.map((x) => at(x, 1 / 2));
+  return picks.map((x) => ({ pt: x.p, i: x.i, label: "On the SafeRoute route" }));
 }
 function rideLinks(a, b, stops, fromLabel, toLabel) {
   const n = (x) => +x.toFixed(6);
@@ -94,7 +100,7 @@ async function api(path, body, timeoutMs = 90000) {
     throw new Error(e.name === "AbortError" ? "The map service is slow right now. Please try again in a moment." : "Can't reach SafeRoute. Check your connection.");
   } finally { clearTimeout(timer); }
   const data = await res.json().catch(() => ({ error: "Unexpected response from the server" }));
-  if (!res.ok || data.error) throw new Error(data.error || `Request failed (${res.status})`);
+  if (!res.ok || data.error) throw Object.assign(new Error(data.error || `Request failed (${res.status})`), { status: res.status });
   return data;
 }
 let toastTimer;
@@ -661,7 +667,13 @@ async function startTrip(opts = {}) {
   state.shared = opts.shareOnly ? { t, to: state.to } : null;
   const shared = shareText(`I'm ${MODE[r.mode || "walk"].verb} to ${state.toLabel || "my destination"} with SafeRoute, about ${r.minutes} min. Follow me live:`, tripLink(t.id));
   if (opts.shareOnly) { await shared; return; }
+  await beginTrip(t, r);
+}
+// saved: the trip kept in this browser from before the phone killed the page, so friends' link carries on moving
+async function beginTrip(t, r, saved) {
   startWatching();
+  // only what resuming needs; the page already holds the id and key in memory
+  store.set("trip", saved || { id: t.id, key: t.key, dest: state.to, label: state.toLabel, eta: r.minutes, mode: r.mode || "walk", started: Date.now() });
   state.trip = { ...t, route: r, started: Date.now(), offCount: 0, lastMovePt: state.here, lastMoveAt: Date.now(), lastPost: 0, nextCheck: 0,
     spoken: {}, lastReroute: 0, nextStop: 0, lastRecheck: Date.now() };
   state.follow = true;
@@ -674,6 +686,37 @@ async function startTrip(opts = {}) {
   renderTrip();
   updateGuidance(start);
   if (!state.here || metres(state.here, r.coords[0]) > 200) toast("No GPS fix near the start. Use Simulate walk to preview the trip.", 5000);
+}
+
+// The phone may kill SafeRoute in the background mid-trip; friends would then see no updates for up to 12 hours.
+const TRIP_TTL_MS = 12 * 3600000;  // server.py TRIP_TTL
+function checkSavedTrip() {
+  const s = store.get("trip", null);
+  if (!s) return;
+  if (!(Date.now() - s.started < TRIP_TTL_MS)) return store.del("trip");
+  api(`/api/trip/${s.id}`, null, 8000).then((v) => (v.ended ? store.del("trip") : offerResume(s)),
+    (e) => (e.status === 404 ? store.del("trip") : offerResume(s)));  // offline: still offer; the end message retries
+}
+function offerResume(s) {
+  openDrawer(`<h2 id="drawerTitle">You're still sharing a trip</h2>
+    <p>SafeRoute closed on the way to ${esc(s.label || "your destination")}. Friends with your link have had no updates since.</p>
+    <button class="btn btn-primary btn-block" id="resumeTrip">${icon("share")}Carry on sharing</button>
+    <button class="btn btn-block" id="endSavedTrip">${icon("check")}I'm safe, end it</button>`);
+  $("#resumeTrip").onclick = () => { closeDrawer(); resumeTrip(s); };
+  $("#endSavedTrip").onclick = () => { closeDrawer(); store.del("trip"); endShare(s, true); toast("Trip ended. Friends see you arrived safely."); };
+}
+async function resumeTrip(s) {
+  setPlace("to", s.dest, s.label);
+  state.mode = s.mode; showMode();
+  startWatching();
+  const from = await currentPosition();
+  if (!from) { toast("Turn on location to carry on sharing."); return offerResume(s); }
+  toast("Finding your way from here…");
+  try {
+    const res = await api("/api/route?" + routeQuery(from, isoLocal(new Date()), 0), null, 60000);
+    state.routes = res.routes; state.sel = "safest";
+    await beginTrip(s, res.routes.find((x) => x.kind === state.sel) || res.routes[0], s);
+  } catch (e) { toast(e.message); offerResume(s); }
 }
 
 async function keepScreenOn() {
@@ -897,6 +940,7 @@ async function endTrip(safe, auto) {
   const t = state.trip;
   if (!t) return;
   state.trip = null;
+  store.del("trip");
   state.routes = [];
   clearInterval(state.sim); state.sim = null;
   document.body.classList.remove("navigating");
@@ -1316,11 +1360,12 @@ function onboarding(step = 0) {
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
 addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); state.installPrompt = e; if (!state.to) renderIdle(); });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=28").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=29").catch(() => {});
 
 // ---------- start ----------
 renderIdle();
 if (!store.get("onboarded", false)) onboarding();
-else if (navigator.permissions) navigator.permissions.query({ name: "geolocation" }).then((p) => { if (p.state === "granted") { startWatching(); currentPosition().then(() => !state.to && renderIdle()); } }).catch(() => {});
+else checkSavedTrip();
+if (store.get("onboarded", false) && navigator.permissions) navigator.permissions.query({ name: "geolocation" }).then((p) => { if (p.state === "granted") { startWatching(); currentPosition().then(() => !state.to && renderIdle()); } }).catch(() => {});
 const params = new URLSearchParams(location.search);
 if (params.get("sos") === "1") openSOS();
