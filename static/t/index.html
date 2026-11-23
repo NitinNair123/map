@@ -8,7 +8,7 @@
 <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap">
 <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
-<link rel="stylesheet" href="/theme.css?v=27">
+<link rel="stylesheet" href="/theme.css?v=28">
 <style>
   html, body { height: 100%; overflow: hidden; }
   #map { position: fixed; inset: 0; }
@@ -48,16 +48,21 @@ let me, dest, trail, first = true;
 const ago = (s) => s < 60 ? "just now" : s < 3600 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`;
 
 async function poll() {
-  let t;
+  let t, res;
   try {
-    const res = await fetch(`/api/trip/${encodeURIComponent(id || "")}`);
+    res = await fetch(`/api/trip/${encodeURIComponent(id || "")}`);
     t = await res.json();
-    if (!res.ok) throw new Error(t.error);
-  } catch (e) {
+  } catch {}
+  if (res?.status === 404) {
     $("#status").className = "status stale"; $("#status").textContent = "Not available";
     $("#title").textContent = "This trip has ended";
-    $("#detail").textContent = e.message || "The link may be wrong or the trip finished more than 12 hours ago.";
+    $("#detail").textContent = t?.error || "The link may be wrong or the trip finished more than 12 hours ago.";
     return;
+  }
+  if (!res?.ok || !t) {  // the viewer's own signal, a busy server or the rate limit: the trip may well still be live
+    $("#status").className = "status stale"; $("#status").textContent = "Reconnecting…";
+    $("#detail").textContent = `${res ? t?.error || "SafeRoute is busy." : "Can't reach SafeRoute. Check your connection."} Trying again.`;
+    return setTimeout(poll, 10000);
   }
   const who = t.name || "Your friend";
   const last = t.points[t.points.length - 1];
@@ -72,8 +77,8 @@ async function poll() {
   }
   const s = $("#status");
   if (t.ended) {
-    s.className = "status done"; s.textContent = "Trip ended";
-    $("#title").textContent = `${who} ended the trip`;
+    s.className = "status done"; s.textContent = t.arrived ? "Arrived" : "Trip ended";
+    $("#title").textContent = t.arrived ? `${who} arrived safely` : `${who} ended the trip`;
     $("#detail").textContent = last ? `Last seen ${ago(since)}.` : "";
     return;
   }

@@ -411,9 +411,9 @@ def reword_sos(text):
     return out if keeps_links(text, out) else text
 
 
-def end_trip(t):
-    """Delete every location of a trip as soon as it ends; only the name and "ended" stay for the viewer."""
-    t.update(points=[], dest=None, eta=0, vehicle="", ended=True, updated=time.time())
+def end_trip(t, arrived=False):
+    """Delete every location of a trip as soon as it ends; only the name, "ended" and "arrived" stay for the viewer."""
+    t.update(points=[], dest=None, eta=0, vehicle="", ended=True, arrived=arrived, updated=time.time())
 
 
 IST = timezone(timedelta(hours=5, minutes=30), "IST")  # India has no daylight saving, so a fixed offset is exact
@@ -592,7 +592,7 @@ class Handler(SimpleHTTPRequestHandler):
                 t = trips.get(u.path.rsplit("/", 1)[1])
                 if not t:
                     return self.send_json({"error": "This trip has ended or the link is wrong."}, 404)
-                return self.send_json({k: t[k] for k in ("name", "dest", "eta", "mode", "vehicle", "battery", "points", "started", "updated", "ended")})
+                return self.send_json({k: t[k] for k in ("name", "dest", "eta", "mode", "vehicle", "battery", "points", "started", "updated", "ended", "arrived")})
         except TooFar as e:
             return self.send_json({"error": str(e)}, 400)
         except ConnectionError as e:
@@ -725,7 +725,7 @@ class Handler(SimpleHTTPRequestHandler):
             now = time.time()
             trips[tid] = {"key": key, "name": str(body.get("name", ""))[:40], "dest": dest,
                           "eta": eta, "mode": mode, "vehicle": "", "battery": None,
-                          "points": [], "started": now, "updated": now, "ended": False}
+                          "points": [], "started": now, "updated": now, "ended": False, "arrived": False}
         self.send_json({"id": tid, "key": key})
 
     def update_trip(self, tid, body):
@@ -735,7 +735,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": "unknown trip"}, 404)
         with lock:
             if body.get("ended"):
-                end_trip(t)
+                end_trip(t, bool(body.get("arrived")))
             elif "vehicle" in body:  # the cab, auto or bike-taxi number, so friends know which vehicle to look for
                 t["vehicle"] = " ".join(str(body["vehicle"]).split())[:20]
             elif "lat" in body:
