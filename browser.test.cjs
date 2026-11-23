@@ -226,3 +226,28 @@ test("voice: a spoken request is recorded and sent to the server as audio", asyn
   assert.deepEqual(errors, []);
   await mic.close();
 });
+
+test("save home once, then one tap routes there; it can be forgotten in settings", async () => {
+  const { ctx, page, errors } = await phone();
+  await page.goto(BASE + "/app/");
+  await page.click("[data-go=home]");
+  await page.fill("#toInput", "city");
+  await page.click("#results li >> text=City Pharmacy");
+  await page.waitForSelector("#startBtn", { timeout: 15000 });
+  assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("sr.saved")).home.label), "City Pharmacy");
+  await page.reload();
+  await page.click("[data-go=home]");
+  await page.waitForSelector("#startBtn", { timeout: 15000 });
+  assert.equal(await page.inputValue("#toInput"), "Home");
+  await page.fill("#toInput", "ho");
+  await page.waitForSelector("#results li >> text=Home");
+  await page.reload();
+  await page.click("#settingsBtn");
+  await page.click("[data-unsave=home]");
+  assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("sr.saved")).home), undefined);
+  await page.click("#drawer [data-close]");
+  assert.ok(await page.isVisible("text=Set home"), "the start screen offers to set it again");
+  assert.equal(await page.getAttribute("a[href='tel:1091']", "href"), "tel:1091", "SOS offers the women helpline");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});

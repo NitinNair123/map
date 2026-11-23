@@ -205,6 +205,9 @@ async function showResults(q) {
   const seq = ++searchSeq;
   const extra = [];
   if (activeField === "from") extra.push({ name: "Your location", kind: "Use GPS", here: true });
+  const typed = q.trim().toLowerCase(), saved = store.get("saved", {});
+  const mine = Object.entries(SAVED).filter(([k, l]) => saved[k] && l.toLowerCase().startsWith(typed))
+    .map(([k, l]) => ({ name: l, kind: saved[k].label, pt: saved[k].pt, saved: k }));
   extra.push({ name: "Choose on map", kind: "Tap anywhere on the map", pick: true });
   let found = [];
   if (q.trim().length >= 2) {
@@ -216,11 +219,11 @@ async function showResults(q) {
   if (seq !== searchSeq) return;
   const list = $("#results");
   list.innerHTML = "";
-  [...found, ...extra].forEach((r, i) => {
+  [...mine, ...found, ...extra].forEach((r, i) => {
     const li = document.createElement("li");
     li.setAttribute("role", "option");
-    li.setAttribute("aria-selected", i === 0 && found.length ? "true" : "false");
-    li.innerHTML = `<span class="ico">${icon(r.here ? "locate" : r.pick ? "flag" : r.kind === "street" ? "walk" : "store")}</span><span><b>${esc(r.name)}</b><small>${r.km != null ? `${r.km} km · ` : ""}${esc(cap(String(r.kind).replace(/_/g, " ")))}</small></span>`;
+    li.setAttribute("aria-selected", i === 0 && (found.length || mine.length) ? "true" : "false");
+    li.innerHTML = `<span class="ico">${icon(r.here ? "locate" : r.saved ? "check" : r.pick ? "flag" : r.kind === "street" ? "walk" : "store")}</span><span><b>${esc(r.name)}</b><small>${r.km != null ? `${r.km} km · ` : ""}${esc(cap(String(r.kind).replace(/_/g, " ")))}</small></span>`;
     li.onclick = () => choose(r);
     list.appendChild(li);
   });
@@ -240,6 +243,7 @@ async function choose(r) {
 function setPlace(which, pt, label) {
   if (which.startsWith("stop")) { state.stops[+which.slice(4)] = { pt, label }; return renderStops(); }
   state[which] = pt; state[which + "Label"] = label;
+  if (which === "to" && savingAs) { savePlace(savingAs, pt, label); savingAs = null; }
   $(which === "from" ? "#fromInput" : "#toInput").value = label;
   setMarker(which, pt);
 }
@@ -252,6 +256,21 @@ $("#swapBtn").onclick = () => {
   else if (state.here) setPlace("to", state.here, "Your location");
   maybeRoute();
 };
+
+// ---------- saved places: Home and Work, one tap away, kept on this phone only ----------
+const SAVED = { home: "Home", work: "Work" };
+let savingAs = null;  // "home" or "work" while the user picks the place to save
+function savePlace(k, pt, label) {
+  store.set("saved", { ...store.get("saved", {}), [k]: { pt, label } });
+  toast(`Saved as ${SAVED[k]}. Change it in Settings.`);
+}
+function goSaved(k) {
+  const p = store.get("saved", {})[k];
+  if (p) { setPlace("to", p.pt, SAVED[k]); return maybeRoute(); }
+  savingAs = k; activeField = "to";
+  $("#toInput").focus();
+  toast(`Search for your ${SAVED[k].toLowerCase()} or tap it on the map`);
+}
 
 // ---------- stops ----------
 const stopLayer = L.layerGroup().addTo(map);
@@ -544,10 +563,13 @@ async function renderIdle() {
     : isIOS() && !standalone() ? `<p class="muted">Install: tap <b>Share</b> then <b>Add to Home Screen</b>.</p>` : "";
   renderSheet(`
     <div class="sheet-head"><div><h3>${greet}</h3><p class="muted" style="margin:0">Search a place or tap the map to see the recommended way there.</p></div></div>
+    <div class="actions saved-places" style="grid-template-columns:1fr 1fr">${Object.entries(SAVED).map(([k, l]) =>
+      `<button class="btn" data-go="${k}">${icon(k === "home" ? "shield" : "store")}${store.get("saved", {})[k] ? l : `Set ${l.toLowerCase()}`}</button>`).join("")}</div>
     ${contacts.length ? "" : `<button class="btn btn-block" id="addContactsBtn">${icon("user")}Add a trusted contact for SOS</button>`}
     <div id="nearby"></div>
     ${install}`);
   $("#addContactsBtn")?.addEventListener("click", openSettings);
+  document.querySelectorAll("[data-go]").forEach((b) => (b.onclick = () => goSaved(b.dataset.go)));
   $("#installBtn")?.addEventListener("click", async () => { state.installPrompt.prompt(); state.installPrompt = null; renderIdle(); });
   if (state.here) {
     const list = await api(`/api/havens?near=${state.here.join(",")}&at=${encodeURIComponent(whenParam())}`).catch(() => []);
@@ -1084,12 +1106,20 @@ function bindContacts(rerender) {
     rerender();
   }));
 }
+function savedHtml() {
+  const s = store.get("saved", {}), set = Object.keys(SAVED).filter((k) => s[k]);
+  return set.length ? set.map((k) => `<div class="contact"><span class="avatar-s">${SAVED[k][0]}</span><div><b>${SAVED[k]}</b><small>${esc(s[k].label)}</small></div>
+    <button class="icon-btn" data-unsave="${k}" aria-label="Forget ${SAVED[k]}" style="box-shadow:none">${icon("trash")}</button></div>`).join("")
+    : `<p class="muted">Tap "Set home" or "Set work" on the start screen. They stay on this phone.</p>`;
+}
 function openSettings() {
   const sel = (id, val, opts) => `<select id="${id}" class="input">${opts.map(([v, l]) => `<option value="${v}" ${String(v) === String(val) ? "selected" : ""}>${l}</option>`).join("")}</select>`;
   openDrawer(`
     <h2 id="drawerTitle">Settings</h2>
     <h3 style="font-size:16px;margin-top:6px">Trusted contacts</h3>
     <div id="contactsBox" style="display:grid;gap:8px">${contactsHtml()}</div>
+    <h3 style="font-size:16px;margin-top:6px">Saved places</h3>
+    <div id="savedBox" style="display:grid;gap:8px">${savedHtml()}</div>
     <div class="row"><label for="myName">Your name in alerts</label><input id="myName" class="input" style="width:50%" maxlength="40" value="${esc(store.get("myName", ""))}"></div>
     <h3 style="font-size:16px;margin-top:6px">Medical info for ambulance alerts</h3>
     ${MEDICAL.map(([k, l]) => `<div class="row"><label for="med_${k}">${l}</label><input id="med_${k}" class="input" style="width:50%" maxlength="120" value="${esc(store.get("medical", {})[k] || "")}"></div>`).join("")}
@@ -1106,6 +1136,14 @@ function openSettings() {
     <p class="muted">Your contacts and settings stay on this phone. Trip locations are deleted from the server when a trip ends, and 12 hours after it started at the latest. We never sell location data.</p>`);
   const rerender = () => { $("#contactsBox").innerHTML = contactsHtml(); bindContacts(rerender); };
   bindContacts(rerender);
+  const bindSaved = () => document.querySelectorAll("[data-unsave]").forEach((b) => (b.onclick = () => {
+    const s = store.get("saved", {});
+    delete s[b.dataset.unsave];
+    store.set("saved", s);
+    $("#savedBox").innerHTML = savedHtml(); bindSaved();
+    if (!state.to && !state.trip) renderIdle();
+  }));
+  bindSaved();
   $("#myName").onchange = (e) => store.set("myName", e.target.value.trim());
   $("#caller").onchange = (e) => store.set("caller", e.target.value.trim() || "Mom");
   $("#buffer").onchange = (e) => store.set("buffer", +e.target.value);
