@@ -172,6 +172,13 @@ class ServerTest(unittest.TestCase):
             self.assertTrue(found, f)
             self.assertEqual(set(found), {cache}, f)  # one old number and some phones keep running old code behind the CDN
 
+    def test_trip_without_a_place_gets_a_plain_error(self):
+        for dest in (None, [], [28.6], "", {"lat": 1}):
+            code, body = self.call("/api/trip", {"dest": dest, "eta": 0})
+            self.assertEqual(code, 400)
+            self.assertIn("expected [lat, lon]", body["error"])
+            self.assertNotIn("NoneType", body["error"])
+
     def test_ending_a_trip_deletes_its_locations(self):
         _, t = self.call("/api/trip", {"dest": [28.6, 77.2], "eta": 10})
         self.assertEqual(self.call(f"/api/trip/{t['id']}", {"key": t["key"], "lat": 28.61, "lon": 77.21})[0], 200)

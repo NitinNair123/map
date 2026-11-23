@@ -990,7 +990,7 @@ async function alertContacts(medical = false) {
   let link = "";
   try {
     // short timeout: on a weak signal the text must not wait for the live link
-    if (!state.trip) { const t = await createTrip(pt || state.to, 0, 4000); state.sosTrip = t; link = tripLink(t.id); }
+    if (!state.trip && (pt || state.to)) { const t = await createTrip(pt || state.to, 0, 4000); state.sosTrip = t; link = tripLink(t.id); }
     else link = tripLink(state.trip.id);
   } catch {}
   const maps = pt ? `https://maps.google.com/?q=${pt[0].toFixed(6)},${pt[1].toFixed(6)}` : "";
@@ -1304,7 +1304,7 @@ function onboarding(step = 0) {
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
 addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); state.installPrompt = e; if (!state.to) renderIdle(); });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=26").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=27").catch(() => {});
 
 // ---------- start ----------
 renderIdle();
