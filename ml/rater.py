@@ -47,6 +47,10 @@ IST = timedelta(hours=5, minutes=30)
 W_PARAMS = [{"max_depth": d, "learning_rate": lr, "n_estimators": 300, "min_child_weight": mcw, "reg_lambda": 1.0}
             for d in (2, 3, 4) for lr in (0.03, 0.08) for mcw in (20, 50)]  # min_child_weight counts people, not images
 W_COLS = [c for c in STATIC if c not in ("incident_hits", "report_points")] + ["hour", "weekend"]  # app-only, empty here
+# ~2,600 noisy counts can't support 100 inputs, so a short list of the inputs the design names is tried too; the
+# cross-validation (never the locked blocks) picks between them
+W_FEW = ["highway", "sidewalk", "lanes", "places_total", "places_shop", "places_food", "places_500", "d_transit",
+         "transit_500", "d_main", "main_share_300", "bld_500", "zone_industrial", "zone_park", "hour", "weekend"]
 
 
 def _find(sub, pattern):
@@ -193,8 +197,8 @@ def snap(points, max_m, cols=None):
 
 # ---------------------------------------------------------------- W: women's share
 
-def _w_matrix(d):
-    X = d.reindex(columns=W_COLS).copy()
+def _w_matrix(d, cols=W_COLS):
+    X = d.reindex(columns=cols).copy()
     if X["highway"].dtype == object:  # blocks store a code already; test or older rows may hold the OSM name
         X["highway"] = X["highway"].map({h: i for i, h in enumerate(HIGHWAYS)})
     return X.apply(pd.to_numeric, errors="coerce").astype(float)
@@ -231,9 +235,10 @@ def _base_road(tr, te):
     return te["highway"].map(share).fillna(tr["women"].sum() / tr["people"].sum()).to_numpy()
 
 
-def _w_scores(y, p, base, w, groups):
+def _w_scores(y, p, base, w, groups, overall=None):
     err, berr = np.abs(y - p), np.abs(y - base)
-    return {"rows": int(len(y)), "people": int(w.sum()), "blocks": int(len(set(groups))),
+    extra = {} if overall is None else {"overall_mean_mae": round(float(np.average(np.abs(y - overall), weights=w)), 4)}
+    return {**extra, "rows": int(len(y)), "people": int(w.sum()), "blocks": int(len(set(groups))),
             "mae": round(float(np.average(err, weights=w)), 4), "baseline_mae (share per road type)": round(float(np.average(berr, weights=w)), 4),
             "gain_ci95": wci(berr - err, w, groups),
             "spearman": round(float(spearmanr(y, p).statistic), 3) if len(y) > 2 else None,
@@ -244,24 +249,27 @@ def train_w(d):
     d = d.copy()
     d["block"] = d["tile"].map(train.block_of)
     lock = train.locked(d["block"])
-    X, y, w = _w_matrix(d), (d["women"] / d["people"]).to_numpy(), d["people"].to_numpy(float)
+    y, w = (d["women"] / d["people"]).to_numpy(), d["people"].to_numpy(float)
     tr = ~lock
     groups = d["block"].to_numpy()
-    cv = list(GroupKFold(n_splits=min(5, len(set(groups[tr])))).split(X[tr], y[tr], groups[tr]))
+    cv = list(GroupKFold(n_splits=min(5, len(set(groups[tr])))).split(d[tr], y[tr], groups[tr]))
     best = None
-    for params in W_PARAMS:
-        oof = np.zeros(tr.sum())
-        for a, b in cv:
-            k, m = _w_fit(X[tr].iloc[a], y[tr][a], w[tr][a], params)
-            oof[b] = np.clip(m.predict(X[tr].iloc[b][k]), 0, 1)
-        s = float(np.average(np.abs(y[tr] - oof), weights=w[tr]))
-        if best is None or s < best[0]:
-            best = (s, params)
-    params = best[1]
+    for name, cols in (("all", W_COLS), ("few", W_FEW)):
+        Xc = _w_matrix(d, cols)
+        for params in W_PARAMS:
+            oof = np.zeros(tr.sum())
+            for a, b in cv:
+                k, m = _w_fit(Xc[tr].iloc[a], y[tr][a], w[tr][a], params)
+                oof[b] = np.clip(m.predict(Xc[tr].iloc[b][k]), 0, 1)
+            s = float(np.average(np.abs(y[tr] - oof), weights=w[tr]))
+            if best is None or s < best[0]:
+                best = (s, params, name, cols)
+    params, cols = best[1], best[3]
+    X = _w_matrix(d, cols)
     bag = _w_bag(X[tr], y[tr], w[tr], params)
     p = _w_pred(bag, X[lock])
     base = _base_road(d[tr], d[lock])
-    m = {"params": params, "cv_mae": round(best[0], 4), "locked": _w_scores(y[lock], p, base, w[lock], groups[lock])}
+    m = {"params": params, "inputs": best[2], "cols": cols, "cv_mae": round(best[0], 4), "locked": _w_scores(y[lock], p, base, w[lock], groups[lock], overall=np.average(y[tr], weights=w[tr]))}
     m["passes"] = bool(m["locked"]["gain_ci95"][0] > 0)
     m["leave_one_source_out"] = {}
     for src in sorted(d["source"].unique()):
@@ -378,6 +386,7 @@ def report(m):
                 "| | model | baseline: share per road type |", "|---|---|---|",
                 f"| people-weighted error | {k['mae']} | {k['baseline_mae (share per road type)']} |",
                 f"| Spearman | {k['spearman']} | {k['baseline_spearman']} |", "",
+                f"Inputs chosen by cross-validation: {w['inputs']}. One overall average would score {k.get('overall_mean_mae')} (does road type matter at all?).", "",
                 f"Gain over baseline, 95% interval: {k['gain_ci95']}. **{'PASSES' if w['passes'] else 'FAILS'}** (needs the whole interval above 0).", "",
                 "Leave one source out (train on the others, test on it):", "",
                 "| source | rows | error | baseline | gain 95% |", "|---|---|---|---|---|"]
@@ -407,7 +416,7 @@ def cmd_train():
     m["L"], models["L"] = train_l()
     json.dump(m, open(os.path.join(OUT, "metrics.json"), "w"), indent=1, default=str)
     open(os.path.join(OUT, "report.md"), "w", encoding="utf-8").write(report(m))
-    pickle.dump({"W": models["W"], "W_cols": W_COLS, "L": models["L"]}, open(os.path.join(OUT, "rater.pkl"), "wb"))
+    pickle.dump({"W": models["W"], "W_cols": m["W"]["cols"], "L": models["L"]}, open(os.path.join(OUT, "rater.pkl"), "wb"))
     print(report(m))
 
 
