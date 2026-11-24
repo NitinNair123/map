@@ -647,6 +647,25 @@ test("after an SOS, the live link keeps moving even if the phone closed SafeRout
   await ctx.close();
 });
 
+test("standing still (waiting for a bus) keeps friends updated instead of 'No update'", async () => {
+  const { ctx, page, errors } = await phone();
+  await ctx.addInitScript(() => { navigator.share = async () => {}; });
+  await page.clock.install();
+  await routeToPharmacy(page);
+  await page.click("#startBtn");
+  await page.waitForSelector("text=Sharing live");
+  const id = await page.evaluate(() => state.trip.id);
+  await page.clock.runFor(1000);
+  const before = (await tripView(id)).points.length;
+  // the phone stops reporting positions when she doesn't move
+  await page.clock.runFor(65000);
+  let view;
+  for (let i = 0; i < 20; i++) { view = await tripView(id); if (view.points.length > before) break; await new Promise((r) => setTimeout(r, 150)); }
+  assert.ok(view.points.length > before, "the phone still tells friends it's alive");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
 test("a saved trip the server no longer has is dropped without asking", async () => {
   const { ctx, page, errors } = await phone();
   await ctx.addInitScript(() => sessionStorage.seeded || (sessionStorage.seeded = localStorage["sr.trip"] =
