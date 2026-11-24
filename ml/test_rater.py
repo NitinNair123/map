@@ -154,6 +154,8 @@ class RaterTest(unittest.TestCase):
         out = pd.read_csv(os.path.join(rater.OUT, "delhi_looks_safe.csv"))
         self.assertGreater(len(out), 40)
         self.assertTrue(out["looks_safe"].between(0, 100).all())
+        self.assertEqual(list(out.columns), ["edge_id", "lat", "lon", "looks_safe", "images"])
+        self.assertTrue(out["lat"].between(28.4, 28.8).all())  # the street's midpoint, not the photo's
 
 
 if __name__ == "__main__":

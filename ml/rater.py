@@ -605,9 +605,9 @@ def cmd_score():
     seg = scene().merge(img, on="uuid")
     seg = seg[in_ncr(seg)].reset_index(drop=True)
     seg["score"] = looks_safe(r["L"], seg)
-    s = snap(seg[["uuid", "lat", "lon", "score"]], SNAP_L_M, ["edge_id"])
-    out = s.groupby("edge_id")["score"].agg(["median", "size"]).round(1).reset_index()
-    out.columns = ["edge_id", "looks_safe", "images"]
+    s = snap(seg[["uuid", "lat", "lon", "score"]], SNAP_L_M, ["edge_id", "lat", "lon"])
+    out = s.groupby(["edge_id", "lat_edge", "lon_edge"])["score"].agg(["median", "size"]).round(1).reset_index()
+    out.columns = ["edge_id", "lat", "lon", "looks_safe", "images"]  # lat, lon: the street's midpoint, as the app computes it
     out.to_csv(os.path.join(OUT, "delhi_looks_safe.csv"), index=False)
     print(f"{len(seg)} NCR images, {len(s)} within {SNAP_L_M} m of a street, {len(out)} streets scored")
 
