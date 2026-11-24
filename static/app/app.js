@@ -530,7 +530,7 @@ function renderRoutes() {
   if (r.confidence_level === "none") notes.push(["", "There isn't enough real data on these streets to rate this route yet. Grey dashes mark the unrated parts. Reports and the street survey fill this in."]);
   else if (r.unrated_pct >= 10) notes.push(["", `${r.unrated_pct}% of this route is too thinly mapped to rate. It's shown in grey dashes, and those streets earn no points, which pulls the score down.`]);
   if (state.rain) notes.push(["", "It's raining, so streets may be emptier than usual."]);
-  if (r.weakest && r.weakest.score < 45) notes.push(["", `Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because ${WEAK_WHY[r.weakest.why] || "of " + r.weakest.why.toLowerCase()}. It's dashed on the map.`]);
+  if (r.weakest && r.weakest.score < 45) notes.push(["", `Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because ${[r.weakest.why, r.weakest.also].filter(Boolean).map((k) => WEAK_WHY[k] || "of " + k.toLowerCase()).join(" and ")}. It's dashed on the map.`]);
   const unknown = (r.places || []).filter((pl) => pl.open === null).length;
   if (unknown) notes.push(["info", `Zoom in to see the places along the way: bright pins are open when you pass, faded pins are the ${unknown} places with no published hours, so we can't say if they're open. Tap "Report" and "Shops open now" to fix that for everyone.`]);
   if (r.headline) notes.unshift(["info", r.headline]);
@@ -1361,7 +1361,7 @@ function onboarding(step = 0) {
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
 addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); state.installPrompt = e; if (!state.to) renderIdle(); });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=30").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=31").catch(() => {});
 
 // ---------- start ----------
 renderIdle();

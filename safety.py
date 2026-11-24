@@ -36,6 +36,7 @@ BALANCED_DETOUR = 1.25
 LOOP_NEAR_M = 40
 LOOP_SLACK_M = 150
 
+HOP_M = 80  # leaving a road and coming back to it within this distance is a lane change, not two turns
 COMPASS = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"]
 ROAD_WORDS = {"footway": "the footpath", "path": "the path", "steps": "the steps", "cycleway": "the cycle path",
               "pedestrian": "the pedestrian street", "service": "the lane", "track": "the track", "living_street": "the lane"}
@@ -886,9 +887,13 @@ class Area:
             t = at[weak_i]
             w = rating.weights(self.light(t), mode)
             wf = rating.factors(self, weak, t, self.light(t), now, mode)
-            why = max((k for k, f in wf.items() if f and w[k] > 0), key=lambda k: w[k] * (1 - wf[k]["value"]))
+            gap = lambda k: w[k] * (1 - wf[k]["value"])
+            why, *rest = sorted((k for k, f in wf.items() if f and w[k] > 0), key=gap, reverse=True)
+            # main road outweighs the rest, so on its own it would be the only reason ever given; name the next one too
+            also = rest[0] if rest and why == "main_road" and gap(rest[0]) > 0 else None
             weakest = {"coords": [self.nodes[weak["a"]], self.nodes[weak["b"]]], "score": round(rated[path[weak_i][1]][0]),
-                       "name": weak["name"] or "an unnamed " + UNNAMED.get(weak["highway"], weak["highway"].replace("_", " ") + " road"), "why": LABELS[why]}
+                       "name": weak["name"] or "an unnamed " + UNNAMED.get(weak["highway"], weak["highway"].replace("_", " ") + " road"),
+                       "why": LABELS[why], "also": also and LABELS[also]}
         groups = defaultdict(lambda: {"found": 0, "open": 0, "no_hours": 0})
         for i in place_at:
             g = groups[self.pois[i]["group"]]
@@ -941,7 +946,7 @@ class Area:
             bearing = math.degrees(math.atan2((b[1] - a[1]) * math.cos(math.radians(a[0])), b[0] - a[0])) % 360
             name = e["name"] or ROAD_WORDS.get(e["highway"], "the road")
             if k == 0:
-                steps.append({"pt": a, "dist": 0, "turn": "depart", "text": f"Head {COMPASS[round(bearing / 45) % 8]} on {name}"})
+                steps.append({"pt": a, "dist": 0, "turn": "depart", "text": f"Head {COMPASS[round(bearing / 45) % 8]} on {name}", "from": None})
             else:
                 turn = (bearing - prev_bearing + 540) % 360 - 180  # positive is clockwise, i.e. right
                 junction = len(self.adj[n]) >= 3
@@ -951,13 +956,18 @@ class Area:
                             else side if abs(turn) < 140 else "u-turn")
                     verb = {"straight": "Continue", "u-turn": "Turn around"}.get(kind, f"Turn {kind}")
                     text = f"{verb} onto {name}" if name != prev_name else verb
-                    if steps and travelled - steps[-1]["dist"] < 10 and steps[-1]["turn"] == kind == "straight":
-                        steps[-1]["text"] = text  # tiny unnamed link between two streets: one instruction, not two
+                    last = steps[-1]
+                    if last["turn"] != "depart" and name == last["from"] != prev_name and travelled - last["dist"] < HOP_M:
+                        steps.pop()  # a short hop onto a slip road or the other carriageway and back: no instruction at all
+                    elif travelled - last["dist"] < 10 and last["turn"] == kind == "straight":
+                        last["text"] = text  # tiny unnamed link between two streets: one instruction, not two
                     else:
-                        steps.append({"pt": a, "dist": round(travelled), "turn": kind, "text": text})
+                        steps.append({"pt": a, "dist": round(travelled), "turn": kind, "text": text, "from": prev_name})
             travelled += e["length"]
             prev_name, prev_bearing = name, bearing
         steps.append({"pt": coords[-1], "dist": round(travelled), "turn": "arrive", "text": "You have arrived"})
+        for st in steps:
+            st.pop("from", None)
         return steps
 
     def havens_near(self, pt, when, limit=5):

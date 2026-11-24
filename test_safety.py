@@ -129,6 +129,18 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(r["steps"][-1]["turn"], "arrive")
         self.assertEqual(r["turns"], 1)
 
+    def test_a_hop_onto_a_slip_road_and_back_is_not_two_turns(self):
+        # Aurobindo Marg at Lado Sarai: the route steps onto a parallel slip road for ~60 m and back, which read as
+        # "Turn left ... Turn right ..." to a driver (live check, 24 Nov 2026)
+        main = dict(highway="trunk", name="Aurobindo Marg")
+        slip = [(28.0, 77.002), (28.0001, 77.0022), (28.0001, 77.0024), (28.0, 77.0026)]
+        area = Area({"elements": [way(1, [1, 2], [(28.0, 77.0), (28.0, 77.002)], **main),
+                                  way(2, [2, 3, 4, 5], slip, highway="trunk_link"),
+                                  way(3, [5, 6], [(28.0, 77.0026), (28.0, 77.005)], **main)]})
+        r = area.routes((28.0, 77.0), (28.0, 77.005), NOON, mode="car")[0]
+        self.assertEqual([st["turn"] for st in r["steps"]], ["depart", "arrive"], [st["text"] for st in r["steps"]])
+        self.assertEqual(r["turns"], 0)
+
     def test_stop_on_the_way(self):
         r = {x["kind"]: x for x in self.area.routes(A, B, NIGHT, via=[(28.0005, 77.0015)])}
         self.assertGreater(r["fastest"]["length_m"], 350)  # the short footway skips the stop, so every route goes north
@@ -225,6 +237,12 @@ class TileTest(unittest.TestCase):
     def test_route_anywhere(self):
         r = {x["kind"]: x for x in self.store.for_trip(A, B).routes(A, B, NIGHT)}
         self.assertGreater(r["safest"]["score"], r["fastest"]["score"])
+
+    def test_weakest_stretch_gives_a_reason_besides_not_being_a_main_road(self):
+        weak = [r["weakest"] for r in self.store.for_trip(A, B).routes(A, B, NIGHT) if r["weakest"] and r["weakest"]["why"] == "Main road"]
+        self.assertTrue(weak)
+        for w in weak:
+            self.assertIn(w["also"], set(rating.LABELS.values()) - {"Main road"})
 
     def test_weakest_stretch_names_an_unnamed_street_by_kind(self):
         names = {r["weakest"]["name"] for r in self.store.for_trip(A, B).routes(A, B, NIGHT) if r["weakest"]}
