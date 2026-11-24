@@ -107,8 +107,12 @@ def looks_safe_shadow(routes, when, mode):
     if not LOOKS_SAFE:
         return
     try:
-        rows = []
+        rows, seen = [], set()
         for r in routes:
+            key = tuple(map(tuple, r["coords"]))
+            if key in seen:  # safest, balanced and fastest are often one route: log it once
+                continue
+            seen.add(key)
             total = covered = total_score = 0.0
             worst = None
             for (a0, a1), (b0, b1) in zip(r["coords"], r["coords"][1:]):  # consecutive nodes = one street segment

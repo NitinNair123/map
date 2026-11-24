@@ -17,7 +17,8 @@ Usage (Windows: py instead of python), data in ml/data/incoming/<source>/ and ml
   python ml/rater.py train      fit and test W and L -> ml/out/rater/{report.md, metrics.json, rater.pkl}
   python ml/rater.py fetch      photos: SPECS from Hugging Face, Delhi from KartaView (+ Mapillary with a token)
   python ml/rater.py fetch-more [--limit N]  bulk Mapillary photos along NCR streets, one per 100 m (token needed)
-  python ml/rater.py embed      CLIP numbers for the photos in ml/data/incoming/images/ (needs torch + open_clip_torch)
+  python ml/rater.py fetch-kartaview  KartaView photos (no key) where streets still have none, one per 100 m
+  python ml/rater.py embed [--clip l14] [--specs-only]  CLIP numbers for the photos in ml/data/incoming/images/ (needs torch + open_clip_torch)
   python ml/rater.py score      L for Delhi streets -> ml/out/rater/delhi_looks_safe.csv (edge_id, score, images)
 """
 import argparse
@@ -46,6 +47,8 @@ BLOCKS = os.path.join(ML, "data", "blocks")
 OUT = os.path.join(ML, "out", "rater")
 IMAGES = os.path.join(IN, "images")              # photos fetched for SPECS and Delhi images, <uuid>.jpg
 CLIP = os.path.join(IMAGES, "clip_b32.csv.gz")   # uuid + 512 CLIP ViT-B/32 numbers per photo
+CLIP_MODELS = {"b32": ("ViT-B-32", "laion2b_s34b_b79k"), "l14": ("ViT-L-14", "laion2b_s32b_b82k")}
+CLIP_NAME = "b32"  # --clip l14 tries the larger model: its own embeddings file and its own ml/out/rater_l14/
 SNAP_W_M = 30   # a counted image belongs to the nearest street within this distance, else it is dropped
 SNAP_L_M = 25   # a Delhi image scores streets within this distance (the design's 25 m)
 IST = timedelta(hours=5, minutes=30)
@@ -439,12 +442,14 @@ def cmd_train():
 SPECS_HF = "https://huggingface.co/datasets/matiasqr/specs/resolve/main/svi/{city}/{uuid}.jpeg"  # CC BY-SA 4.0
 
 
-def _get(url, tries=3):
+def _get(url, tries=3, form=None):
     import time
+    import urllib.parse
     import urllib.request
+    data = urllib.parse.urlencode(form).encode() if form else None  # a form makes it a POST
     for k in range(tries):
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "saferoute-ml"}), timeout=60) as r:
+            with urllib.request.urlopen(urllib.request.Request(url, data=data, headers={"User-Agent": "saferoute-ml"}), timeout=60) as r:
                 return r.read()
         except OSError as e:
             if k == tries - 1:
@@ -563,7 +568,63 @@ def cmd_fetch_more(limit=30_000, cell_deg=0.01, spacing_m=100):
     print(f"done: {have} bulk photos")
 
 
-def cmd_embed():
+def cmd_fetch_kartaview(cell_deg=0.03, radius_m=2400, spacing_m=100):
+    """KartaView photos (no key) for Delhi streets that still have no photo within spacing_m: one nearby-photos query
+    per ~3 km square holding streets, thinned to one photo per spacing_m grid square (the newest). The contributor's
+    username is never stored. Resumable through kartaview_cells.txt; adds rows to the same file as fetch-more."""
+    import io
+    from PIL import Image
+    os.makedirs(IMAGES, exist_ok=True)
+    ll = pd.concat([pd.read_csv(f, usecols=["lat", "lon"]) for f in sorted(glob.glob(os.path.join(BLOCKS, "*.edges.csv.gz")))])
+    cells = ((ll["lat"] // cell_deg).astype(int).astype(str) + "_" + (ll["lon"] // cell_deg).astype(int).astype(str)).value_counts().index
+    have = pd.read_csv(_find("streetscapes", "images.csv")[0], usecols=["lat", "lon"])
+    if os.path.exists(EXTRA):
+        have = pd.concat([have, pd.read_csv(EXTRA, usecols=["lat", "lon"])])
+    taken = {tuple(g) for g in (_xy(have["lat"], have["lon"]) // spacing_m).astype(int)}
+    done_file = os.path.join(IMAGES, "kartaview_cells.txt")
+    done = set(open(done_file).read().split()) if os.path.exists(done_file) else set()
+    total = 0
+    for n, cell in enumerate(cells):
+        if cell in done:
+            continue
+        i, j = map(int, cell.split("_"))
+        lat, lon = (i + 0.5) * cell_deg, (j + 0.5) * cell_deg
+        try:
+            items = json.loads(_get("https://api.kartaview.org/1.0/list/nearby-photos/",
+                                    form={"lat": lat, "lng": lon, "radius": radius_m}))["currentPageItems"]
+        except Exception as e:  # noqa: BLE001  retried on the next run (square not marked done)
+            print(f"square {cell}: {str(e)[:80]}")
+            continue
+        new = []
+        for x in sorted(items, key=lambda x: str(x.get("shot_date") or ""), reverse=True):
+            try:
+                g = tuple((_xy([float(x["lat"])], [float(x["lng"])]) // spacing_m).astype(int)[0])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if g not in taken:
+                taken.add(g)
+                new.append(x)
+        saved = []
+        for x in new:
+            uuid = f"kv_{x['id']}"
+            path = os.path.join(IMAGES, f"{uuid}.jpg")
+            try:
+                if not os.path.exists(path):
+                    im = Image.open(io.BytesIO(_get(_photo_url("KartaView", x["id"], None)))).convert("RGB")
+                    im.thumbnail((1024, 1024))
+                    im.save(path, quality=90)
+                saved.append({"uuid": uuid, "lat": float(x["lat"]), "lon": float(x["lng"]), "captured_at": x.get("shot_date")})
+            except Exception as e:  # noqa: BLE001
+                print(f"photo {x['id']}: {str(e)[:80]}")
+        if saved:
+            pd.DataFrame(saved).to_csv(EXTRA, mode="a", header=not os.path.exists(EXTRA), index=False)
+        total += len(saved)
+        open(done_file, "a").write(cell + "\n")
+        print(f"square {n + 1} of {len(cells)}: {len(items)} listed, {len(saved)} new, {total} in total", flush=True)
+    print(f"done: {total} KartaView photos added")
+
+
+def cmd_embed(specs_only=False):
     """CLIP ViT-B/32 numbers for every photo in ml/data/incoming/images/ (GPU when torch sees one). Photos already
     embedded are skipped, so it can be re-run after more photos arrive."""
     import open_clip
@@ -571,8 +632,12 @@ def cmd_embed():
     from PIL import Image
     done = pd.read_csv(CLIP) if os.path.exists(CLIP) else pd.DataFrame(columns=["uuid"])
     todo = [p for p in sorted(glob.glob(os.path.join(IMAGES, "*.jpg"))) if os.path.basename(p)[:-4] not in set(done["uuid"])]
+    if specs_only:  # enough to test a model on the 400 rated photos before embedding every Delhi photo
+        keep = set(pd.read_csv(_find("specs_perception", "metadata.csv")[0])["uuid"])
+        todo = [p for p in todo if os.path.basename(p)[:-4] in keep]
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    model, _, prep = open_clip.create_model_and_transforms("ViT-B-32", pretrained="laion2b_s34b_b79k", device=dev)
+    arch, weights = CLIP_MODELS[CLIP_NAME]
+    model, _, prep = open_clip.create_model_and_transforms(arch, pretrained=weights, device=dev)
     model.eval()
     rows = []
     with torch.no_grad():
@@ -590,7 +655,7 @@ def cmd_embed():
             v = (v / v.norm(dim=-1, keepdim=True)).cpu().numpy()
             rows += [[n, *map(float, r)] for n, r in zip(names, v)]
             print(f"{i + len(batch)} of {len(todo)} photos", flush=True)
-    new = pd.DataFrame(rows, columns=["uuid"] + [f"clip_{k}" for k in range(512)])
+    new = pd.DataFrame(rows, columns=["uuid"] + [f"clip_{k}" for k in range(len(rows[0]) - 1 if rows else 0)])
     pd.concat([done, new], ignore_index=True).to_csv(CLIP, index=False)
     print(f"{len(new)} new embeddings on {dev}, {len(done) + len(new)} in total")
 
@@ -614,10 +679,18 @@ def cmd_score():
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["labels", "train", "fetch", "fetch-more", "embed", "score"])
+    ap.add_argument("command", choices=["labels", "train", "fetch", "fetch-more", "fetch-kartaview", "embed", "score"])
     ap.add_argument("--limit", type=int, default=30_000, help="fetch-more: stop after this many bulk photos")
+    ap.add_argument("--clip", choices=sorted(CLIP_MODELS), default="b32", help="embed/train/score: which CLIP model")
+    ap.add_argument("--specs-only", action="store_true", help="embed: only the 400 rated SPECS photos")
     a = ap.parse_args()
+    if a.clip != "b32":
+        CLIP_NAME, CLIP, OUT = a.clip, os.path.join(IMAGES, f"clip_{a.clip}.csv.gz"), OUT + f"_{a.clip}"
     if a.command == "fetch-more":
         cmd_fetch_more(a.limit)
+    elif a.command == "fetch-kartaview":
+        cmd_fetch_kartaview()
+    elif a.command == "embed":
+        cmd_embed(a.specs_only)
     else:
         {"labels": cmd_labels, "train": cmd_train, "fetch": cmd_fetch, "embed": cmd_embed, "score": cmd_score}[a.command]()

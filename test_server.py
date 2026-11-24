@@ -129,11 +129,11 @@ class ServerTest(unittest.TestCase):
         scores = {(round((a0 + b0) / 2, 5), round((a1 + b1) / 2, 5)): 40.0}
         with mock.patch.object(server, "DATA_DIR", tempfile.mkdtemp()), mock.patch.object(server, "LOOKS_SAFE", scores):
             before = json.dumps(routes)
-            server.looks_safe_shadow(routes, datetime(2026, 10, 25, 22), "walk")
+            server.looks_safe_shadow(routes + [dict(routes[0])], datetime(2026, 10, 25, 22), "walk")  # a repeat is logged once
             self.assertEqual(json.dumps(routes), before)
             text = open(os.path.join(server.DATA_DIR, "looks_safe_shadow.csv")).read()
         rows = list(csv.DictReader(text.splitlines()))
-        self.assertEqual(len(rows), len(routes))
+        self.assertEqual(len(rows), len({tuple(map(tuple, r["coords"])) for r in routes}))
         self.assertEqual(rows[0]["looks_safe_min"], "40.0")
         self.assertGreater(int(rows[0]["scored_pct"]), 0)
         self.assertNotIn("77.0", text)  # no positions

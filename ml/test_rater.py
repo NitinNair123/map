@@ -144,6 +144,31 @@ class RaterTest(unittest.TestCase):
         self.assertTrue((extra["uuid"] == "mly_4").all())
         os.remove(rater.EXTRA)
 
+    def test_fetch_kartaview_skips_covered_spots_and_drops_username(self):
+        import io
+        from unittest import mock
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8)).save(buf, "JPEG")
+        img = pd.read_csv(os.path.join(rater.IN, "streetscapes", "images.csv"))
+        near = img.iloc[0]  # a spot that already has a Delhi photo
+        items = [{"id": 1, "lat": near["lat"], "lng": near["lon"], "shot_date": "2021", "username": "someone"},
+                 {"id": 2, "lat": 28.9, "lng": 77.5, "shot_date": "2021", "username": "someone"},
+                 {"id": 3, "lat": 28.9, "lng": 77.5, "shot_date": "2020", "username": "someone"}]
+
+        def get(url, tries=3, form=None):
+            if "nearby-photos" in url:
+                return json.dumps({"currentPageItems": items}).encode()
+            if "/2.0/photo/" in url:
+                return json.dumps({"result": {"data": {"imageLthUrl": "http://x/p.jpg"}}}).encode()
+            return buf.getvalue()
+        with mock.patch.object(rater, "_get", side_effect=get):
+            rater.cmd_fetch_kartaview()
+        extra = pd.read_csv(rater.EXTRA)
+        self.assertEqual(sorted(set(extra["uuid"])), ["kv_2"])  # id 1 sits on a covered spot, id 3 is an older duplicate
+        self.assertNotIn("username", extra.columns)
+        os.remove(rater.EXTRA)
+
     def test_train_and_score(self):
         rater.cmd_train()
         m = json.load(open(os.path.join(rater.OUT, "metrics.json")))
