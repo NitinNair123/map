@@ -691,6 +691,11 @@ async function beginTrip(t, r, saved) {
 // The phone may kill SafeRoute in the background mid-trip; friends would then see no updates for up to 12 hours.
 const TRIP_TTL_MS = 12 * 3600000;  // server.py TRIP_TTL
 function checkSavedTrip() {
+  const sos = store.get("sos", null);
+  if (sos && Date.now() - sos.started < TRIP_TTL_MS) {
+    api(`/api/trip/${sos.id}`, null, 8000).then((v) => (v.ended ? store.del("sos") : resumeSOS(sos)),
+      (e) => (e.status === 404 ? store.del("sos") : resumeSOS(sos)));
+  } else store.del("sos");
   const s = store.get("trip", null);
   if (!s) return;
   if (!(Date.now() - s.started < TRIP_TTL_MS)) return store.del("trip");
@@ -1047,7 +1052,10 @@ async function alertContacts(medical = false) {
   let link = "";
   try {
     // short timeout: on a weak signal the text must not wait for the live link
-    if (!state.trip && (pt || state.to)) { const t = await createTrip(pt || state.to, 0, 4000); state.sosTrip = t; link = tripLink(t.id); }
+    if (!state.trip && (pt || state.to)) {
+      const t = await createTrip(pt || state.to, 0, 4000); state.sosTrip = t; link = tripLink(t.id);
+      store.set("sos", { id: t.id, key: t.key, started: Date.now() });  // opening the messages app may get this page killed
+    }
     else link = tripLink(state.trip.id);
   } catch {}
   const maps = pt ? `https://maps.google.com/?q=${pt[0].toFixed(6)},${pt[1].toFixed(6)}` : "";
@@ -1063,14 +1071,26 @@ async function alertContacts(medical = false) {
     link ? "The link shows where you are while SafeRoute stays open on this screen." : pt ? "It holds your current position only, there's no live link." : "We couldn't find your location, so tell them where you are."} If you're in danger, call 112.`;
   if (contacts.length) location.href = smsLink(contacts, body);
   else shareText(body, link);
-  // keep the SOS trip's dot moving while the screen is open
-  if (state.sosTrip && !state.trip) {
-    clearInterval(state.sosPing);
-    state.sosPing = setInterval(async () => {
-      const p = await currentPosition(5000);
-      if (p && state.sosTrip) api(`/api/trip/${state.sosTrip.id}`, { key: state.sosTrip.key, lat: p[0], lon: p[1] }).catch(() => {});
-    }, 15000);
-  }
+  if (state.sosTrip && !state.trip) pingSOS();
+}
+// keep the SOS trip's dot moving while the screen is open
+function pingSOS() {
+  clearInterval(state.sosPing);
+  state.sosPing = setInterval(async () => {
+    const p = await currentPosition(5000);
+    if (p && state.sosTrip) api(`/api/trip/${state.sosTrip.id}`, { key: state.sosTrip.key, lat: p[0], lon: p[1] }).catch(() => {});
+  }, 15000);
+}
+// she sent an SOS and the phone closed SafeRoute: the link friends got starts moving again without a tap
+function resumeSOS(s) {
+  state.sosTrip = s;
+  $("#sosOverlay").hidden = false;
+  $("#sosCount").textContent = "SOS"; $("#sosCount").classList.add("done");
+  $("#sosTitle").textContent = "Your SOS link is still live";
+  $("#sosSub").textContent = "People you sent it to see where you are while SafeRoute stays open. Tap \"I'm OK, cancel\" when you're safe. If you're in danger, call 112.";
+  $("#sosCancel").focus();
+  startWatching();
+  pingSOS();
 }
 const alertNow = (medical) => { clearInterval(sosTimer); $("#sosCount").textContent = "SOS"; $("#sosCount").classList.add("done"); alertContacts(medical); };
 $("#sosAlertNow").onclick = () => alertNow(false);
@@ -1078,6 +1098,7 @@ $("#sosMedical").onclick = () => alertNow(true);
 $("#sosCancel").onclick = () => {
   clearInterval(sosTimer); clearInterval(state.sosPing); stopSiren();
   if (state.sosTrip) { endShare(state.sosTrip); state.sosTrip = null; }
+  store.del("sos");
   $("#sosOverlay").hidden = true;
   resetSOSText();
   sosBtn.focus();
@@ -1361,7 +1382,7 @@ function onboarding(step = 0) {
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
 addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); state.installPrompt = e; if (!state.to) renderIdle(); });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=31").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=32").catch(() => {});
 
 // ---------- start ----------
 renderIdle();
