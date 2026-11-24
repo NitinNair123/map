@@ -966,32 +966,43 @@ class Area:
         steps = self._merge_weaves(steps)
         steps.append({"pt": coords[-1], "dist": round(travelled), "turn": "arrive", "text": "You have arrived"})
         for st in steps:
-            for k in ("from", "on", "b0", "b", "end", "raw"):
+            for k in ("from", "on", "b0", "b"):
                 st.pop(k, None)
         return steps
 
     @staticmethod
     def _merge_weaves(steps):
-        """Turns less than HOP_M apart become one instruction for the whole run: weaving between parallel carriageways
-        or a slip road and back is "Continue", not "Turn left, Turn right, Turn left"."""
-        out = steps[:1]
-        for st in steps[1:]:
-            last = out[-1]
-            side_of = lambda t: t.split()[-1] if t.split()[-1] in ("left", "right") else None
-            # a weave alternates sides; two lefts in a row are a real turn round a block, so they stay separate
-            same_side = side_of(st["turn"]) and side_of(st["turn"]) == last.get("raw", side_of(last["turn"]))
-            if last["turn"] == "depart" or same_side or st["dist"] - last.get("end", last["dist"]) >= HOP_M:  # gap to the run's latest turn
-                out.append(st)
+        """A weave between parallel carriageways (3 or more turns, alternating sides, each under HOP_M after the last)
+        becomes one instruction worded from the heading before and after it. Shorter runs stay as they are: a
+        right-then-left jog into a lane is two real turns, and dropping one tells her to go straight where she must turn."""
+        side_of = lambda st: st["turn"].split()[-1] if st["turn"].split()[-1] in ("left", "right") else None
+        runs = []  # consecutive groups of steps; a group of 3+ is a weave
+        for st in steps:
+            prev = runs[-1][-1] if runs else None
+            if (prev and prev["turn"] != "depart" and side_of(st) and side_of(prev) and side_of(st) != side_of(prev)
+                    and st["dist"] - prev["dist"] < HOP_M):
+                runs[-1].append(st)
+            else:
+                runs.append([st])
+        out = []
+        for run in runs:
+            if len(run) < 3:
+                for st in run:
+                    prev = out[-1] if out else None
+                    if (prev and prev["turn"] == st["turn"] == "straight" and st["on"] == prev["from"]
+                            and st["dist"] - prev["dist"] < HOP_M):
+                        out.pop()  # "Continue onto the slip road", "Continue onto Aurobindo Marg": no turn either way
+                    else:
+                        out.append(st)
                 continue
-            turn = (st["b"] - last["b0"] + 540) % 360 - 180
+            first, last = run[0], run[-1]
+            turn = (last["b"] - first["b0"] + 540) % 360 - 180
             side = "right" if turn > 0 else "left"
             kind = ("straight" if abs(turn) < 30 else f"slight {side}" if abs(turn) < 60 else side if abs(turn) < 140 else "u-turn")
             verb = {"straight": "Continue", "u-turn": "Turn around"}.get(kind, f"Turn {kind}")
-            if st["on"] == last["from"] and kind == "straight":
-                out.pop()  # back on the road it left, heading the same way: nothing to say
-                continue
-            out[-1] = {**last, "turn": kind, "on": st["on"], "b": st["b"], "end": st["dist"], "raw": side_of(st["turn"]),
-                       "text": f"{verb} onto {st['on']}" if st["on"] != last["from"] else verb}
+            if last["on"] == first["from"] and kind == "straight":
+                continue  # back on the road it left, heading the same way: nothing to say
+            out.append({**first, "turn": kind, "on": last["on"], "text": f"{verb} onto {last['on']}" if last["on"] != first["from"] else verb})
         return out
 
     def havens_near(self, pt, when, limit=5):
