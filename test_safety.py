@@ -141,6 +141,33 @@ class RouteTest(unittest.TestCase):
         self.assertEqual([st["turn"] for st in r["steps"]], ["depart", "arrive"], [st["text"] for st in r["steps"]])
         self.assertEqual(r["turns"], 0)
 
+    def test_weaving_between_parallel_unnamed_ways_is_not_a_string_of_turns(self):
+        # Aurobindo Marg at Lado Sarai, live 24 Nov 2026: the route weaves between two unnamed parallel ways ~30 m
+        # apart, 33-74 m per leg, which read as "Turn left, Turn right, Turn left ..." for 400 m
+        pts = [(28.002, 77.0), (28.0, 77.0)] + [(28.0 - 0.0003 * k, 77.0003 * (k % 2) + 77.0 * (1 - k % 2)) for k in range(1, 8)]
+        end = (pts[-1][0] - 0.002, pts[-1][1])
+        els = [way(1, [1, 2], pts[:2], highway="trunk", name="Aurobindo Marg")]
+        for k in range(1, len(pts) - 1):
+            els.append(way(1 + k, [1 + k, 2 + k], pts[k:k + 2], highway="trunk"))
+            els.append(way(100 + k, [1 + k, 100 + k], [pts[k], (pts[k][0], pts[k][1] - 0.0004)], highway="service"))  # a side lane: a junction
+        els.append(way(50, [len(pts), 51], [pts[-1], end], highway="trunk", name="Pandit Trilok Chandra Sharma Marg"))
+        r = Area({"elements": els}).routes(pts[0], end, NOON, mode="car")[0]
+        steps = [st for st in r["steps"] if st["turn"] not in ("depart", "arrive")]
+        weave = [(a["text"], b["text"]) for a, b in zip(steps, steps[1:])
+                 if b["dist"] - a["dist"] < 80 and {a["turn"].split()[-1], b["turn"].split()[-1]} == {"left", "right"}]
+        self.assertEqual(weave, [], [st["text"] for st in r["steps"]])
+        self.assertIn("Pandit Trilok Chandra Sharma Marg", r["steps"][-2]["text"])
+
+    def test_two_close_turns_the_same_way_both_stay(self):
+        # round a small block: left, then left again 50 m on, is two real turns, not a weave
+        els = [way(1, [1, 2], [(28.0, 77.0), (28.002, 77.0)], highway="residential", name="A Road"),
+               way(2, [2, 3], [(28.002, 77.0), (28.002, 76.9995)], highway="residential", name="B Lane"),
+               way(3, [3, 4], [(28.002, 76.9995), (28.0, 76.9995)], highway="residential", name="C Lane"),
+               way(4, [2, 5], [(28.002, 77.0), (28.0025, 77.0)], highway="residential", name="A Road"),
+               way(5, [3, 6], [(28.002, 76.9995), (28.002, 76.999)], highway="residential", name="B Lane")]
+        r = Area({"elements": els}).routes((28.0, 77.0), (28.0, 76.9995), NOON, mode="car")[0]
+        self.assertEqual([st["text"] for st in r["steps"]][1:3], ["Turn left onto B Lane", "Turn left onto C Lane"])
+
     def test_stop_on_the_way(self):
         r = {x["kind"]: x for x in self.area.routes(A, B, NIGHT, via=[(28.0005, 77.0015)])}
         self.assertGreater(r["fastest"]["length_m"], 350)  # the short footway skips the stop, so every route goes north

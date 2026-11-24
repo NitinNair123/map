@@ -36,7 +36,7 @@ BALANCED_DETOUR = 1.25
 LOOP_NEAR_M = 40
 LOOP_SLACK_M = 150
 
-HOP_M = 80  # leaving a road and coming back to it within this distance is a lane change, not two turns
+HOP_M = 80  # turns closer together than this are one manoeuvre (a carriageway or slip-road weave), not several
 COMPASS = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"]
 ROAD_WORDS = {"footway": "the footpath", "path": "the path", "steps": "the steps", "cycleway": "the cycle path",
               "pedestrian": "the pedestrian street", "service": "the lane", "track": "the track", "living_street": "the lane"}
@@ -956,19 +956,43 @@ class Area:
                             else side if abs(turn) < 140 else "u-turn")
                     verb = {"straight": "Continue", "u-turn": "Turn around"}.get(kind, f"Turn {kind}")
                     text = f"{verb} onto {name}" if name != prev_name else verb
-                    last = steps[-1]
-                    if last["turn"] != "depart" and name == last["from"] != prev_name and travelled - last["dist"] < HOP_M:
-                        steps.pop()  # a short hop onto a slip road or the other carriageway and back: no instruction at all
-                    elif travelled - last["dist"] < 10 and last["turn"] == kind == "straight":
-                        last["text"] = text  # tiny unnamed link between two streets: one instruction, not two
+                    if travelled - steps[-1]["dist"] < 10 and steps[-1]["turn"] == kind == "straight":
+                        steps[-1]["text"] = text  # tiny unnamed link between two streets: one instruction, not two
                     else:
-                        steps.append({"pt": a, "dist": round(travelled), "turn": kind, "text": text, "from": prev_name})
+                        steps.append({"pt": a, "dist": round(travelled), "turn": kind, "text": text,
+                                      "from": prev_name, "on": name, "b0": prev_bearing, "b": bearing})
             travelled += e["length"]
             prev_name, prev_bearing = name, bearing
+        steps = self._merge_weaves(steps)
         steps.append({"pt": coords[-1], "dist": round(travelled), "turn": "arrive", "text": "You have arrived"})
         for st in steps:
-            st.pop("from", None)
+            for k in ("from", "on", "b0", "b", "end", "raw"):
+                st.pop(k, None)
         return steps
+
+    @staticmethod
+    def _merge_weaves(steps):
+        """Turns less than HOP_M apart become one instruction for the whole run: weaving between parallel carriageways
+        or a slip road and back is "Continue", not "Turn left, Turn right, Turn left"."""
+        out = steps[:1]
+        for st in steps[1:]:
+            last = out[-1]
+            side_of = lambda t: t.split()[-1] if t.split()[-1] in ("left", "right") else None
+            # a weave alternates sides; two lefts in a row are a real turn round a block, so they stay separate
+            same_side = side_of(st["turn"]) and side_of(st["turn"]) == last.get("raw", side_of(last["turn"]))
+            if last["turn"] == "depart" or same_side or st["dist"] - last.get("end", last["dist"]) >= HOP_M:  # gap to the run's latest turn
+                out.append(st)
+                continue
+            turn = (st["b"] - last["b0"] + 540) % 360 - 180
+            side = "right" if turn > 0 else "left"
+            kind = ("straight" if abs(turn) < 30 else f"slight {side}" if abs(turn) < 60 else side if abs(turn) < 140 else "u-turn")
+            verb = {"straight": "Continue", "u-turn": "Turn around"}.get(kind, f"Turn {kind}")
+            if st["on"] == last["from"] and kind == "straight":
+                out.pop()  # back on the road it left, heading the same way: nothing to say
+                continue
+            out[-1] = {**last, "turn": kind, "on": st["on"], "b": st["b"], "end": st["dist"], "raw": side_of(st["turn"]),
+                       "text": f"{verb} onto {st['on']}" if st["on"] != last["from"] else verb}
+        return out
 
     def havens_near(self, pt, when, limit=5):
         """Closest places that are open right now and where someone can step in for help."""
