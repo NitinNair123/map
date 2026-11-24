@@ -677,6 +677,14 @@ async function beginTrip(t, r, saved) {
   state.trip = { ...t, route: r, started: Date.now(), offCount: 0, lastMovePt: state.here, lastMoveAt: Date.now(), lastPost: 0, nextCheck: 0,
     spoken: {}, lastReroute: 0, nextStop: 0, lastRecheck: Date.now() };
   state.follow = true;
+  // phones stop reporting the position while she stands still (waiting for a bus), and friends would be told "No update"
+  clearInterval(state.beat);
+  state.beat = setInterval(() => {
+    const t = state.trip;
+    if (!t || !state.here || Date.now() - t.lastPost < 30000) return;
+    t.lastPost = Date.now();
+    api(`/api/trip/${t.id}`, { key: t.key, lat: state.here[0], lon: state.here[1], battery: state.battery ? Math.round(state.battery.level * 100) : null }).catch(() => {});
+  }, 30000);
   document.body.classList.add("navigating");
   $("#navBanner").hidden = false;
   drawTripRoute();
@@ -948,7 +956,7 @@ async function endTrip(safe, auto) {
   state.trip = null;
   store.del("trip");
   state.routes = [];
-  clearInterval(state.sim); state.sim = null;
+  clearInterval(state.sim); state.sim = null; clearInterval(state.beat);
   document.body.classList.remove("navigating");
   $("#navBanner").hidden = true; $("#recenterBtn").hidden = true;
   if (safe) speak("You have arrived.");
@@ -1382,7 +1390,7 @@ function onboarding(step = 0) {
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
 addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); state.installPrompt = e; if (!state.to) renderIdle(); });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=32").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=33").catch(() => {});
 
 // ---------- start ----------
 renderIdle();
