@@ -16,6 +16,7 @@ Usage (Windows: py instead of python), data in ml/data/incoming/<source>/ and ml
   python ml/rater.py labels     W label rows -> ml/out/rater/labels_w.csv (also prints counts per source)
   python ml/rater.py train      fit and test W and L -> ml/out/rater/{report.md, metrics.json, rater.pkl}
   python ml/rater.py fetch      photos: SPECS from Hugging Face, Delhi from KartaView (+ Mapillary with a token)
+  python ml/rater.py fetch-more [--limit N]  bulk Mapillary photos along NCR streets, one per 100 m (token needed)
   python ml/rater.py embed      CLIP numbers for the photos in ml/data/incoming/images/ (needs torch + open_clip_torch)
   python ml/rater.py score      L for Delhi streets -> ml/out/rater/delhi_looks_safe.csv (edge_id, score, images)
 """
@@ -310,7 +311,9 @@ def specs():
     s = q.pivot_table(index="Image", columns="gender", values="Score")
     s = s.merge(meta[["Image number", "uuid", "city"]], left_index=True, right_on="Image number")
     f = scene()
-    return s.merge(f, on="uuid"), [c for c in f.columns if c != "uuid"]
+    cols = [c for c in f.columns if c.startswith("clip_")] or [c for c in f.columns if c != "uuid"]
+    # with photos, CLIP numbers only: the bulk Delhi photos have no scene make-up table, and train and score must match
+    return s.merge(f, on="uuid"), cols
 
 
 def scene():
@@ -320,7 +323,7 @@ def scene():
     seg = pd.concat(segs, ignore_index=True).drop_duplicates("uuid")
     seg = pd.concat([seg[["uuid"]], _shares(seg)], axis=1)
     if os.path.exists(CLIP):
-        seg = seg.merge(pd.read_csv(CLIP), on="uuid", how="right").fillna(0)  # Abuja-only classes etc. are absent, not unknown
+        seg = seg.merge(pd.read_csv(CLIP), on="uuid", how="right")
     return seg
 
 
@@ -499,6 +502,67 @@ def cmd_fetch():
         print("failed", u, e)
 
 
+EXTRA = os.path.join(IMAGES, "mapillary_extra.csv")  # uuid, lat, lon, captured_at of the bulk Delhi photos
+
+
+def cmd_fetch_more(limit=30_000, cell_deg=0.01, spacing_m=100):
+    """More Delhi photos so most streets get a looks-safe score: Mapillary images listed per ~1 km square that holds
+    streets (busiest squares first), thinned to one photo per spacing_m grid square (the newest), until limit photos.
+    Resumable: squares already done are listed in mapillary_cells.txt. Needs the Mapillary token."""
+    import io
+    from PIL import Image
+    tok_file = os.path.join(ML, "data", "mapillary_token.txt")
+    token = os.environ.get("MAPILLARY_TOKEN") or (open(tok_file).read().strip() if os.path.exists(tok_file) else None)
+    if not token:
+        sys.exit("Needs a Mapillary token in ml/data/mapillary_token.txt")
+    os.makedirs(IMAGES, exist_ok=True)
+    ll = pd.concat([pd.read_csv(f, usecols=["lat", "lon"]) for f in sorted(glob.glob(os.path.join(BLOCKS, "*.edges.csv.gz")))])
+    cells = (ll["lat"] // cell_deg).astype(int).astype(str) + "_" + (ll["lon"] // cell_deg).astype(int).astype(str)
+    order = cells.value_counts().index.tolist()
+    done_file = os.path.join(IMAGES, "mapillary_cells.txt")
+    done = set(open(done_file).read().split()) if os.path.exists(done_file) else set()
+    have = len(pd.read_csv(EXTRA)) if os.path.exists(EXTRA) else 0
+    for n, cell in enumerate(order):
+        if have >= limit:
+            break
+        if cell in done:
+            continue
+        i, j = map(int, cell.split("_"))
+        bbox = f"{j * cell_deg},{i * cell_deg},{(j + 1) * cell_deg},{(i + 1) * cell_deg}"
+        try:
+            r = json.loads(_get(f"https://graph.mapillary.com/images?fields=id,computed_geometry,captured_at,thumb_1024_url"
+                                f"&bbox={bbox}&limit=2000&access_token={token}"))["data"]
+        except Exception as e:  # noqa: BLE001  a failed square is retried on the next run (not marked done)
+            print(f"square {cell}: {str(e)[:80]}")
+            continue
+        rows = [{"id": x["id"], "lon": x["computed_geometry"]["coordinates"][0], "lat": x["computed_geometry"]["coordinates"][1],
+                 "captured_at": x.get("captured_at"), "url": x.get("thumb_1024_url")} for x in r if x.get("computed_geometry") and x.get("thumb_1024_url")]
+        pick = []
+        if rows:
+            c = pd.DataFrame(rows)
+            xy = _xy(c["lat"], c["lon"]) // spacing_m
+            c["g"] = [f"{a}_{b}" for a, b in xy.astype(int)]
+            pick = c.sort_values("captured_at", ascending=False).drop_duplicates("g").to_dict("records")
+        saved = []
+        for x in pick:
+            uuid = f"mly_{x['id']}"
+            path = os.path.join(IMAGES, f"{uuid}.jpg")
+            try:
+                if not os.path.exists(path):
+                    im = Image.open(io.BytesIO(_get(x["url"]))).convert("RGB")
+                    im.thumbnail((1024, 1024))
+                    im.save(path, quality=90)
+                saved.append({"uuid": uuid, "lat": x["lat"], "lon": x["lon"], "captured_at": x["captured_at"]})
+            except Exception as e:  # noqa: BLE001
+                print(f"photo {x['id']}: {str(e)[:80]}")
+        if saved:
+            pd.DataFrame(saved).to_csv(EXTRA, mode="a", header=not os.path.exists(EXTRA), index=False)
+        have += len(saved)
+        open(done_file, "a").write(cell + "\n")
+        print(f"square {n + 1} of {len(order)}: {len(r)} listed, {len(saved)} saved, {have} in total", flush=True)
+    print(f"done: {have} bulk photos")
+
+
 def cmd_embed():
     """CLIP ViT-B/32 numbers for every photo in ml/data/incoming/images/ (GPU when torch sees one). Photos already
     embedded are skipped, so it can be re-run after more photos arrive."""
@@ -536,6 +600,8 @@ def cmd_score():
     if not r["L"]:
         sys.exit("L did not pass its test, so no street gets a looks-safe score")
     img = pd.read_csv(_find("streetscapes", "images.csv")[0], usecols=["uuid", "lat", "lon"])
+    if os.path.exists(EXTRA):
+        img = pd.concat([img, pd.read_csv(EXTRA, usecols=["uuid", "lat", "lon"])], ignore_index=True).drop_duplicates("uuid")
     seg = scene().merge(img, on="uuid")
     seg = seg[in_ncr(seg)].reset_index(drop=True)
     seg["score"] = looks_safe(r["L"], seg)
@@ -548,5 +614,10 @@ def cmd_score():
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["labels", "train", "fetch", "embed", "score"])
-    {"labels": cmd_labels, "train": cmd_train, "fetch": cmd_fetch, "embed": cmd_embed, "score": cmd_score}[ap.parse_args().command]()
+    ap.add_argument("command", choices=["labels", "train", "fetch", "fetch-more", "embed", "score"])
+    ap.add_argument("--limit", type=int, default=30_000, help="fetch-more: stop after this many bulk photos")
+    a = ap.parse_args()
+    if a.command == "fetch-more":
+        cmd_fetch_more(a.limit)
+    else:
+        {"labels": cmd_labels, "train": cmd_train, "fetch": cmd_fetch, "embed": cmd_embed, "score": cmd_score}[a.command]()

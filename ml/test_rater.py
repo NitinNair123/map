@@ -89,6 +89,7 @@ class RaterTest(unittest.TestCase):
         rater.OUT = os.path.join(cls.tmp.name, "out")
         rater.IMAGES = os.path.join(rater.IN, "images")
         rater.CLIP = os.path.join(rater.IMAGES, "clip_b32.csv.gz")
+        rater.EXTRA = os.path.join(rater.IMAGES, "mapillary_extra.csv")
 
     @classmethod
     def tearDownClass(cls):
@@ -114,9 +115,34 @@ class RaterTest(unittest.TestCase):
             f = rater.scene()
             self.assertEqual(sorted(f["uuid"]), ["d3", "u1", "u2"])  # only photos with an embedding
             self.assertIn("clip_0", f.columns)
-            self.assertIn("Sidewalk", f.columns)
+            self.assertEqual(rater.specs()[1], ["clip_0"])  # with photos, L learns from CLIP numbers only
         finally:
             os.remove(rater.CLIP)
+
+    def test_fetch_more_thins_and_resumes(self):
+        import io
+        from unittest import mock
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8)).save(buf, "JPEG")
+        listing = {"data": [{"id": str(k), "computed_geometry": {"coordinates": [77.0 + k * 1e-5, 28.45]}, "captured_at": k,
+                             "thumb_1024_url": f"http://x/{k}"} for k in range(5)]}  # 5 photos within ~5 m: one kept
+
+        def get(url, tries=3):
+            return json.dumps(listing).encode() if "graph.mapillary" in url else buf.getvalue()
+        os.environ["MAPILLARY_TOKEN"] = "t"
+        try:
+            with mock.patch.object(rater, "_get", side_effect=get) as g:
+                rater.cmd_fetch_more(limit=2)
+                first = g.call_count
+                rater.cmd_fetch_more(limit=2)  # limit reached: nothing listed again
+                self.assertEqual(g.call_count, first)
+        finally:
+            del os.environ["MAPILLARY_TOKEN"]
+        extra = pd.read_csv(rater.EXTRA)
+        self.assertEqual(len(extra), 2)  # two squares, newest photo (id 4) in each
+        self.assertTrue((extra["uuid"] == "mly_4").all())
+        os.remove(rater.EXTRA)
 
     def test_train_and_score(self):
         rater.cmd_train()
