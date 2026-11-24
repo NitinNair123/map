@@ -168,6 +168,18 @@ class RouteTest(unittest.TestCase):
         r = Area({"elements": els}).routes((28.0, 77.0), (28.0, 76.9995), NOON, mode="car")[0]
         self.assertEqual([st["text"] for st in r["steps"]][1:3], ["Turn left onto B Lane", "Turn left onto C Lane"])
 
+    def test_a_right_left_jog_into_a_lane_keeps_both_turns(self):
+        # live 24 Nov 2026, Lajpat Nagar market: "Turn right onto the lane" then a left 21 m on was merged into
+        # "Continue onto the lane", telling a walker to go straight where she must turn right
+        els = [way(1, [1, 2], [(28.0, 77.0), (28.002, 77.0)], highway="residential", name="Market Road"),
+               way(2, [2, 5], [(28.002, 77.0), (28.004, 77.0)], highway="residential", name="Market Road"),
+               way(3, [2, 3], [(28.002, 77.0), (28.002, 77.0002)], highway="footway", name="the lane"),
+               way(4, [3, 4], [(28.002, 77.0002), (28.004, 77.0002)], highway="footway", name="the lane"),
+               way(5, [3, 6], [(28.002, 77.0002), (28.002, 77.0006)], highway="footway")]
+        texts = [st["text"] for st in Area({"elements": els}).routes((28.0, 77.0), (28.004, 77.0002), NOON)[0]["steps"]]
+        self.assertTrue(any(t.startswith("Turn right") for t in texts), texts)
+        self.assertTrue(any(t.startswith("Turn left") for t in texts), texts)
+
     def test_stop_on_the_way(self):
         r = {x["kind"]: x for x in self.area.routes(A, B, NIGHT, via=[(28.0005, 77.0015)])}
         self.assertGreater(r["fastest"]["length_m"], 350)  # the short footway skips the stop, so every route goes north
