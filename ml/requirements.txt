@@ -4,3 +4,4 @@ scipy
 scikit-learn>=1.4
 rasterio  # ESA WorldCover land cover
 pyarrow  # Overture places and buildings
+xgboost  # ml/rater.py (women's share model)

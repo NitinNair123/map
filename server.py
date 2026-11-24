@@ -90,7 +90,49 @@ def learned_shadow(routes, when, mode):
         traceback.print_exc()
 
 
+def load_looks_safe():
+    """Looks-safe-to-women scores per street from ml/rater.py (data/model/looks_safe.csv: lat, lon of the street's
+    midpoint, looks_safe 0-100). Hidden test only: logged next to routes, never shown or used to rank."""
+    try:
+        with open(os.path.join(DATA_DIR, "model", "looks_safe.csv"), newline="") as f:
+            # shortcut: matched on the midpoint rounded to ~1 m; a street whose midpoint sits on a rounding edge is missed
+            return {(round(float(r["lat"]), 5), round(float(r["lon"]), 5)): float(r["looks_safe"]) for r in csv.DictReader(f)}
+    except (OSError, ValueError, KeyError):
+        return {}
+
+
+def looks_safe_shadow(routes, when, mode):
+    """Background only: for each route, the share of its length with a looks-safe score, the length-weighted average
+    and the lowest street score. Nothing shown or ranked changes. No places or positions are written."""
+    if not LOOKS_SAFE:
+        return
+    try:
+        rows = []
+        for r in routes:
+            total = covered = total_score = 0.0
+            worst = None
+            for (a0, a1), (b0, b1) in zip(r["coords"], r["coords"][1:]):  # consecutive nodes = one street segment
+                m = dist((a0, a1), (b0, b1))
+                total += m
+                s = LOOKS_SAFE.get((round((a0 + b0) / 2, 5), round((a1 + b1) / 2, 5)))
+                if s is not None:
+                    covered, total_score, worst = covered + m, total_score + s * m, s if worst is None else min(worst, s)
+            rows.append([when.hour, mode, r.get("kind"), round(total), round(100 * covered / total) if total else 0,
+                         round(total_score / covered, 1) if covered else "", "" if worst is None else worst])
+        path = os.path.join(DATA_DIR, "looks_safe_shadow.csv")
+        with lock:
+            new = not os.path.exists(path)
+            with open(path, "a", newline="") as f:
+                w = csv.writer(f)
+                if new:
+                    w.writerow(["hour", "mode", "route", "length_m", "scored_pct", "looks_safe_avg", "looks_safe_min"])
+                w.writerows(rows)
+    except Exception:  # the experiment must never break a route request
+        traceback.print_exc()
+
+
 RANKER = load_ranker()
+LOOKS_SAFE = load_looks_safe()
 FEELS = ("safe", "uneasy", "unsafe")
 FEEL_MEASURES = ("length_m", "lit_pct", "dark_pct", "main_pct", "open_now", "isolated_m", "nothing_open_m", "help_gap_m", "cctv",
                  "police_m", "unrated_pct")
@@ -583,6 +625,7 @@ class Handler(SimpleHTTPRequestHandler):
                 if places.LIVE.fill_hours(area, lambda p: any(dist(p, c) <= 80 for c in pts)):
                     routes = area.routes(a, b, when, rain, mode, extra, via, prefer, wishes)
                 learned_shadow(routes, when, mode)
+                looks_safe_shadow(routes, when, mode)
                 for r in routes:  # the districts each route passes through, as background only (never scored)
                     r["area"] = crime.around(CRIME, crime.along(r["coords"]))
                 return self.send_json({"routes": routes, "rain": rain, "alerts": alerts, "sources": area.sources})

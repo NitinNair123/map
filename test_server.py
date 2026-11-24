@@ -1,4 +1,5 @@
 """Every API endpoint, its failure cases, and the privacy and abuse rules. Usage: python -m unittest test_server"""
+import csv
 import json
 from datetime import datetime
 import os
@@ -120,6 +121,32 @@ class ServerTest(unittest.TestCase):
             server.learned_shadow(routes, datetime(2026, 10, 25, 22), "walk")
             self.assertEqual([r["score"] for r in routes], before)
             self.assertEqual(len(open(os.path.join(server.DATA_DIR, "model_shadow.csv")).read().splitlines()), 2)  # header and one line
+
+    def test_looks_safe_is_logged_in_the_background_and_changes_nothing(self):
+        _, out = self.call("/api/route?from=28.0,77.0&to=28.0,77.003&when=2026-10-25T22:00")
+        routes = out["routes"]
+        (a0, a1), (b0, b1) = routes[0]["coords"][:2]
+        scores = {(round((a0 + b0) / 2, 5), round((a1 + b1) / 2, 5)): 40.0}
+        with mock.patch.object(server, "DATA_DIR", tempfile.mkdtemp()), mock.patch.object(server, "LOOKS_SAFE", scores):
+            before = json.dumps(routes)
+            server.looks_safe_shadow(routes, datetime(2026, 10, 25, 22), "walk")
+            self.assertEqual(json.dumps(routes), before)
+            text = open(os.path.join(server.DATA_DIR, "looks_safe_shadow.csv")).read()
+        rows = list(csv.DictReader(text.splitlines()))
+        self.assertEqual(len(rows), len(routes))
+        self.assertEqual(rows[0]["looks_safe_min"], "40.0")
+        self.assertGreater(int(rows[0]["scored_pct"]), 0)
+        self.assertNotIn("77.0", text)  # no positions
+
+    def test_looks_safe_file_loads(self):
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "model"))
+        with open(os.path.join(d, "model", "looks_safe.csv"), "w") as f:
+            f.write("edge_id,lat,lon,looks_safe,images\n1-2,28.123456,77.654321,62.5,3\n")
+        with mock.patch.object(server, "DATA_DIR", d):
+            self.assertEqual(server.load_looks_safe(), {(28.12346, 77.65432): 62.5})
+        with mock.patch.object(server, "DATA_DIR", tempfile.mkdtemp()):
+            self.assertEqual(server.load_looks_safe(), {})  # no file: feature off
 
     def test_route_feel_keeps_measures_and_area_but_no_position(self):
         import server
