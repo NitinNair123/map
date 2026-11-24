@@ -450,6 +450,24 @@ test("the friend's viewer rides out a dropped connection instead of saying the t
   await ctx.close();
 });
 
+test("the friend's viewer says she is late instead of 'about 0 min to go'", async () => {
+  const post = (path, body) => fetch(BASE + path, { method: "POST", body: JSON.stringify(body) }).then((r) => r.json());
+  const t = await post("/api/trip", { dest: [28.0007, 77.0025], eta: 5, name: "Asha" });
+  await post(`/api/trip/${t.id}`, { key: t.key, lat: 28.0, lon: 77.0 });
+  const { ctx, page } = await phone();
+  // she is still sending updates, but the trip started 20 minutes ago
+  await page.route("**/api/trip/*", async (r) => {
+    const res = await r.fetch(); const j = await res.json();
+    r.fulfill({ response: res, json: { ...j, started: j.started - 20 * 60 } });
+  });
+  await page.goto(`${BASE}/t/?id=${t.id}`);
+  await page.waitForSelector("text=Asha is walking");
+  const detail = await page.textContent("#detail");
+  assert.doesNotMatch(detail, /0 min to go/);
+  assert.match(detail, /15 min later than expected/);
+  await ctx.close();
+});
+
 test("friends see she arrived, not only that the trip ended", async () => {
   const { ctx, page, errors } = await phone();
   await page.addInitScript(() => { navigator.share = async () => {}; });
@@ -595,6 +613,55 @@ test("after the phone kills SafeRoute mid-trip, one tap tells friends she's safe
   await again.reload();
   await again.waitForTimeout(500);
   assert.ok(await again.isHidden("text=Carry on sharing"));
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("after an SOS, the live link keeps moving even if the phone closed SafeRoute", async () => {
+  const { ctx, page, errors } = await phone([{ name: "Mum", phone: "+91 98765 43210" }]);
+  await page.goto(BASE + "/app/");
+  await page.focus("#sosBtn");
+  await page.keyboard.press("Enter");
+  const sms = page.waitForRequest(/^sms:/, { timeout: 15000 });
+  await page.click("#sosAlertNow");
+  await sms;
+  const id = await page.evaluate(() => state.sosTrip.id);
+  await page.close();  // the messages app took over and Android killed the tab
+  const again = await ctx.newPage();
+  again.on("pageerror", (e) => errors.push(e.message));
+  await again.clock.install();
+  await again.goto(BASE + "/app/");
+  await again.waitForSelector("text=Your SOS link is still live", { timeout: 5000 });
+  const before = (await tripView(id)).points.length;
+  await again.clock.runFor(16000);
+  let view;
+  for (let i = 0; i < 20; i++) { view = await tripView(id); if (view.points.length > before) break; await new Promise((r) => setTimeout(r, 150)); }
+  assert.ok(view.points.length > before, "friends' map moves again");
+  await again.click("#sosCancel");
+  for (let i = 0; i < 20 && !view.ended; i++) { await new Promise((r) => setTimeout(r, 150)); view = await tripView(id); }
+  assert.ok(view.ended, "cancelling ends the link");
+  await again.reload();
+  await again.waitForTimeout(500);
+  assert.ok(await again.isHidden("#sosOverlay"), "a cancelled SOS is never reopened");
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test("standing still (waiting for a bus) keeps friends updated instead of 'No update'", async () => {
+  const { ctx, page, errors } = await phone();
+  await ctx.addInitScript(() => { navigator.share = async () => {}; });
+  await page.clock.install();
+  await routeToPharmacy(page);
+  await page.click("#startBtn");
+  await page.waitForSelector("text=Sharing live");
+  const id = await page.evaluate(() => state.trip.id);
+  await page.clock.runFor(1000);
+  const before = (await tripView(id)).points.length;
+  // the phone stops reporting positions when she doesn't move
+  await page.clock.runFor(65000);
+  let view;
+  for (let i = 0; i < 20; i++) { view = await tripView(id); if (view.points.length > before) break; await new Promise((r) => setTimeout(r, 150)); }
+  assert.ok(view.points.length > before, "the phone still tells friends it's alive");
   assert.deepEqual(errors, []);
   await ctx.close();
 });

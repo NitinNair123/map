@@ -143,18 +143,31 @@ and open the https link on the phone. Then use "Add to Home Screen".
 
 ## How the score works
 
-The rating lives in `rating.py`. Every street segment gets five factors. Each factor uses only measured data,
-and each piece of evidence has a quality: 1.0 for someone checking the street, 0.9 for a timetable, 0.8 for
-mapped tags, hours, buildings and police, 0.7 for lamps, 0.5 for "nothing mapped here", 0.35 for being a main road
-and 0.3 for satellite night lights. Survey and report data older than 180 days counts for less.
+The rating lives in `rating.py`. The factors follow Safetipin's safety audit parameters (Lighting, Openness,
+Visibility, People, Security, Walk path, Public transport, Gender usage, Feeling; see
+`/mnt/project-files/safe-route/reports/Safetipin safety audit method.md` in the project files), each measured from free
+map data, plus a main-road factor (Nitin's rule: main roads are the strongest sign of a safe way in Delhi). Safetipin
+publishes no weights, so the weights below are a product decision. Feeling is what Safetipin explains, not an input:
+here "felt safe / felt unsafe" reports adjust the score. Gender usage (are women around?) has no free data source and is
+not scored. Each factor uses only measured data, and each piece of evidence has a quality: 1.0 for someone checking the
+street, 0.9 for a timetable, 0.8 for mapped tags, hours, buildings and police, 0.7 for lamps, 0.5 for "nothing mapped
+here", 0.35 for being a main road and 0.3 for satellite night lights. Survey and report data older than 180 days counts for less.
 
-| Factor | Day | Dark | Evidence, best first |
-|---|---|---|---|
-| Lighting | 0 | 30 | survey and reports (only those made after dark), OSM `lit` tag, lamps (OSM, and Mapillary objects seen in a photo in the last 5 years), NASA night lights |
-| People and open places | 30 | 30 | survey and reports at this hour, published opening hours, buses and trains due this hour, nothing mapped within 60 m when shops are mapped within 500 m (with none within 500 m the block counts as unmapped, not empty), main road (weak: traffic passes, but that alone doesn't make a street safe) |
-| Buildings and surroundings | 20 | 15 | building footprints around the street; parks, building sites, rail lines and scrub next to it |
-| Police and CCTV | 10 | 10 | police station within 400/800 m, cameras within 50 m, guard posts, emergency phones |
-| Footpath and ways out | 40 | 15 | "no footpath" reports, road type, footpaths, rough or unpaved surface, four lanes or 50 km/h without a footpath (crossings help), accident blackspots, underpasses, foot overbridges at night, dead ends, long stretches without side streets |
+| Factor (Safetipin parameter) | Walk day / dark | Bike | Car | Evidence, best first |
+|---|---|---|---|---|
+| Main road (not Safetipin) | 25 / 35 | 25 / 30 | 40 / 45 | OSM road type: primary and secondary 1.0, trunk and tertiary 0.9, residential 0.35, service 0.1; on foot a fast road without a mapped footpath counts 0.8× |
+| Lighting (Lighting) | 0 / 5 | 0 / 10 | 0 / 5 | survey and reports (only those made after dark), OSM `lit` tag, lamps (OSM, Mapillary), NASA night lights |
+| People and open places (People) | 20 / 20 | 20 / 20 | 25 / 20 | survey and reports at this hour, published opening hours, buses and trains due this hour, live buses and traffic, nothing mapped within 60 m when shops are mapped within 500 m, main road (weak) |
+| Public transport (Public transport) | 5 / 5 | 0 | 0 | a bus stop or metro station within 150 m, else within 400 m, else 800 m; unknown when none is mapped within 800 m |
+| Shops and windows overlooking (Visibility) | 15 / 10 | 15 / 10 | 10 / 10 | the better of building footprints around the street and mapped shops and services within 60 m, open or not |
+| Police and CCTV (Security) | 10 / 10 | 10 / 10 | 15 / 15 | police station within 400/800 m, cameras within 50 m, guard posts, emergency phones |
+| Footpath (Walk path) | 15 / 9 | 20 / 15 | 0 | "no footpath" reports, road type, footpaths, rough or unpaved surface, four lanes or 50 km/h without a footpath (crossings help), accident blackspots, underpasses, foot overbridges at night |
+| Openness and ways out (Openness) | 10 / 6 | 10 / 5 | 10 / 5 | parks, woods, building sites, rail lines and scrub next to it (worse after dark), dead ends, long stretches without side streets, underpasses |
+
+The walking weights keep the buckets Nitin approved on 12 Nov 2026: activity 25 = People 20 + Public transport 5,
+walkability 25 / 15 = Walk path 15 / 9 + Openness 10 / 6. Safetipin's own reports find lighting has the biggest effect on
+how safe a place feels; lighting stays small here by Nitin's choice. Until 22 Nov 2026 bikes and cars ignored road type,
+so a car route could leave a main road for a zig-zag through colony lanes; the main-road rule now holds for every mode.
 
 Weights blend from day to night with the real sun position, so dusk counts as dusk.
 
@@ -171,19 +184,18 @@ Weights blend from day to night with the real sun position, so dusk counts as du
 - **Routes.** SafeRoute finds many different ways, scores every one in full and ranks them. Candidates come
   from searches over the whole network with `cost = length × (1 + λ·(1 − credit/100))` for λ = 0, 1, 3, 6,
   10 and 20, plus detours found by making the streets already used costlier and searching again. A street's
-  credit is its score scaled by confidence (full at 0.7), and zero when it is not rated. Candidates over 1.3× (or 200 m on short trips)
+  credit is its score scaled by confidence (full at 0.7), and zero when it is not rated. Candidates over 1.3× (1.6× by car, so it can stay on main roads; or 200 m on short trips)
   the shortest, or sharing 90% of their length with one already found, are dropped. A route's score is 60% the
   average of its rated streets plus 40% its weakest one, minus penalties for isolated stretches, long gaps
-  with nowhere open and detours over 1.3× the fastest route. Safest is the top score, Balanced the top score
+  with nowhere open and detours over that limit. Safest is the top score, Balanced the top score
   at most 25% longer than the fastest, and Fastest the shortest. Each route also reports how
   much of it is unrated, which sources were used, and how well each factor was measured.
 - **Timed to when you get there.** Each street is rated for the 5 minutes in which the trip reaches it, so a
   shop that shuts before you pass it counts as closed, and a long walk crosses into night as it really does.
 - **Walk, bike or car.** Bikes skip steps and footpaths (unless signed for bikes) and keep to one-way rules
   (unless `oneway:bicycle=no`); cars keep to roads and one-way streets. Times assume 1.3 m/s on foot, 15 km/h
-  by bike and 25 km/h by car in city traffic. The same evidence is weighed differently: day / dark weights are
-  bike lighting 0/30, people 30/25, buildings 20/15, police 10/10, footpath 40/20; car lighting 0/15, people
-  45/40, buildings 20/15, police 25/20, footpath 10/10 (in a car, help points that are open matter most).
+  by bike and 25 km/h by car in city traffic. The same evidence is weighed differently (see the table
+  above): main roads count most in every mode, and a car needs no footpath or bus stop.
 - **Stops.** Up to 5 stops, visited in order. Each leg is searched on its own and the k-th way of every leg is joined into
   the k-th candidate, so the whole trip is scored and ranked like a trip without stops.
 - **Your priorities.** Settings let you ask for more medical stores, hospitals, places to eat, shops, petrol pumps or

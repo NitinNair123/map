@@ -530,7 +530,7 @@ function renderRoutes() {
   if (r.confidence_level === "none") notes.push(["", "There isn't enough real data on these streets to rate this route yet. Grey dashes mark the unrated parts. Reports and the street survey fill this in."]);
   else if (r.unrated_pct >= 10) notes.push(["", `${r.unrated_pct}% of this route is too thinly mapped to rate. It's shown in grey dashes, and those streets earn no points, which pulls the score down.`]);
   if (state.rain) notes.push(["", "It's raining, so streets may be emptier than usual."]);
-  if (r.weakest && r.weakest.score < 45) notes.push(["", `Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because ${WEAK_WHY[r.weakest.why] || "of " + r.weakest.why.toLowerCase()}. It's dashed on the map.`]);
+  if (r.weakest && r.weakest.score < 45) notes.push(["", `Weakest stretch: ${r.weakest.name} (score ${r.weakest.score}), mainly because ${[r.weakest.why, r.weakest.also].filter(Boolean).map((k) => WEAK_WHY[k] || "of " + k.toLowerCase()).join(" and ")}. It's dashed on the map.`]);
   const unknown = (r.places || []).filter((pl) => pl.open === null).length;
   if (unknown) notes.push(["info", `Zoom in to see the places along the way: bright pins are open when you pass, faded pins are the ${unknown} places with no published hours, so we can't say if they're open. Tap "Report" and "Shops open now" to fix that for everyone.`]);
   if (r.headline) notes.unshift(["info", r.headline]);
@@ -677,6 +677,14 @@ async function beginTrip(t, r, saved) {
   state.trip = { ...t, route: r, started: Date.now(), offCount: 0, lastMovePt: state.here, lastMoveAt: Date.now(), lastPost: 0, nextCheck: 0,
     spoken: {}, lastReroute: 0, nextStop: 0, lastRecheck: Date.now() };
   state.follow = true;
+  // phones stop reporting the position while she stands still (waiting for a bus), and friends would be told "No update"
+  clearInterval(state.beat);
+  state.beat = setInterval(() => {
+    const t = state.trip;
+    if (!t || !state.here || Date.now() - t.lastPost < 30000) return;
+    t.lastPost = Date.now();
+    api(`/api/trip/${t.id}`, { key: t.key, lat: state.here[0], lon: state.here[1], battery: state.battery ? Math.round(state.battery.level * 100) : null }).catch(() => {});
+  }, 30000);
   document.body.classList.add("navigating");
   $("#navBanner").hidden = false;
   drawTripRoute();
@@ -691,6 +699,11 @@ async function beginTrip(t, r, saved) {
 // The phone may kill SafeRoute in the background mid-trip; friends would then see no updates for up to 12 hours.
 const TRIP_TTL_MS = 12 * 3600000;  // server.py TRIP_TTL
 function checkSavedTrip() {
+  const sos = store.get("sos", null);
+  if (sos && Date.now() - sos.started < TRIP_TTL_MS) {
+    api(`/api/trip/${sos.id}`, null, 8000).then((v) => (v.ended ? store.del("sos") : resumeSOS(sos)),
+      (e) => (e.status === 404 ? store.del("sos") : resumeSOS(sos)));
+  } else store.del("sos");
   const s = store.get("trip", null);
   if (!s) return;
   if (!(Date.now() - s.started < TRIP_TTL_MS)) return store.del("trip");
@@ -893,7 +906,8 @@ function renderTrip() {
 // Android Chrome tells the page the battery level; friends see it on the live map, and at 15% we offer a last-location text
 // The factor that scored lowest, said as what is missing ("main road" alone reads as if the main road were the problem)
 const WEAK_WHY = { "Main road": "it isn't a main road", "Lighting": "it is poorly lit", "People and open places": "few people or open places are around",
-  "Buildings and surroundings": "few buildings face the street", "Police and CCTV": "there is no police or CCTV nearby", "Footpath and ways out": "the footpath and ways out are poor" };
+  "Public transport": "no bus stop or metro is near", "Shops and windows overlooking": "few shops or windows face the street",
+  "Police and CCTV": "there is no police or CCTV nearby", "Footpath": "the footpath is poor", "Openness and ways out": "it is closed in, with few ways out" };
 const LOW_BATTERY = 15;
 navigator.getBattery?.().then((b) => (state.battery = b), () => {});
 function lowBattery(level, pt) {
@@ -942,7 +956,7 @@ async function endTrip(safe, auto) {
   state.trip = null;
   store.del("trip");
   state.routes = [];
-  clearInterval(state.sim); state.sim = null;
+  clearInterval(state.sim); state.sim = null; clearInterval(state.beat);
   document.body.classList.remove("navigating");
   $("#navBanner").hidden = true; $("#recenterBtn").hidden = true;
   if (safe) speak("You have arrived.");
@@ -1046,7 +1060,10 @@ async function alertContacts(medical = false) {
   let link = "";
   try {
     // short timeout: on a weak signal the text must not wait for the live link
-    if (!state.trip && (pt || state.to)) { const t = await createTrip(pt || state.to, 0, 4000); state.sosTrip = t; link = tripLink(t.id); }
+    if (!state.trip && (pt || state.to)) {
+      const t = await createTrip(pt || state.to, 0, 4000); state.sosTrip = t; link = tripLink(t.id);
+      store.set("sos", { id: t.id, key: t.key, started: Date.now() });  // opening the messages app may get this page killed
+    }
     else link = tripLink(state.trip.id);
   } catch {}
   const maps = pt ? `https://maps.google.com/?q=${pt[0].toFixed(6)},${pt[1].toFixed(6)}` : "";
@@ -1062,14 +1079,26 @@ async function alertContacts(medical = false) {
     link ? "The link shows where you are while SafeRoute stays open on this screen." : pt ? "It holds your current position only, there's no live link." : "We couldn't find your location, so tell them where you are."} If you're in danger, call 112.`;
   if (contacts.length) location.href = smsLink(contacts, body);
   else shareText(body, link);
-  // keep the SOS trip's dot moving while the screen is open
-  if (state.sosTrip && !state.trip) {
-    clearInterval(state.sosPing);
-    state.sosPing = setInterval(async () => {
-      const p = await currentPosition(5000);
-      if (p && state.sosTrip) api(`/api/trip/${state.sosTrip.id}`, { key: state.sosTrip.key, lat: p[0], lon: p[1] }).catch(() => {});
-    }, 15000);
-  }
+  if (state.sosTrip && !state.trip) pingSOS();
+}
+// keep the SOS trip's dot moving while the screen is open
+function pingSOS() {
+  clearInterval(state.sosPing);
+  state.sosPing = setInterval(async () => {
+    const p = await currentPosition(5000);
+    if (p && state.sosTrip) api(`/api/trip/${state.sosTrip.id}`, { key: state.sosTrip.key, lat: p[0], lon: p[1] }).catch(() => {});
+  }, 15000);
+}
+// she sent an SOS and the phone closed SafeRoute: the link friends got starts moving again without a tap
+function resumeSOS(s) {
+  state.sosTrip = s;
+  $("#sosOverlay").hidden = false;
+  $("#sosCount").textContent = "SOS"; $("#sosCount").classList.add("done");
+  $("#sosTitle").textContent = "Your SOS link is still live";
+  $("#sosSub").textContent = "People you sent it to see where you are while SafeRoute stays open. Tap \"I'm OK, cancel\" when you're safe. If you're in danger, call 112.";
+  $("#sosCancel").focus();
+  startWatching();
+  pingSOS();
 }
 const alertNow = (medical) => { clearInterval(sosTimer); $("#sosCount").textContent = "SOS"; $("#sosCount").classList.add("done"); alertContacts(medical); };
 $("#sosAlertNow").onclick = () => alertNow(false);
@@ -1077,6 +1106,7 @@ $("#sosMedical").onclick = () => alertNow(true);
 $("#sosCancel").onclick = () => {
   clearInterval(sosTimer); clearInterval(state.sosPing); stopSiren();
   if (state.sosTrip) { endShare(state.sosTrip); state.sosTrip = null; }
+  store.del("sos");
   $("#sosOverlay").hidden = true;
   resetSOSText();
   sosBtn.focus();
@@ -1360,7 +1390,7 @@ function onboarding(step = 0) {
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
 addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); state.installPrompt = e; if (!state.to) renderIdle(); });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=29").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=33").catch(() => {});
 
 // ---------- start ----------
 renderIdle();
