@@ -107,9 +107,9 @@ class RouteTest(unittest.TestCase):
     def test_dead_end_lane_has_no_way_out(self):
         lane = next(e for e in self.area.edges if e["highway"] == "service")
         street = next(e for e in self.area.edges if e["highway"] == "residential")
-        walk = lambda e: rating.factors(self.area, e, NIGHT, 0)["walkability"]["value"]
+        way_out = lambda e: rating.factors(self.area, e, NIGHT, 0)["openness"]["value"]  # Safetipin Openness
         self.assertEqual(lane["dead_ends"], 1)
-        self.assertLess(walk(lane), walk(street))
+        self.assertLess(way_out(lane), way_out(street))
 
     def test_park_hurts_at_night_only(self):
         osm = fixture()
@@ -118,7 +118,7 @@ class RouteTest(unittest.TestCase):
         area = Area(osm)
         foot = next(e for e in area.edges if e["highway"] == "footway")
         self.assertEqual(foot["zones"], ["park"])
-        f = lambda when, light: rating.factors(area, foot, when, light)["frontage"]["value"]
+        f = lambda when, light: rating.factors(area, foot, when, light)["openness"]["value"]  # Safetipin Openness
         self.assertLess(f(NIGHT, 0), f(NOON, 1))
 
     def test_turn_by_turn(self):
@@ -470,8 +470,9 @@ class OpenDataTest(unittest.TestCase):
         els = fixture()["elements"] + [node(f"b{k}", (28.0004, 77.0005 + k * 0.0001), building="yes") for k in range(20)]
         area = Area({"elements": els})
         feats = lambda a: rating.factors(a, a.edges[1], NIGHT, 0)["frontage"]
-        self.assertIsNone(feats(Area(fixture())))  # no footprints loaded: unknown, not zero
-        self.assertGreater(feats(area)["value"], 0)
+        self.assertNotIn("Building footprints", feats(Area(fixture()))["sources"])  # no footprints loaded: unknown, not zero
+        self.assertIn("Building footprints", feats(area)["sources"])
+        self.assertGreaterEqual(feats(area)["value"], feats(Area(fixture()))["value"])
 
     def test_slow_source_is_fetched_in_background(self):
         d = tempfile.mkdtemp()
@@ -516,7 +517,7 @@ class OpenDataTest(unittest.TestCase):
         els = fixture()["elements"] + [node("b1", (28.0004, 77.0005), building="yes")]
         area = Area({"elements": els}, unloaded={"overlooked": [(27, 76, 29, 78)]})
         self.assertIn("overlooked", area.edges[1]["unloaded"])
-        self.assertIsNone(rating.factors(area, area.edges[1], NIGHT, 0)["frontage"])
+        self.assertNotIn("Building footprints", rating.factors(area, area.edges[1], NIGHT, 0)["frontage"]["sources"])
 
     def test_area_built_during_background_write_is_not_cached(self):
         import tiles
@@ -800,12 +801,64 @@ class MainRoadTest(unittest.TestCase):
             self.assertLess(safest["length_m"], 300, when)  # along the main road, not the lit lane
             self.assertIn("Main road", safest["factors"])
 
-    def test_bikes_and_cars_are_not_affected(self):
-        self.assertEqual(rating.weights(0.0, "bike")["main_road"], 0)
-        self.assertEqual(rating.weights(0.0, "car")["main_road"], 0)
+    def test_bikes_and_cars_prefer_main_roads_too(self):
+        # changed 22 Nov 2026: cars and bikes used to ignore road type (weight 0), so car routes zig-zagged through
+        # colony lanes off Aurobindo Marg; Nitin's main-road rule now holds for every mode
+        for mode in ("bike", "car"):
+            for light in (0.0, 1.0):
+                w = rating.weights(light, mode)
+                self.assertAlmostEqual(sum(w.values()), 100)
+                self.assertEqual(max(w, key=w.get), "main_road", (mode, light))
         night = rating.weights(0.0)
         self.assertAlmostEqual(sum(night.values()), 100)
         self.assertGreater(night["main_road"], 5 * night["lighting"])
+
+
+class CarMainRoadTest(unittest.TestCase):
+    """22 Nov 2026: a car route left Aurobindo Marg for a zig-zag through colony lanes, because car mode ignored road type
+    and a lane with nothing measured on it outscored a main road with weak evidence. The main road must win in a car too."""
+
+    def test_main_road_outscores_a_colony_lane_with_the_same_surroundings(self):
+        # two parallel streets 110 m apart with the same buildings and police station around them
+        els = [way(1, [1, 2], [A, (28.0, 77.003)], highway="trunk", name="Aurobindo Marg"),
+               way(2, [3, 4], [(28.001, 77.0), (28.001, 77.003)], highway="residential"),
+               node(50, (28.0005, 77.0015), amenity="police", name="Thana")]
+        els += [node(f"b{i}", (27.9995 + 0.0005 * (i % 5), 77.0 + 0.0003 * (i // 5)), building="yes") for i in range(50)]
+        area = Area({"elements": els})
+        for mode in ("car", "bike", "walk"):
+            for when, light in ((NIGHT, 0), (NOON, 1)):
+                main, lane = (rating.rate(area, area.edges[i], when, light, mode=mode)[0] for i in (0, 1))
+                self.assertGreater(main, lane + 10, (mode, light))
+
+
+    def test_car_may_go_60_percent_longer_for_main_roads(self):
+        # Nitin, 23 Nov 2026: safety first; a car can take main roads up to 60% longer, walking stays at 30%
+        far = (28.0, 77.02)
+        north = [A, (28.0045, 77.0), (28.0045, 77.02), far]  # about 1.5x the direct lane
+        els = [way(1, [1, 2], [A, far], highway="residential"),
+               way(2, [1, 10, 11, 2], north, highway="secondary", name="Ring Road"),
+               node(50, (28.002, 77.01), amenity="police", name="Thana")]
+        els += [node(f"b{i}", (27.999 + 0.0007 * (i % 9), 77.0 + 0.001 * (i // 9)), building="yes") for i in range(9 * 21)]
+        area = Area({"elements": els})
+        car = next(r for r in area.routes(A, far, NIGHT, mode="car") if r["kind"] == "safest")
+        self.assertEqual(car["stats"]["main_pct"], 100)
+        self.assertTrue(all(r["length_m"] <= 1.3 * 1965 + 1 for r in area.routes(A, far, NIGHT)))
+
+
+class LoopTest(unittest.TestCase):
+    """22 Nov 2026, Lajpat Nagar to Defence Colony: the safest route drove 1.1 km down to Ring Road and back up the other
+    carriageway, because extra main-road metres lifted its average. Such out-and-backs are now dropped."""
+
+    def test_doubled_back_measures_an_out_and_back(self):
+        end, C = (28.0, 77.02), (28.0, 77.0003)  # C is 30 m along the lane from A
+        els = [way(1, [1, 2, 3], [A, C, end], highway="residential"),
+               way(2, [1, 4, 5, 2], [A, (28.0022, 77.0), (28.0022, 77.0003), C], highway="primary", name="Ring Road")]
+        area = Area({"elements": els})
+        edge = lambda a, b: next(ei for n, ei in area.adj[a] if n == b)
+        lane = [(1, edge(1, 2)), (2, edge(2, 3))]
+        loop = [(1, edge(1, 4)), (4, edge(4, 5)), (5, edge(5, 2)), (2, edge(2, 3))]
+        self.assertEqual(area._doubled_back(lane), 0)
+        self.assertGreater(area._doubled_back(loop), 500)  # back within 40 m of A after ~520 m
 
 
 class RuleAdditionsTest(unittest.TestCase):
