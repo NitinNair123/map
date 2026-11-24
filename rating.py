@@ -10,31 +10,44 @@ import buses
 import traffic
 
 # (full daylight, full dark) weight per factor; each column sums to 100. Twilight blends the two.
-# A stated design choice based on Safetipin's audit parameters, to be refitted once audited streets exist.
+# The factors follow Safetipin's audit parameters (safetipin.com city reports: Lighting, Openness, Visibility, People,
+# Security, Walk path, Public transport, Gender usage, Feeling), each measured from free map data, plus Nitin's main-road
+# factor. Feeling is the outcome Safetipin explains, not an input: here it comes in as "felt safe/unsafe" reports.
+# Gender usage (are women on the street?) has no free data source, so it is not scored, never guessed.
+# Safetipin publishes no weights. These keep Nitin's approved buckets (12 Nov 2026): main road (25, 35), activity (25, 25)
+# split into People (20, 20) and Public transport (5, 5), walkability (25, 15) split into Walk path (15, 9) and
+# Openness (10, 6), frontage = Visibility (15, 10), security (10, 10), lighting (0, 5). Safetipin finds lighting has the
+# biggest effect on how safe a place feels; Nitin chose to keep lighting small, so it stays at 5.
 WEIGHTS = {  # (by day, after dark), each column adds up to 100
     # Product decision (Nitin, 12 Nov 2026): main roads are the strongest sign of a safe walk in Delhi (people, traffic,
     # shops, police patrols, buses), so walking prefers them clearly; street lighting alone is a small part of safety.
     # Flyover decks without a footpath are still never walkable (safety.py), whatever these weights say.
     "main_road": (25, 35),
     "lighting": (0, 5),
-    "activity": (25, 25),
+    "activity": (20, 20),
+    "transit": (5, 5),
     "frontage": (15, 10),
     "security": (10, 10),
-    "walkability": (25, 15),
+    "walkability": (15, 9),
+    "openness": (10, 6),
 }
-# how much each kind of road counts as a main road (fast roads with no mapped footpath count a little less)
+# how much each kind of road counts as a main road (fast roads with no mapped footpath count a little less on foot)
 MAIN_ROAD_VALUE = {"primary": 1.0, "secondary": 1.0, "tertiary": 0.9, "trunk": 0.9, "primary_link": 0.9, "secondary_link": 0.9,
                    "tertiary_link": 0.8, "trunk_link": 0.8, "pedestrian": 0.5, "residential": 0.35, "living_street": 0.35,
                    "unclassified": 0.25, "service": 0.1, "footway": 0.1, "path": 0.05, "cycleway": 0.1, "steps": 0.05, "track": 0.0}
-# Other ways to travel weigh the same evidence differently: in a car the footpath matters little and help points
-# (open places, police) matter most; on a bike the road surface and lighting matter about as much as for walking.
+# Other ways to travel. Nitin's main-road rule holds for every mode: a car or bike that leaves the main road for a zig-zag
+# through residential lanes is not the safer way (until 22 Nov 2026 cars and bikes ignored road type, which is why car
+# routes cut through colony lanes). A car needs no footpath and seldom waits at a stop, so those weigh nothing there.
 MODE_WEIGHTS = {
     "walk": WEIGHTS,
-    "bike": {"main_road": (0, 0), "lighting": (0, 30), "activity": (30, 25), "frontage": (20, 15), "security": (10, 10), "walkability": (40, 20)},
-    "car": {"main_road": (0, 0), "lighting": (0, 15), "activity": (45, 40), "frontage": (20, 15), "security": (25, 20), "walkability": (10, 10)},
+    "bike": {"main_road": (25, 30), "lighting": (0, 10), "activity": (20, 20), "transit": (0, 0), "frontage": (15, 10),
+             "security": (10, 10), "walkability": (20, 15), "openness": (10, 5)},
+    "car": {"main_road": (40, 45), "lighting": (0, 5), "activity": (25, 20), "transit": (0, 0), "frontage": (10, 10),
+            "security": (15, 15), "walkability": (0, 0), "openness": (10, 5)},
 }
-LABELS = {"main_road": "Main road", "lighting": "Lighting", "activity": "People and open places", "frontage": "Buildings and surroundings",
-          "security": "Police and CCTV", "walkability": "Footpath and ways out"}
+LABELS = {"main_road": "Main road", "lighting": "Lighting", "activity": "People and open places", "transit": "Public transport",
+          "frontage": "Shops and windows overlooking", "security": "Police and CCTV", "walkability": "Footpath",
+          "openness": "Openness and ways out"}
 
 # How directly each kind of evidence measures its factor (1 = someone checked this street)
 QUALITY = {
@@ -139,7 +152,7 @@ def street_lighting(area, e, reports):
     return lighting
 
 
-def factors(area, e, when, light, now=None):
+def factors(area, e, when, light, now=None, mode="walk"):
     """Every factor for one street segment at one time, each None when nothing measures it."""
     now = now or time.time()
     dark = 1 - light
@@ -184,21 +197,42 @@ def factors(area, e, when, light, now=None):
         activity.append((0.6, QUALITY["main_road"], "Main road (OpenStreetMap)"))
     out["activity"] = combine(activity)
 
-    frontage = []
+    # Safetipin Visibility ("eyes on the street"): windows, entrances and vendors facing the street. Building footprints
+    # count the windows; mapped shops and services within 60 m count the doors, open or not (whether they are open now is
+    # People, above). With no shop mapped within 500 m the block is unmapped, so shops then say nothing either way.
+    # Either kind of eyes is enough, so the better of the two counts (an average would let few windows cancel many shops).
+    eyes = {}
     unloaded = e.get("unloaded", ())  # data still loading here is unknown, not a zero
-    zone = None if "surroundings" in unloaded else min((SURROUNDINGS[k][0] * light + SURROUNDINGS[k][1] * dark for k in e["zones"]), default=None)
     if area.building_cells and "overlooked" not in unloaded:
-        built = min(1, e["buildings_ha"] / 20)
-        frontage.append((built if zone is None else min(built, zone), QUALITY["buildings"], "Building footprints and land use"))
-    elif zone is not None:
-        frontage.append((zone, QUALITY["buildings"], "Land use (OpenStreetMap)"))
-    out["frontage"] = combine(frontage)
+        eyes["Building footprints"] = min(1, e["buildings_ha"] / 20)
+    if e.get("places_mapped", True) and area.pois:
+        eyes["Shops and services facing the street (OpenStreetMap, Overture)"] = min(1, len(places) / 5)
+    out["frontage"] = {"value": max(eyes.values()), "quality": QUALITY["buildings"], "sources": sorted(eyes)} if eyes else None
+
+    # Safetipin Openness: can you see ahead and get away? Woods, wasteland, building sites and parks after dark close it in;
+    # dead ends and long stretches without a side street leave no way out; an underpass is the worst case.
+    openness = []
+    zone = None if "surroundings" in unloaded else min((SURROUNDINGS[k][0] * light + SURROUNDINGS[k][1] * dark for k in e["zones"]), default=None)
+    if zone is not None:
+        openness.append((zone, QUALITY["buildings"], "Land use (OpenStreetMap)"))
+    # a street open at both ends always has more ways out than a dead end, however far apart its side streets are
+    escape = 0.0 if e["dead_ends"] == 2 else 0.1 if e["dead_ends"] == 1 else max(0.2, 1 - e["gap_m"] / 625)
+    openness.append((0.1 if e["underpass"] else escape, QUALITY["road"], "Street map: dead ends, side streets, underpasses (OpenStreetMap)"))
+    out["openness"] = combine(openness)
 
     police = 1.0 if e["police_m"] < 400 else 0.5 if e["police_m"] < 800 else 0.0
     guarded = 0.3 * len(near["cctv"]) + 0.3 * min(1, len(near["guard"])) + 0.2 * min(1, len(near["sos_phone"]))
     security = [(min(1, police + guarded), QUALITY["police"], "Police, guard posts, emergency phones and CCTV")]
     out["security"] = combine(security) if area.police or guarded else None  # no police mapped at all is a data gap
 
+    # Safetipin Public transport: how far the nearest bus stop or metro station is. Unknown when none is mapped nearby at all.
+    if near["transit"] or e.get("stops"):
+        out["transit"] = combine([(1.0, QUALITY["road"], "Bus and metro stops (OpenStreetMap, Overture, timetables)")])
+    else:
+        far = min((d for i, d in area._near(e["mid"], 800) if area.pois[i]["kind"] == "transit"), default=None)
+        out["transit"] = None if far is None else combine([(0.6 if far <= 400 else 0.2, QUALITY["road"], "Bus and metro stops (OpenStreetMap, Overture)")])
+
+    # Safetipin Walk path: a usable footpath.
     path = ROAD_SCORE.get(e["highway"], 0.5)
     if e["highway"] in VEHICLE_ROADS and e["sidewalk"]:
         path += -0.3 if e["sidewalk"] == "no" and e["highway"] not in ("residential", "unclassified") else 0.15
@@ -215,15 +249,14 @@ def factors(area, e, when, light, now=None):
         path = 0.1
     elif e["overbridge"]:
         path = path * light + 0.25 * dark
-    escape = 0.0 if e["dead_ends"] == 2 else 0.2 if e["dead_ends"] == 1 else max(0.0, 1 - e["gap_m"] / 500)
-    walk = [(max(0.0, min(1.0, 0.6 * path + 0.4 * escape)), QUALITY["road"], "Street map (OpenStreetMap)")]
+    walk = [(max(0.0, min(1.0, path)), QUALITY["road"], "Street map (OpenStreetMap)")]
     if near["blackspot"]:
         walk[0] = walk[0][:2] + ("Street map (OpenStreetMap) and accident blackspots",)
     out["walkability"] = combine(walk + obs["walkability"])
 
     main = MAIN_ROAD_VALUE.get(e["highway"], 0.25)
-    if fast and e["highway"] in MAIN_ROADS and e["sidewalk"] not in ("yes", "both", "left", "right", "separate"):
-        main *= 0.8  # still a main road, but walking beside fast traffic with no footpath mapped
+    if mode == "walk" and fast and e["highway"] in MAIN_ROADS and e["sidewalk"] not in ("yes", "both", "left", "right", "separate"):
+        main *= 0.8  # still a main road, but walking beside fast traffic with no footpath mapped (no matter in a car)
     out["main_road"] = combine([(main, QUALITY["road"], "Road type (OpenStreetMap)")])
     return out
 
@@ -235,7 +268,7 @@ def weights(light, mode="walk"):
 def rate(area, e, when, light, rain=False, now=None, mode="walk"):
     """(score 0-100, confidence 0-1, factors) for one segment. Score uses only measured factors."""
     now = now or time.time()
-    feats = factors(area, e, when, light, now)
+    feats = factors(area, e, when, light, now, mode)
     w = weights(light, mode)
     have = {k: f for k, f in feats.items() if f and w[k] > 0}
     # the road type is known for every mapped street, so it steers the score but is not evidence that a street is rated:

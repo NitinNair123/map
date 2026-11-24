@@ -25,12 +25,16 @@ SEARCH_LAMBDAS = (0, 1, 3, 6, 10, 20)
 DETOUR_ROUNDS = 3
 # Nitin's rule (12 Nov 2026): a route is at most 30% longer than the fastest. Short trips get DETOUR_FLOOR_M instead,
 # because one block over to the main road is more than 30% of a 300 m walk.
-MAX_DETOUR = 1.3
+MAX_DETOUR = {"walk": 1.3, "bike": 1.3, "car": 1.6}  # Nitin, 23 Nov 2026: cars may go 60% longer to stay on main roads
 DETOUR_FLOOR_M = 200
 # what the person asked for on the way ("stay on main roads", "near police"): extra cost on streets that don't give it.
 # 1.0 doubles a side street's cost, so the search strongly prefers main roads; the detour limit then applies to that cost.
 WISHES = {"main": 1.0, "police": 0.5}
 BALANCED_DETOUR = 1.25
+# A candidate that comes back within LOOP_NEAR_M of where it already was, after more road than the cheapest way does
+# (plus LOOP_SLACK_M), is a loop that pads the route with good streets, not a way anyone would take.
+LOOP_NEAR_M = 40
+LOOP_SLACK_M = 150
 
 COMPASS = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"]
 ROAD_WORDS = {"footway": "the footpath", "path": "the path", "steps": "the steps", "cycleway": "the cycle path",
@@ -623,15 +627,37 @@ class Area:
         cost = lambda p: sum(self.edges[ei]["length"] * (1 + (base or {}).get(ei, 0)) for _, ei in p)
         cheapest, fastest = min(cost(p) for p in found) or 1, min(real(p) for p in found)
         kept = []  # (path, its edges, its length), cheapest first
-        for p in sorted(found, key=cost):
+        ordered = sorted(found, key=cost)
+        allowed_back = self._doubled_back(ordered[0]) + LOOP_SLACK_M if ordered else 0
+        for p in ordered:
             edges, lp = {ei for _, ei in p}, real(p)
-            if cost(p) > max(MAX_DETOUR * cheapest, cheapest + DETOUR_FLOOR_M) or (max_extra_m is not None and lp > fastest + max_extra_m):
+            if cost(p) > max(MAX_DETOUR[mode] * cheapest, cheapest + DETOUR_FLOOR_M) or (max_extra_m is not None and lp > fastest + max_extra_m):
+                continue
+            # an out-and-back (down one carriageway to a main road and up the other) only collects good streets to lift
+            # the average; a U-turn the cheapest way also needs is allowed
+            if self._doubled_back(p) > allowed_back:
                 continue
             # sharing 90% of its length with a kept candidate makes it the same way with a small wiggle
             if any(sum(self.edges[ei]["length"] for ei in edges & k) >= 0.9 * min(lp, lk) for _, k, lk in kept):
                 continue
             kept.append((p, edges, lp))
         return [p for p, _, _ in kept]
+
+    def _doubled_back(self, path):
+        """The longest stretch after which the path comes back within LOOP_NEAR_M of a point it already passed (metres)."""
+        seen, along, worst = defaultdict(list), 0.0, 0.0
+        cell = lambda pt: (int(pt[0] / 0.0004), int(pt[1] / 0.0004))  # ~40 m cells
+        for n, ei in path:
+            pt = self.nodes[n]
+            c = cell(pt)
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    for at, q in seen[(c[0] + di, c[1] + dj)]:
+                        if along - at > max(worst, 100) and dist(pt, q) <= LOOP_NEAR_M:  # 100 m: not just the next few metres
+                            worst = along - at
+            seen[c].append((along, pt))
+            along += self.edges[ei]["length"]
+        return worst
 
     def routes(self, start, end, when, rain=False, mode="walk", max_extra_min=None, via=(), prefer=None, wishes=()):
         """Every candidate route is scored; returns the safest, a balanced one (at most 25% longer), the fastest,
@@ -728,7 +754,7 @@ class Area:
         for (_, ei), t in zip(path, at):
             e = self.edges[ei]
             lt = self.light(t)
-            feats = rating.factors(self, e, t, lt, now)
+            feats = rating.factors(self, e, t, lt, now, mode)
             for k, f in feats.items():
                 if f:
                     factor_sum[k] += f["value"] * e["length"]
@@ -799,7 +825,7 @@ class Area:
             score = 0.6 * avg + 0.4 * rated[path[weak_i][1]][0]  # weakest link drags the whole route down
             score -= min(15, isolated / 50)
             score -= min(10, max(0, quiet_gap - 300) / 50) if places else 0
-            score -= max(0, length / fastest_len - 1.3) * 20
+            score -= max(0, length / fastest_len - MAX_DETOUR[mode]) * 20
             score *= rated_len / length  # streets too thinly mapped to rate earn nothing, so a mostly unknown way can't top the list
         wanted, bonus = [], 0.0
         for group, w in (prefer or {}).items():
@@ -859,7 +885,7 @@ class Area:
             weak = self.edges[path[weak_i][1]]
             t = at[weak_i]
             w = rating.weights(self.light(t), mode)
-            wf = rating.factors(self, weak, t, self.light(t), now)
+            wf = rating.factors(self, weak, t, self.light(t), now, mode)
             why = max((k for k, f in wf.items() if f and w[k] > 0), key=lambda k: w[k] * (1 - wf[k]["value"]))
             weakest = {"coords": [self.nodes[weak["a"]], self.nodes[weak["b"]]], "score": round(rated[path[weak_i][1]][0]),
                        "name": weak["name"] or "an unnamed " + UNNAMED.get(weak["highway"], weak["highway"].replace("_", " ") + " road"), "why": LABELS[why]}
