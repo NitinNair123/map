@@ -15,6 +15,8 @@ city it never saw, each city in turn. Each part must beat a simple baseline with
 Usage (Windows: py instead of python), data in ml/data/incoming/<source>/ and ml/data/blocks/:
   python ml/rater.py labels     W label rows -> ml/out/rater/labels_w.csv (also prints counts per source)
   python ml/rater.py train      fit and test W and L -> ml/out/rater/{report.md, metrics.json, rater.pkl}
+  python ml/rater.py fetch      photos: SPECS from Hugging Face, Delhi from KartaView (+ Mapillary with a token)
+  python ml/rater.py embed      CLIP numbers for the photos in ml/data/incoming/images/ (needs torch + open_clip_torch)
   python ml/rater.py score      L for Delhi streets -> ml/out/rater/delhi_looks_safe.csv (edge_id, score, images)
 """
 import argparse
@@ -41,6 +43,8 @@ ML = os.path.dirname(os.path.abspath(__file__))
 IN = os.path.join(ML, "data", "incoming")
 BLOCKS = os.path.join(ML, "data", "blocks")
 OUT = os.path.join(ML, "out", "rater")
+IMAGES = os.path.join(IN, "images")              # photos fetched for SPECS and Delhi images, <uuid>.jpg
+CLIP = os.path.join(IMAGES, "clip_b32.csv.gz")   # uuid + 512 CLIP ViT-B/32 numbers per photo
 SNAP_W_M = 30   # a counted image belongs to the nearest street within this distance, else it is dropped
 SNAP_L_M = 25   # a Delhi image scores streets within this distance (the design's 25 m)
 IST = timedelta(hours=5, minutes=30)
@@ -305,10 +309,19 @@ def specs():
     q = q[(q["country"] == "All") & (q["Question"] == "safe")]
     s = q.pivot_table(index="Image", columns="gender", values="Score")
     s = s.merge(meta[["Image number", "uuid", "city"]], left_index=True, right_on="Image number")
+    f = scene()
+    return s.merge(f, on="uuid"), [c for c in f.columns if c != "uuid"]
+
+
+def scene():
+    """Per image: scene make-up shares, plus the CLIP image embedding where the photo was fetched (python ml/rater.py
+    embed). With embeddings, only images that have one are kept, so train and score see the same inputs."""
     segs = [pd.read_csv(p) for p in _find("specs_perception", "*segmentation*.csv") + _find("streetscapes", "segmentation.csv")]
     seg = pd.concat(segs, ignore_index=True).drop_duplicates("uuid")
     seg = pd.concat([seg[["uuid"]], _shares(seg)], axis=1)
-    return s.merge(seg, on="uuid"), [c for c in seg.columns if c != "uuid"]
+    if os.path.exists(CLIP):
+        seg = seg.merge(pd.read_csv(CLIP), on="uuid", how="right").fillna(0)  # Abuja-only classes etc. are absent, not unknown
+    return seg
 
 
 def _ridge():
@@ -354,9 +367,9 @@ def train_l():
     return m, final
 
 
-def looks_safe(final, seg):
+def looks_safe(final, feats):
     """0-100: where an image's predicted women's score falls among the 400 SPECS images' real scores."""
-    X = _shares(seg).reindex(columns=final["cols"]).fillna(0).to_numpy()
+    X = feats.reindex(columns=final["cols"]).fillna(0).to_numpy()
     raw = final["model"].predict(X)
     return 100 * np.searchsorted(final["train_scores"], raw) / len(final["train_scores"])
 
@@ -420,12 +433,110 @@ def cmd_train():
     print(report(m))
 
 
+SPECS_HF = "https://huggingface.co/datasets/matiasqr/specs/resolve/main/svi/{city}/{uuid}.jpeg"  # CC BY-SA 4.0
+
+
+def _get(url, tries=3):
+    import time
+    import urllib.request
+    for k in range(tries):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "saferoute-ml"}), timeout=60) as r:
+                return r.read()
+        except OSError as e:
+            if k == tries - 1:
+                raise
+            print(f"retry {url[:80]}: {e}")
+            time.sleep(3 * (k + 1))
+
+
+def _photo_url(source, orig_id, token):
+    """Where to download one Global Streetscapes photo: KartaView needs no key, Mapillary needs the token."""
+    oid = str(int(float(orig_id)))
+    if source == "KartaView":
+        d = json.loads(_get(f"https://api.kartaview.org/2.0/photo/{oid}"))["result"]["data"]
+        return d.get("imageLthUrl") or d.get("imageProcUrl") or d["fileurlProc"]
+    if source == "Mapillary" and token:
+        return json.loads(_get(f"https://graph.mapillary.com/{oid}?fields=thumb_1024_url&access_token={token}"))["thumb_1024_url"]
+    return None
+
+
+def cmd_fetch():
+    """Photos for the 400 SPECS images (Hugging Face) and the NCR Global Streetscapes images (KartaView; Mapillary when
+    ml/data/mapillary_token.txt or MAPILLARY_TOKEN exists), saved at most 1024 px wide as images/<uuid>.jpg. Photos
+    already on disk are skipped; failures are listed, never replaced by anything."""
+    import io
+    from urllib.parse import quote
+    from PIL import Image
+    os.makedirs(IMAGES, exist_ok=True)
+    tok_file = os.path.join(ML, "data", "mapillary_token.txt")
+    token = os.environ.get("MAPILLARY_TOKEN") or (open(tok_file).read().strip() if os.path.exists(tok_file) else None)
+    meta = pd.read_csv(_find("specs_perception", "metadata.csv")[0])
+    jobs = [(u, SPECS_HF.format(city=quote(c), uuid=u)) for u, c in zip(meta["uuid"], meta["city"])]
+    img = pd.read_csv(_find("streetscapes", "images.csv")[0])
+    ncr = img[in_ncr(img)]
+    jobs += [(u, (s, o)) for u, s, o in zip(ncr["uuid"], ncr["source"], ncr["orig_id"])]
+    ok, failed, skipped = 0, [], 0
+    for n, (uuid, where) in enumerate(jobs):
+        path = os.path.join(IMAGES, f"{uuid}.jpg")
+        if os.path.exists(path):
+            continue
+        try:
+            url = where if isinstance(where, str) else _photo_url(*where, token)
+            if url is None:
+                skipped += 1
+                continue
+            im = Image.open(io.BytesIO(_get(url))).convert("RGB")
+            im.thumbnail((1024, 1024))
+            im.save(path, quality=90)
+            ok += 1
+        except Exception as e:  # noqa: BLE001  one bad photo must not stop the rest; it is reported below
+            failed.append((uuid, str(e)[:100]))
+        if n % 50 == 0:
+            print(f"{n} of {len(jobs)}: {ok} saved, {len(failed)} failed, {skipped} need a Mapillary token", flush=True)
+    print(f"done: {ok} saved, {len(failed)} failed, {skipped} need a Mapillary token")
+    for u, e in failed[:20]:
+        print("failed", u, e)
+
+
+def cmd_embed():
+    """CLIP ViT-B/32 numbers for every photo in ml/data/incoming/images/ (GPU when torch sees one). Photos already
+    embedded are skipped, so it can be re-run after more photos arrive."""
+    import open_clip
+    import torch
+    from PIL import Image
+    done = pd.read_csv(CLIP) if os.path.exists(CLIP) else pd.DataFrame(columns=["uuid"])
+    todo = [p for p in sorted(glob.glob(os.path.join(IMAGES, "*.jpg"))) if os.path.basename(p)[:-4] not in set(done["uuid"])]
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    model, _, prep = open_clip.create_model_and_transforms("ViT-B-32", pretrained="laion2b_s34b_b79k", device=dev)
+    model.eval()
+    rows = []
+    with torch.no_grad():
+        for i in range(0, len(todo), 32):
+            batch, names = [], []
+            for p in todo[i:i + 32]:
+                try:
+                    batch.append(prep(Image.open(p).convert("RGB")))
+                    names.append(os.path.basename(p)[:-4])
+                except OSError as e:  # a broken download: skipped and named, never embedded as zeros
+                    print(f"skip {p}: {e}")
+            if not batch:
+                continue
+            v = model.encode_image(torch.stack(batch).to(dev)).float()
+            v = (v / v.norm(dim=-1, keepdim=True)).cpu().numpy()
+            rows += [[n, *map(float, r)] for n, r in zip(names, v)]
+            print(f"{i + len(batch)} of {len(todo)} photos", flush=True)
+    new = pd.DataFrame(rows, columns=["uuid"] + [f"clip_{k}" for k in range(512)])
+    pd.concat([done, new], ignore_index=True).to_csv(CLIP, index=False)
+    print(f"{len(new)} new embeddings on {dev}, {len(done) + len(new)} in total")
+
+
 def cmd_score():
     r = pickle.load(open(os.path.join(OUT, "rater.pkl"), "rb"))
     if not r["L"]:
         sys.exit("L did not pass its test, so no street gets a looks-safe score")
     img = pd.read_csv(_find("streetscapes", "images.csv")[0], usecols=["uuid", "lat", "lon"])
-    seg = pd.read_csv(_find("streetscapes", "segmentation.csv")[0]).merge(img, on="uuid")
+    seg = scene().merge(img, on="uuid")
     seg = seg[in_ncr(seg)].reset_index(drop=True)
     seg["score"] = looks_safe(r["L"], seg)
     s = snap(seg[["uuid", "lat", "lon", "score"]], SNAP_L_M, ["edge_id"])
@@ -437,5 +548,5 @@ def cmd_score():
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["labels", "train", "score"])
-    {"labels": cmd_labels, "train": cmd_train, "score": cmd_score}[ap.parse_args().command]()
+    ap.add_argument("command", choices=["labels", "train", "fetch", "embed", "score"])
+    {"labels": cmd_labels, "train": cmd_train, "fetch": cmd_fetch, "embed": cmd_embed, "score": cmd_score}[ap.parse_args().command]()

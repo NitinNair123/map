@@ -87,6 +87,8 @@ class RaterTest(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         rater.BLOCKS, rater.IN = write_world(cls.tmp.name, np.random.default_rng(0))
         rater.OUT = os.path.join(cls.tmp.name, "out")
+        rater.IMAGES = os.path.join(rater.IN, "images")
+        rater.CLIP = os.path.join(rater.IMAGES, "clip_b32.csv.gz")
 
     @classmethod
     def tearDownClass(cls):
@@ -104,6 +106,17 @@ class RaterTest(unittest.TestCase):
         s = rater.snap(pts, 1e8, ["edge_id", "tile"])
         self.assertEqual(len(rater.snap(pts.iloc[[1]], 30, ["edge_id"])), 0)  # far away: dropped, not forced onto a street
         self.assertEqual(len(s), 2)
+
+    def test_clip_inputs_join(self):
+        os.makedirs(rater.IMAGES, exist_ok=True)
+        pd.DataFrame({"uuid": ["u1", "u2", "d3"], "clip_0": [0.1, 0.2, 0.3]}).to_csv(rater.CLIP, index=False)
+        try:
+            f = rater.scene()
+            self.assertEqual(sorted(f["uuid"]), ["d3", "u1", "u2"])  # only photos with an embedding
+            self.assertIn("clip_0", f.columns)
+            self.assertIn("Sidewalk", f.columns)
+        finally:
+            os.remove(rater.CLIP)
 
     def test_train_and_score(self):
         rater.cmd_train()
