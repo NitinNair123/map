@@ -15,7 +15,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap">
-<link rel="stylesheet" href="/theme.css?v=33">
+<link rel="stylesheet" href="/theme.css?v=34">
 <style>
   .wrap { max-width: 1120px; margin: 0 auto; padding: 0 20px; }
   header.nav { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 85%, transparent); backdrop-filter: blur(12px); border-bottom: 1px solid var(--line); }
@@ -99,6 +99,38 @@
   .final .cta { justify-content: center; margin-top: 24px; }
   footer { border-top: 1px solid var(--line); padding: 28px 0; color: var(--ink-3); font-size: 14px; }
   footer .wrap { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  /* motion: transform and opacity only; theme.css turns it all off for "reduce motion" */
+  @keyframes rise { from { opacity: 0; transform: translateY(18px); } }
+  @keyframes draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+  @keyframes fade { from { opacity: 0; } }
+  @keyframes pop { from { opacity: 0; transform: scale(.4); } }
+  @keyframes bob { 50% { transform: translateY(-8px); } }
+  @keyframes sheen { to { background-position: 200% 0; } }
+  .hero .wrap > div:first-child > * { animation: rise .7s var(--ease-out) both; }
+  .hero .wrap > div:first-child > :nth-child(2) { animation-delay: .08s; }
+  .hero .wrap > div:first-child > :nth-child(3) { animation-delay: .16s; }
+  .hero .wrap > div:first-child > :nth-child(n+4) { animation-delay: .24s; }
+  .hero h1 em { background-size: 200% 100%; background-image: linear-gradient(90deg, var(--brand), #12b76a, var(--brand)); animation: sheen 2.4s .4s var(--ease-out) both; }  /* one sweep, then still: no repainting forever */
+  .phone { animation: rise .9s .15s var(--ease-out) both; }
+  .mapart .route { stroke-dasharray: 1; animation: draw 1.4s .7s var(--ease-out) both; }
+  .mapart .fast { animation: fade .6s 1.9s both; }
+  .mapart .stop { transform-box: fill-box; transform-origin: center; animation: pop .4s var(--ease-spring) both; }
+  .mapart .stop:nth-child(1) { animation-delay: 1.0s; } .mapart .stop:nth-child(2) { animation-delay: 1.2s; }
+  .mapart .stop:nth-child(3) { animation-delay: 1.4s; } .mapart .stop:nth-child(4) { animation-delay: 1.6s; }
+  .mapart .goal { transform-box: fill-box; transform-origin: center bottom; animation: pop .45s 2s var(--ease-spring) both; }
+  .f3 { animation: rise .6s 2.1s var(--ease-out) both; }
+  .f1 { animation: rise .6s 1.2s var(--ease-out) both, bob 5s 1.8s ease-in-out infinite; }
+  .f2 { animation: rise .6s 1.5s var(--ease-out) both, bob 6s 2.1s ease-in-out infinite; }
+  .card { transition: transform .25s var(--ease-out), box-shadow .25s, border-color .25s; }
+  @media (hover: hover) { .card:hover { transform: translateY(-4px); box-shadow: var(--shadow); } }
+  .faq details[open] p { animation: rise .3s var(--ease-out); }
+  .faq summary::after { transition: transform .2s var(--ease-out); }
+  .faq details[open] summary::after { transform: rotate(180deg); }
+  /* sections slide in once as they scroll into view (only when the script below ran and motion is welcome) */
+  /* "translate" for the reveal, "transform" for the hover lift, so the two never fight */
+  .reveal .rv { opacity: 0; translate: 0 24px; transition: opacity .6s var(--ease-out) calc(var(--i, 0) * 70ms), translate .6s var(--ease-out) calc(var(--i, 0) * 70ms), transform .25s var(--ease-out), box-shadow .25s, border-color .25s; }
+  .reveal .rv.in { opacity: 1; translate: none; }
+  @media print { .reveal .rv { opacity: 1; translate: none; } }
   #iosTip { display: none; margin-top: 14px; color: var(--ink-2); font-size: 14px; }
 </style>
 </head>
@@ -137,12 +169,12 @@
             <g stroke="#fff" stroke-width="14" stroke-linecap="round">
               <path d="M-10 120 H290"/><path d="M-10 250 H290"/><path d="M-10 400 H290"/><path d="M60 -10 V600"/><path d="M200 -10 V600"/><path d="M130 250 V600"/>
             </g>
-            <path d="M60 470 V250 H200 V120" fill="none" stroke="#fff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M60 470 V250 H200 V120" fill="none" stroke="#12b76a" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M60 470 L110 400 L150 330 L175 260 L200 120" fill="none" stroke="#f04438" stroke-width="5" stroke-dasharray="3 8" stroke-linecap="round" opacity=".8"/>
-            <g fill="#12b76a" stroke="#fff" stroke-width="3"><circle cx="60" cy="330" r="7"/><circle cx="110" cy="250" r="7"/><circle cx="170" cy="250" r="7"/><circle cx="200" cy="190" r="7"/></g>
+            <path class="route" pathLength="1" d="M60 470 V250 H200 V120" fill="none" stroke="#fff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+            <path class="route" pathLength="1" d="M60 470 V250 H200 V120" fill="none" stroke="#12b76a" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+            <path class="fast" d="M60 470 L110 400 L150 330 L175 260 L200 120" fill="none" stroke="#f04438" stroke-width="5" stroke-dasharray="3 8" stroke-linecap="round" opacity=".8"/>
+            <g fill="#12b76a" stroke="#fff" stroke-width="3"><circle class="stop" cx="60" cy="330" r="7"/><circle class="stop" cx="110" cy="250" r="7"/><circle class="stop" cx="170" cy="250" r="7"/><circle class="stop" cx="200" cy="190" r="7"/></g>
             <circle cx="60" cy="470" r="10" fill="#6d4aff" stroke="#fff" stroke-width="4"/>
-            <path d="M200 106 a12 12 0 1 1 0.1 0 Z" fill="#f04438" stroke="#fff" stroke-width="3"/>
+            <path class="goal" d="M200 106 a12 12 0 1 1 0.1 0 Z" fill="#f04438" stroke="#fff" stroke-width="3"/>
           </svg>
           <div class="float f3"><div class="row"><div><small>SAFEST · 9 MIN</small>Well lit, 14 open shops</div><div class="big">86</div></div></div>
         </div>
@@ -265,7 +297,16 @@ document.getElementById("installBtn").onclick = async () => {
   if (/iphone|ipad|ipod/i.test(navigator.userAgent)) { document.getElementById("iosTip").style.display = "block"; return; }
   location.href = "/app/";
 };
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=33").catch(() => {});
+// scroll reveal: skipped for "reduce motion" and old browsers, so nothing ever stays hidden there
+if ("IntersectionObserver" in window && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  const io = new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } }), { rootMargin: "0px 0px -8% 0px" });
+  document.querySelectorAll("section:not(.hero) .head, section:not(.hero) .card, .privacy ul li, .b2b, .faq details, .final .wrap > *").forEach((el) => {
+    el.style.setProperty("--i", [...el.parentElement.children].indexOf(el) % 4);
+    el.classList.add("rv"); io.observe(el);
+  });
+  document.documentElement.classList.add("reveal");
+}
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=34").catch(() => {});
 </script>
 </body>
 </html>

@@ -275,3 +275,65 @@ body.navigating .topbar, body.navigating .legend { display: none; }
 .compare tr.this td { background: var(--brand-soft); }
 .compare tr[data-kind] { cursor: pointer; }
 .compare .good { color: var(--safe-ink); } .compare .ok { color: var(--caution-ink); } .compare .bad { color: var(--risk); }
+
+/* --- motion ---
+   Only transform and opacity move, so phones animate on the GPU without relayout. theme.css switches all of it off
+   for "reduce motion". The SOS screen, the fake call and the check-in appear instantly: no animation sits in front of help. */
+@keyframes rise { from { opacity: 0; transform: translateY(10px); } }
+@keyframes fade { from { opacity: 0; } }
+@keyframes pop { from { opacity: 0; transform: scale(.92); } }
+@keyframes slide-up { from { transform: translateY(100%); } }
+@keyframes drop { from { opacity: .6; transform: translateY(-14px); } }
+@keyframes pin-drop { from { opacity: 0; transform: translateY(-16px) rotate(-45deg); } }
+@keyframes gauge-fill { from { stroke-dashoffset: 226.2; } }  /* 2 * pi * 36: the gauge ring, empty */
+@keyframes grow-x { from { transform: scaleX(0); } }
+@keyframes ripple { from { opacity: .45; transform: scale(1); } to { opacity: 0; transform: scale(1.7); } }
+
+/* a new panel (route options, checking, errors) rises in, a few rows at a time */
+#sheetBody.enter > * { animation: rise .38s var(--ease-out) both; }
+#sheetBody.enter > :nth-child(2) { animation-delay: .04s; }
+#sheetBody.enter > :nth-child(3) { animation-delay: .08s; }
+#sheetBody.enter > :nth-child(4) { animation-delay: .12s; }
+#sheetBody.enter > :nth-child(n+5) { animation-delay: .16s; }
+.sheet { transition: max-height .32s var(--ease-out); }
+.gauge .val { animation: gauge-fill .9s var(--ease-out) both; transition: stroke-dashoffset .6s var(--ease-out); }
+.tab, .modes button, .report-grid button, .groups button, .strip-row, .chip, .icon-btn { transition: transform .16s var(--ease-out), background-color .2s, border-color .2s, color .2s, opacity .2s; }
+/* .swap is centred with its own transform, so it doesn't take part in the press and hover moves */
+.tab:active, .modes button:active, .report-grid button:active, .groups button:active, .chip:active, .icon-btn:not(.swap):active { transform: scale(.95); }
+@media (hover: hover) { .tab:hover, .chip:hover, .icon-btn:not(.swap):hover { transform: translateY(-1px); } }
+.tab[aria-selected="true"] .num { animation: pop .3s var(--ease-spring); }
+.tags li { animation: pop .3s var(--ease-out) both; }
+details.why[open] > :not(summary), .faq details[open] > p { animation: rise .28s var(--ease-out); }
+details.why summary::after { transition: transform .2s var(--ease-out); }
+details.why[open] summary::after { transform: rotate(180deg); }
+details[open] .bar .fill { transform-origin: left; animation: grow-x .6s var(--ease-out) both; }
+/* only when the list opens, not on every keystroke that refills it */
+.results.opening li { animation: rise .24s var(--ease-out) both; }
+.results li:nth-child(2) { animation-delay: .025s; } .results li:nth-child(3) { animation-delay: .05s; }
+.results li:nth-child(4) { animation-delay: .075s; } .results li:nth-child(n+5) { animation-delay: .1s; }
+.results li { transition: background-color .15s; }
+
+/* map pins drop in; the blue "you are here" dot breathes like other map apps */
+.pin { animation: pin-drop .42s var(--ease-spring) both; }
+.pin.start, .pin.stop { animation-name: pop; }
+.gpin { animation: pop .3s var(--ease-out) both; }
+.me-dot { position: relative; }
+.me-dot::after { content: ""; position: absolute; inset: -3px; border-radius: 50%; background: var(--brand); animation: ripple 2.4s var(--ease-out) infinite; pointer-events: none; }
+
+/* SOS keeps a slow halo so it is easy to find; it never delays the press */
+.sos::before { content: ""; position: absolute; inset: 0; border-radius: 50%; background: var(--risk); z-index: -1; animation: ripple 3s var(--ease-out) infinite; pointer-events: none; }
+.sos.holding::before { animation: none; opacity: 0; }
+
+/* messages, settings and onboarding */
+.toast:not([hidden]) { animation: toast-in .32s var(--ease-spring); }
+@keyframes toast-in { from { opacity: 0; transform: translate(-50%, -10px) scale(.96); } }
+.overlay.dim:not([hidden]):not(#checkin) { animation: fade .22s ease-out; }
+.overlay.dim:not([hidden]):not(#checkin) .modal { animation: pop .3s var(--ease-out); }
+@media (max-width: 600px) { .overlay.dim:not([hidden]):not(#checkin) .modal.drawer { animation: slide-up .36s var(--ease-out); } }
+.steps i { transition: width .3s var(--ease-out), background-color .3s; }
+
+/* trip: the turn banner slides down (readable from its first frame), the arrow turns */
+.nav-banner:not([hidden]) { animation: drop .3s var(--ease-out); }
+.nav-arrow svg { transition: transform .35s var(--ease-out); }
+.recenter:not([hidden]) { animation: pop .25s var(--ease-spring); }
+.legend:not([hidden]) { animation: rise .25s var(--ease-out); }
