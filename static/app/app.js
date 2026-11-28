@@ -423,14 +423,32 @@ async function maybeRoute() {
 }
 let routeSeq = 0;
 
+// New routes draw themselves from start to end in 0.7 s; any redraw before then stops it and shows them whole
+const calm = matchMedia("(prefers-reduced-motion: reduce)");
+let revealRun = 0;
+function reveal(lines) {
+  const run = revealRun, t0 = performance.now();
+  if (calm.matches || !lines.length) return;
+  const grow = (t) => {
+    if (run !== revealRun) return;
+    const k = Math.min(1, (t - t0) / 700), e = 1 - (1 - k) ** 3;
+    lines.forEach(([l, c]) => l.setLatLngs(c.slice(0, Math.max(2, Math.ceil(e * c.length)))));
+    if (k < 1) requestAnimationFrame(grow);
+  };
+  grow(t0);
+}
+
 function drawRoutes(fit) {
   routeLayer.clearLayers(); havenLayer.clearLayers();
+  revealRun++;
+  const grown = [];
   const order = state.routes.filter((r) => !r.same_as && (isMain(r) || r.kind === state.sel)).sort((a, b) => (a.kind === state.sel) - (b.kind === state.sel));
   for (const r of order) {
     const sel = r.kind === state.sel || (state.routes.find((x) => x.kind === state.sel)?.same_as === r.kind);
     const c = r.confidence_level === "none" ? COLOR.none : COLOR[scoreClass(r.score)];
-    if (sel) L.polyline(r.coords, { color: "#fff", weight: 11, opacity: 0.9 }).addTo(routeLayer);
+    if (sel) grown.push([L.polyline(r.coords, { color: "#fff", weight: 11, opacity: 0.9 }).addTo(routeLayer), r.coords]);
     const line = L.polyline(r.coords, { color: sel ? c : "#8f8aa0", weight: sel ? 7 : 5, opacity: sel ? 1 : 0.6 }).addTo(routeLayer);
+    grown.push([line, r.coords]);
     line.on("click", (e) => { L.DomEvent.stop(e); if (!state.trip) { state.sel = r.kind; drawRoutes(); renderRoutes(); } });
     if (sel) {
       if (r.weakest && r.weakest.score < 45)
@@ -446,6 +464,7 @@ function drawRoutes(fit) {
     const desk = innerWidth >= 900; // keep the route clear of the search card and the sheet
     const top = $(".topbar").getBoundingClientRect().bottom + 16, sheet = $("#sheet").getBoundingClientRect().height + 16;
     if (all.length) map.fitBounds(all, { paddingTopLeft: desk ? [460, 40] : [24, top], paddingBottomRight: desk ? [40, 40] : [90, sheet] });
+    reveal(grown);
   }
 }
 
@@ -594,7 +613,15 @@ function renderRoutes() {
 }
 
 // ---------- sheet ----------
-function renderSheet(html, keepSize) { $("#sheetBody").innerHTML = html; if (!keepSize) setSheet("half"); }
+// A different panel rises in; the same panel redrawn (a new GPS fix, another route tab) and the live trip panel don't move
+let sheetKind = "";
+function renderSheet(html, keepSize) {
+  const b = $("#sheetBody"), kind = html.trimStart().slice(0, 24);
+  b.classList.toggle("enter", kind !== sheetKind && !state.trip);
+  sheetKind = kind;
+  b.innerHTML = html;
+  if (!keepSize) setSheet("half");
+}
 // The sheet has three heights: peek (just the top), half (default) and full. Drag or tap the handle to change it.
 function setSheet(size) {
   const s = $("#sheet");
@@ -1390,7 +1417,7 @@ function onboarding(step = 0) {
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone;
 addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); state.installPrompt = e; if (!state.to) renderIdle(); });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=33").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=34").catch(() => {});
 
 // ---------- start ----------
 renderIdle();

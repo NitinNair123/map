@@ -21,6 +21,8 @@
   --shadow: 0 1px 2px rgba(22, 19, 31, .06), 0 8px 24px rgba(22, 19, 31, .10);
   --shadow-lg: 0 24px 60px rgba(22, 19, 31, .18);
   --radius: 18px;
+  --ease-out: cubic-bezier(.22, 1, .36, 1);  /* fast start, soft landing: used by every animation */
+  --ease-spring: cubic-bezier(.34, 1.56, .64, 1);  /* a small overshoot for things that pop in */
   --font: "Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   color-scheme: light;
 }
@@ -56,8 +58,9 @@ a { color: var(--brand); }
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   min-height: 48px; padding: 0 20px; border-radius: 14px; border: 1px solid var(--line);
   background: var(--surface); color: var(--ink); font: 600 15px var(--font); cursor: pointer;
-  text-decoration: none; transition: transform .12s, background .2s, box-shadow .2s;
+  text-decoration: none; transition: transform .16s var(--ease-out), background .2s, box-shadow .2s, border-color .2s;
 }
+@media (hover: hover) { .btn:hover { transform: translateY(-1px); } .btn-primary:hover { box-shadow: 0 10px 24px rgba(109, 74, 255, .42); } }
 .btn:active { transform: scale(.97); }
 .btn-primary { background: #6d4aff; border-color: transparent; color: #fff; box-shadow: 0 6px 18px rgba(109, 74, 255, .35); }
 .btn-primary:hover { background: #4b2fd6; }  /* fixed purples: white text needs them in dark mode too */
