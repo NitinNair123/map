@@ -273,6 +273,7 @@ async function showResults(q) {
   }
   if (seq !== searchSeq) return;
   const list = $("#results");
+  list.classList.toggle("opening", list.hidden);
   list.innerHTML = "";
   [...mine, ...found, ...extra].forEach((r, i) => {
     const li = document.createElement("li");

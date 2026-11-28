@@ -298,15 +298,17 @@ body.navigating .topbar, body.navigating .legend { display: none; }
 .sheet { transition: max-height .32s var(--ease-out); }
 .gauge .val { animation: gauge-fill .9s var(--ease-out) both; transition: stroke-dashoffset .6s var(--ease-out); }
 .tab, .modes button, .report-grid button, .groups button, .strip-row, .chip, .icon-btn { transition: transform .16s var(--ease-out), background-color .2s, border-color .2s, color .2s, opacity .2s; }
-.tab:active, .modes button:active, .report-grid button:active, .groups button:active, .chip:active, .icon-btn:active { transform: scale(.95); }
-@media (hover: hover) { .tab:hover, .chip:hover, .icon-btn:hover { transform: translateY(-1px); } }
+/* .swap is centred with its own transform, so it doesn't take part in the press and hover moves */
+.tab:active, .modes button:active, .report-grid button:active, .groups button:active, .chip:active, .icon-btn:not(.swap):active { transform: scale(.95); }
+@media (hover: hover) { .tab:hover, .chip:hover, .icon-btn:not(.swap):hover { transform: translateY(-1px); } }
 .tab[aria-selected="true"] .num { animation: pop .3s var(--ease-spring); }
 .tags li { animation: pop .3s var(--ease-out) both; }
 details.why[open] > :not(summary), .faq details[open] > p { animation: rise .28s var(--ease-out); }
 details.why summary::after { transition: transform .2s var(--ease-out); }
 details.why[open] summary::after { transform: rotate(180deg); }
 details[open] .bar .fill { transform-origin: left; animation: grow-x .6s var(--ease-out) both; }
-.results:not([hidden]) li { animation: rise .24s var(--ease-out) both; }
+/* only when the list opens, not on every keystroke that refills it */
+.results.opening li { animation: rise .24s var(--ease-out) both; }
 .results li:nth-child(2) { animation-delay: .025s; } .results li:nth-child(3) { animation-delay: .05s; }
 .results li:nth-child(4) { animation-delay: .075s; } .results li:nth-child(n+5) { animation-delay: .1s; }
 .results li { transition: background-color .15s; }
@@ -327,12 +329,11 @@ details[open] .bar .fill { transform-origin: left; animation: grow-x .6s var(--e
 @keyframes toast-in { from { opacity: 0; transform: translate(-50%, -10px) scale(.96); } }
 .overlay.dim:not([hidden]):not(#checkin) { animation: fade .22s ease-out; }
 .overlay.dim:not([hidden]):not(#checkin) .modal { animation: pop .3s var(--ease-out); }
-@media (max-width: 600px) { .overlay.dim:not([hidden]) .modal.drawer { animation: slide-up .36s var(--ease-out); } }
+@media (max-width: 600px) { .overlay.dim:not([hidden]):not(#checkin) .modal.drawer { animation: slide-up .36s var(--ease-out); } }
 .steps i { transition: width .3s var(--ease-out), background-color .3s; }
 
-/* trip: the turn banner slides down (readable from its first frame), the progress bar eases */
+/* trip: the turn banner slides down (readable from its first frame), the arrow turns */
 .nav-banner:not([hidden]) { animation: drop .3s var(--ease-out); }
 .nav-arrow svg { transition: transform .35s var(--ease-out); }
-.progress div { transition: width .6s var(--ease-out); }
 .recenter:not([hidden]) { animation: pop .25s var(--ease-spring); }
 .legend:not([hidden]) { animation: rise .25s var(--ease-out); }

@@ -110,7 +110,7 @@
   .hero .wrap > div:first-child > :nth-child(2) { animation-delay: .08s; }
   .hero .wrap > div:first-child > :nth-child(3) { animation-delay: .16s; }
   .hero .wrap > div:first-child > :nth-child(n+4) { animation-delay: .24s; }
-  .hero h1 em { background-size: 200% 100%; background-image: linear-gradient(90deg, var(--brand), #12b76a, var(--brand)); animation: sheen 6s linear infinite; }
+  .hero h1 em { background-size: 200% 100%; background-image: linear-gradient(90deg, var(--brand), #12b76a, var(--brand)); animation: sheen 2.4s .4s var(--ease-out) both; }  /* one sweep, then still: no repainting forever */
   .phone { animation: rise .9s .15s var(--ease-out) both; }
   .mapart .route { stroke-dasharray: 1; animation: draw 1.4s .7s var(--ease-out) both; }
   .mapart .fast { animation: fade .6s 1.9s both; }
@@ -130,6 +130,7 @@
   /* "translate" for the reveal, "transform" for the hover lift, so the two never fight */
   .reveal .rv { opacity: 0; translate: 0 24px; transition: opacity .6s var(--ease-out) calc(var(--i, 0) * 70ms), translate .6s var(--ease-out) calc(var(--i, 0) * 70ms), transform .25s var(--ease-out), box-shadow .25s, border-color .25s; }
   .reveal .rv.in { opacity: 1; translate: none; }
+  @media print { .reveal .rv { opacity: 1; translate: none; } }
   #iosTip { display: none; margin-top: 14px; color: var(--ink-2); font-size: 14px; }
 </style>
 </head>
